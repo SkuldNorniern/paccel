@@ -1,5 +1,3 @@
-# pactis
-Pactis is a lightweight and efficient Rust library for packet parsing
 # Paccel
 
 Paccel is a lightweight and efficient Rust library for packet parsing and processing. Designed with performance in mind, Paccel allows you to work with multiple layers of the network stack while keeping error handling robust and resource usage minimal.
