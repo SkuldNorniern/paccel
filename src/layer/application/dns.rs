@@ -89,12 +89,12 @@ fn parse_domain_name(packet: &[u8], mut pos: usize) -> Result<(String, usize), L
             // Calculate the pointer offset (the pointer occupies two bytes).
             let b2 = packet[pos + 1];
             let pointer_offset = (((len & 0x3F) as usize) << 8) | (b2 as usize);
-            
+
             // Validate pointer offset
             if pointer_offset >= pos {
                 return Err(LayerError::MalformedPacket); // Forward references are invalid
             }
-            
+
             // If this is the first jump, record where to resume reading.
             if !jumped {
                 pointer_end = Some(pos + 2);
@@ -240,7 +240,7 @@ impl ProtocolProcessor<DnsMessage> for DnsProcessor {
         if packet.packet.len() < 12 {
             return false;
         }
-        
+
         // Check QR bit and OPCODE (bits 7-11 of flags)
         // For a typical query/response: flags[0] should be 0x00 or 0x80
         let flags = packet.packet[2];
@@ -277,55 +277,46 @@ mod tests {
 
     /// Helper function to create a valid DNS query packet
     fn create_test_dns_query() -> Packet {
-        let mut packet = vec![
-            0x12, 0x34,             // Transaction ID
-            0x01, 0x00,             // Flags (standard query)
-            0x00, 0x01,             // Questions: 1
-            0x00, 0x00,             // Answer RRs: 0
-            0x00, 0x00,             // Authority RRs: 0
-            0x00, 0x00,             // Additional RRs: 0
+        let packet = vec![
+            0x12, 0x34, // Transaction ID
+            0x01, 0x00, // Flags (standard query)
+            0x00, 0x01, // Questions: 1
+            0x00, 0x00, // Answer RRs: 0
+            0x00, 0x00, // Authority RRs: 0
+            0x00, 0x00, // Additional RRs: 0
             // Question section: "www.example.com" Type A, Class IN
-            0x03, b'w', b'w', b'w',  // First label: "www"
-            0x07, b'e', b'x', b'a', b'm', b'p', b'l', b'e',  // Second label: "example"
-            0x03, b'c', b'o', b'm',  // Third label: "com"
-            0x00,                    // End of name
-            0x00, 0x01,             // Type: A
-            0x00, 0x01,             // Class: IN
+            0x03, b'w', b'w', b'w', // First label: "www"
+            0x07, b'e', b'x', b'a', b'm', b'p', b'l', b'e', // Second label: "example"
+            0x03, b'c', b'o', b'm', // Third label: "com"
+            0x00, // End of name
+            0x00, 0x01, // Type: A
+            0x00, 0x01, // Class: IN
         ];
-        Packet {
-            packet,
-            payload: vec![],
-        }
+        Packet::new(packet)
     }
 
     /// Helper function to create a valid DNS response packet
     fn create_test_dns_response() -> Packet {
-        let mut packet = vec![
-            0x12, 0x34,             // Transaction ID
-            0x81, 0x80,             // Flags (standard response)
-            0x00, 0x01,             // Questions: 1
-            0x00, 0x01,             // Answer RRs: 1
-            0x00, 0x00,             // Authority RRs: 0
-            0x00, 0x00,             // Additional RRs: 0
+        let packet = vec![
+            0x12, 0x34, // Transaction ID
+            0x81, 0x80, // Flags (standard response)
+            0x00, 0x01, // Questions: 1
+            0x00, 0x01, // Answer RRs: 1
+            0x00, 0x00, // Authority RRs: 0
+            0x00, 0x00, // Additional RRs: 0
             // Question section (same as query)
-            0x03, b'w', b'w', b'w',
-            0x07, b'e', b'x', b'a', b'm', b'p', b'l', b'e',
-            0x03, b'c', b'o', b'm',
-            0x00,
-            0x00, 0x01,             // Type: A
-            0x00, 0x01,             // Class: IN
+            0x03, b'w', b'w', b'w', 0x07, b'e', b'x', b'a', b'm', b'p', b'l', b'e', 0x03, b'c',
+            b'o', b'm', 0x00, 0x00, 0x01, // Type: A
+            0x00, 0x01, // Class: IN
             // Answer section
-            0xc0, 0x0c,             // Name pointer to offset 12
-            0x00, 0x01,             // Type: A
-            0x00, 0x01,             // Class: IN
+            0xc0, 0x0c, // Name pointer to offset 12
+            0x00, 0x01, // Type: A
+            0x00, 0x01, // Class: IN
             0x00, 0x00, 0x0e, 0x10, // TTL: 3600
-            0x00, 0x04,             // Data length: 4
-            0xc0, 0xa8, 0x01, 0x01  // IP: 192.168.1.1
+            0x00, 0x04, // Data length: 4
+            0xc0, 0xa8, 0x01, 0x01, // IP: 192.168.1.1
         ];
-        Packet {
-            packet,
-            payload: vec![],
-        }
+        Packet::new(packet)
     }
 
     #[test]
@@ -344,10 +335,7 @@ mod tests {
 
     #[test]
     fn test_can_parse_invalid_length() {
-        let packet = Packet {
-            packet: vec![0; 11],  // Too short for DNS header
-            payload: vec![],
-        };
+        let packet = Packet::new(vec![0; 11]); // Too short for DNS header
         let processor = DnsProcessor;
         assert!(!processor.can_parse(&packet));
     }
@@ -356,7 +344,7 @@ mod tests {
     fn test_can_parse_invalid_opcode() {
         let mut packet = create_test_dns_query();
         // Set invalid opcode in flags
-        packet.packet[2] = 0x78;  // Set bits 3-6 to invalid opcode
+        packet.packet[2] = 0x78; // Set bits 3-6 to invalid opcode
         let processor = DnsProcessor;
         assert!(!processor.can_parse(&packet));
     }
@@ -391,13 +379,13 @@ mod tests {
         let processor = DnsProcessor;
         let result = processor.parse(&mut packet);
         assert!(result.is_ok());
-        
+
         if let Ok(dns_msg) = result {
             assert_eq!(dns_msg.header.transaction_id, 0x1234);
             assert_eq!(dns_msg.header.questions, 1);
             assert_eq!(dns_msg.questions.len(), 1);
             assert_eq!(dns_msg.questions[0].qname, "www.example.com");
-            assert_eq!(dns_msg.questions[0].qtype, 1);  // A record
+            assert_eq!(dns_msg.questions[0].qtype, 1); // A record
             assert_eq!(dns_msg.questions[0].qclass, 1); // IN class
         }
     }
@@ -408,7 +396,7 @@ mod tests {
         let processor = DnsProcessor;
         let result = processor.parse(&mut packet);
         assert!(result.is_ok());
-        
+
         if let Ok(dns_msg) = result {
             assert_eq!(dns_msg.header.transaction_id, 0x1234);
             assert_eq!(dns_msg.header.questions, 1);
@@ -432,7 +420,7 @@ mod tests {
     fn test_parse_invalid_name() {
         let mut packet = create_test_dns_query();
         // Set an invalid label length
-        packet.packet[12] = 64;  // Too long for a single label
+        packet.packet[12] = 64; // Too long for a single label
         let processor = DnsProcessor;
         let result = processor.parse(&mut packet);
         assert!(result.is_err());

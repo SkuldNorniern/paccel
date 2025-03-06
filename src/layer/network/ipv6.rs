@@ -100,7 +100,7 @@ impl ProtocolProcessor<Ipv6Header> for Ipv6Processor {
         if packet.packet.len() < 40 {
             return false;
         }
-        
+
         // Check version (must be 6 for IPv6)
         let version = packet.packet[0] >> 4;
         version == 6
@@ -164,10 +164,7 @@ mod tests {
         // Verify header length is exactly 40 bytes.
         assert_eq!(header_bytes.len(), 40);
 
-        let mut packet = Packet {
-            packet: header_bytes,
-            payload: vec![],
-        };
+        let mut packet = Packet::new(header_bytes);
 
         let processor = Ipv6Processor;
         let result = processor
@@ -202,10 +199,7 @@ mod tests {
         let dst: [u8; 16] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2];
         header_bytes.extend_from_slice(&dst);
 
-        let mut packet = Packet {
-            packet: header_bytes,
-            payload: vec![],
-        };
+        let mut packet = Packet::new(header_bytes);
 
         let processor = Ipv6Processor;
         let result = processor.parse(&mut packet);
@@ -221,10 +215,7 @@ mod tests {
     #[test]
     fn test_short_packet() {
         // A packet with fewer than 40 bytes should return an InvalidHeader error.
-        let mut packet = Packet {
-            packet: vec![0; 30],
-            payload: vec![],
-        };
+        let mut packet = Packet::new(vec![0; 30]);
         let processor = Ipv6Processor;
         let result = processor.parse(&mut packet);
         assert!(result.is_err());
@@ -261,10 +252,7 @@ mod tests {
 
         assert_eq!(header_bytes.len(), 40);
 
-        let mut packet = Packet {
-            packet: header_bytes,
-            payload: vec![],
-        };
+        let mut packet = Packet::new(header_bytes);
         let header = Ipv6Processor
             .parse(&mut packet)
             .expect("IPv6 header with nonzero TC and Flow Label should be parsed successfully");
@@ -301,10 +289,7 @@ mod tests {
     #[test]
     fn test_ipv6_can_parse_valid() {
         let header = create_valid_ipv6_header();
-        let packet = Packet {
-            packet: header,
-            payload: vec![],
-        };
+        let packet = Packet::new(header);
         let processor = Ipv6Processor;
         assert!(processor.can_parse(&packet));
     }
@@ -312,10 +297,7 @@ mod tests {
     #[test]
     fn test_ipv6_can_parse_invalid_short() {
         // Packet length less than the minimum IPv6 fixed header (40 bytes).
-        let packet = Packet {
-            packet: vec![0; 30],
-            payload: vec![],
-        };
+        let packet = Packet::new(vec![0; 30]);
         let processor = Ipv6Processor;
         assert!(!processor.can_parse(&packet));
     }
@@ -325,10 +307,7 @@ mod tests {
         let mut header = create_valid_ipv6_header();
         // Change version in the first nibble (6 -> 4)
         header[0] = (4 << 4) | (header[0] & 0x0F);
-        let packet = Packet {
-            packet: header,
-            payload: vec![],
-        };
+        let packet = Packet::new(header);
         let processor = Ipv6Processor;
         assert!(!processor.can_parse(&packet));
     }
@@ -336,10 +315,7 @@ mod tests {
     #[test]
     fn test_ipv6_is_valid_valid() {
         let header = create_valid_ipv6_header();
-        let packet = Packet {
-            packet: header,
-            payload: vec![],
-        };
+        let packet = Packet::new(header);
         let processor = Ipv6Processor;
         // With a payload_length of 0, the header is valid.
         assert!(processor.is_valid(&packet));
@@ -352,10 +328,7 @@ mod tests {
         header[4] = 0x00;
         header[5] = 0x0A;
         // The header remains 40 bytes while the header indicates 50 bytes total.
-        let packet = Packet {
-            packet: header,
-            payload: vec![],
-        };
+        let packet = Packet::new(header);
         let processor = Ipv6Processor;
         assert!(!processor.is_valid(&packet));
     }

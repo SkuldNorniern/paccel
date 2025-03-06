@@ -170,12 +170,12 @@ impl ProtocolProcessor<ArpPacket> for ArpProcessor {
         if packet.packet.len() < 28 {
             return false;
         }
-        
+
         // Check hardware type (must be 1 for Ethernet)
         // and protocol type (must be 0x0800 for IPv4)
         let hw_type = u16::from_be_bytes([packet.packet[0], packet.packet[1]]);
         let proto_type = u16::from_be_bytes([packet.packet[2], packet.packet[3]]);
-        
+
         hw_type == 1 && proto_type == 0x0800
     }
 
@@ -189,7 +189,7 @@ impl ProtocolProcessor<ArpPacket> for ArpProcessor {
         // and protocol length (must be 4 for IPv4)
         let hw_len = packet.packet[4];
         let proto_len = packet.packet[5];
-        
+
         hw_len == 6 && proto_len == 4
     }
 }
@@ -271,10 +271,7 @@ mod tests {
     #[test]
     fn test_parse_arp_request() {
         let payload = create_sample_arp_request();
-        let mut packet = Packet {
-            packet: payload,
-            payload: vec![],
-        };
+        let mut packet = Packet::new(payload);
         let processor = ArpProcessor;
         let arp_packet = processor
             .parse(&mut packet)
@@ -305,10 +302,7 @@ mod tests {
     #[test]
     fn test_parse_arp_reply() {
         let payload = create_sample_arp_reply();
-        let mut packet = Packet {
-            packet: payload,
-            payload: vec![],
-        };
+        let mut packet = Packet::new(payload);
         let processor = ArpProcessor;
         let arp_packet = processor
             .parse(&mut packet)
@@ -339,10 +333,7 @@ mod tests {
     #[test]
     fn test_invalid_length() {
         // Create a packet that is too short.
-        let mut packet = Packet {
-            packet: vec![0u8; 10],
-            payload: vec![],
-        };
+        let mut packet = Packet::new(vec![0u8; 10]);
         let processor = ArpProcessor;
         let result = processor.parse(&mut packet);
         assert!(result.is_err());
@@ -359,10 +350,7 @@ mod tests {
         // Create a valid ARP request then modify hardware_len to an unsupported value.
         let mut packet = create_sample_arp_request();
         packet[4] = 5; // Invalid: should be 6.
-        let mut pkt = Packet {
-            packet,
-            payload: vec![],
-        };
+        let mut pkt = Packet::new(packet);
         let processor = ArpProcessor;
         let result = processor.parse(&mut pkt);
         assert!(result.is_err());
@@ -377,20 +365,17 @@ mod tests {
     /// Helper function to create a valid ARP packet
     fn create_test_arp_packet() -> Packet {
         let mut packet = vec![
-            0x00, 0x01,             // Hardware type: Ethernet (1)
-            0x08, 0x00,             // Protocol type: IPv4 (0x0800)
-            0x06,                   // Hardware length: 6
-            0x04,                   // Protocol length: 4
-            0x00, 0x01,             // Operation: Request (1)
-            0x11, 0x22, 0x33, 0x44, 0x55, 0x66,  // Sender MAC
-            192, 168, 1, 100,       // Sender IP
-            0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,  // Target MAC
-            192, 168, 1, 1,         // Target IP
+            0x00, 0x01, // Hardware type: Ethernet (1)
+            0x08, 0x00, // Protocol type: IPv4 (0x0800)
+            0x06, // Hardware length: 6
+            0x04, // Protocol length: 4
+            0x00, 0x01, // Operation: Request (1)
+            0x11, 0x22, 0x33, 0x44, 0x55, 0x66, // Sender MAC
+            192, 168, 1, 100, // Sender IP
+            0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, // Target MAC
+            192, 168, 1, 1, // Target IP
         ];
-        Packet {
-            packet,
-            payload: vec![],
-        }
+        Packet::new(packet)
     }
 
     #[test]
@@ -402,10 +387,7 @@ mod tests {
 
     #[test]
     fn test_can_parse_invalid_length() {
-        let packet = Packet {
-            packet: vec![0; 27],  // Too short for ARP
-            payload: vec![],
-        };
+        let packet = Packet::new(vec![0; 27]); // Too short for ARP
         let processor = ArpProcessor;
         assert!(!processor.can_parse(&packet));
     }
@@ -460,11 +442,11 @@ mod tests {
         let processor = ArpProcessor;
         let result = processor.parse(&mut packet);
         assert!(result.is_ok());
-        
+
         if let Ok(arp_packet) = result {
             assert_eq!(arp_packet.operation, ArpOperation::Request);
             assert_eq!(
-                arp_packet.sender_hardware_addr, 
+                arp_packet.sender_hardware_addr,
                 [0x11, 0x22, 0x33, 0x44, 0x55, 0x66]
             );
             assert_eq!(
@@ -490,7 +472,7 @@ mod tests {
         let processor = ArpProcessor;
         let result = processor.parse(&mut packet);
         assert!(result.is_ok());
-        
+
         if let Ok(arp_packet) = result {
             assert_eq!(arp_packet.operation, ArpOperation::Reply);
         }
@@ -504,7 +486,7 @@ mod tests {
         let processor = ArpProcessor;
         let result = processor.parse(&mut packet);
         assert!(result.is_ok());
-        
+
         if let Ok(arp_packet) = result {
             assert!(matches!(arp_packet.operation, ArpOperation::Unknown(x) if x == 5));
         }
