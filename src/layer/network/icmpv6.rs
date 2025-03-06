@@ -24,6 +24,7 @@ use crate::packet::Packet;
 ///               pseudo header (from the IPv6 layer) and the ICMPv6 message.
 ///
 /// For more details, see [ICMPv6 on Wikipedia](https://en.wikipedia.org/wiki/ICMPv6).
+#[derive(Debug, Default)]
 pub struct Icmpv6Header {
     pub icmp_type: u8,
     pub icmp_code: u8,
@@ -76,7 +77,7 @@ impl ProtocolProcessor<Icmpv6Header> for Icmpv6Processor {
         if packet.packet.len() < 8 {
             return false;
         }
-        
+
         // ICMPv6 types are more numerous than ICMPv4
         // Common types include 1-4 (error messages), 128-129 (echo), 133-137 (NDP)
         let icmp_type = packet.packet[0];
@@ -91,7 +92,7 @@ impl ProtocolProcessor<Icmpv6Header> for Icmpv6Processor {
         // Note: ICMPv6 checksum validation requires IPv6 pseudo-header
         // This is a simplified check that just verifies length and type
         let icmp_type = packet.packet[0];
-        
+
         // Check if type is valid (common types: 1-4, 128-129, 133-137)
         matches!(icmp_type, 1..=4 | 128..=129 | 133..=137)
     }
@@ -187,10 +188,7 @@ mod tests {
         let src = Ipv6Addr::LOCALHOST; // ::1
         let dst = Ipv6Addr::LOCALHOST; // ::1
         let payload = create_valid_icmpv6_payload(&src, &dst);
-        let mut packet = Packet {
-            packet: payload,
-            payload: vec![],
-        };
+        let mut packet = Packet::new(payload);
         // Create the processor with the given source and destination addresses.
         let processor = Icmpv6Processor { src, dst };
         let header = processor
@@ -209,10 +207,7 @@ mod tests {
         let mut payload = create_valid_icmpv6_payload(&src, &dst);
         // Tamper with the payload so the checksum becomes invalid (e.g., change the code).
         payload[1] = 1;
-        let mut packet = Packet {
-            packet: payload,
-            payload: vec![],
-        };
+        let mut packet = Packet::new(payload);
         let processor = Icmpv6Processor { src, dst };
         let result = processor.parse(&mut packet);
         assert!(result.is_err());
@@ -230,10 +225,7 @@ mod tests {
         let dst = Ipv6Addr::LOCALHOST;
         // Create a payload that is too short (less than 8 bytes).
         let payload = vec![128, 0, 0];
-        let mut packet = Packet {
-            packet: payload,
-            payload: vec![],
-        };
+        let mut packet = Packet::new(payload);
         let processor = Icmpv6Processor { src, dst };
         let result = processor.parse(&mut packet);
         assert!(result.is_err());
@@ -261,10 +253,7 @@ mod tests {
         payload[3] = (chk & 0xff) as u8;
         assert_eq!(compute_icmpv6_checksum(&payload, &src, &dst), 0);
 
-        let mut packet = Packet {
-            packet: payload,
-            payload: vec![],
-        };
+        let mut packet = Packet::new(payload);
         let processor = Icmpv6Processor { src, dst };
         let header = processor
             .parse(&mut packet)
@@ -285,10 +274,7 @@ mod tests {
         payload[3] = (chk & 0xff) as u8;
         assert_eq!(compute_icmpv6_checksum(&payload, &src, &dst), 0);
 
-        let mut packet = Packet {
-            packet: payload,
-            payload: vec![],
-        };
+        let mut packet = Packet::new(payload);
         let processor = Icmpv6Processor { src, dst };
         let header = processor
             .parse(&mut packet)
