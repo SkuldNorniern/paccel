@@ -4,13 +4,13 @@ use crate::layer::capture::CaptureInfo;
 use crate::packet::Packet;
 
 pub mod application; // Layer 7
+mod capture;
 pub mod datalink; // Layer 2 - Ethernet frames
 pub mod network; // Layer 3 - IP (v4/v6)
 pub mod physical; // Layer 1
 pub mod presentation; // Layer 6
 pub mod session; // Layer 5
 pub mod transport; // Layer 4 - TCP/UDP
-mod capture;
 
 // use application::Application
 use application::ApplicationProcessor;
@@ -100,33 +100,45 @@ pub struct ParsedLayers {
 pub fn parse_layers(packet: &mut Packet) -> Result<ParsedLayers, LayerError> {
     // Create a new ParsedLayers struct to store our results
     let mut parsed = ParsedLayers::default();
-    
-    println!("Starting to parse packet of length: {}", packet.packet.len());
-    
+
+    println!(
+        "Starting to parse packet of length: {}",
+        packet.packet.len()
+    );
+
     // Detect capture format first
     let capture_info = CaptureInfo::detect(&packet.packet).map_err(|e| {
         println!("Failed to detect capture format: {:?}", e);
         LayerError::MalformedPacket
     })?;
     packet.network_offset = capture_info.network_offset;
-    println!("Detected capture format with network offset: {}", capture_info.network_offset);
-    
+    println!(
+        "Detected capture format with network offset: {}",
+        capture_info.network_offset
+    );
+
     // Process datalink layer
     println!("Processing datalink layer...");
     process_datalink_layer(packet, &mut parsed);
-    
+
     // Process network layer if we have a valid network layer
     if packet.network_offset < packet.packet.len() {
-        println!("Processing network layer at offset: {}", packet.network_offset);
+        println!(
+            "Processing network layer at offset: {}",
+            packet.network_offset
+        );
         if let Err(e) = process_network_layer(packet, &mut parsed) {
             println!("Network layer processing error: {:?}, continuing anyway", e);
         } else {
             println!("Network layer processed successfully");
         }
     } else {
-        println!("Skipping network layer - invalid offset: {}", packet.network_offset);
+        println!(
+            "Skipping network layer - invalid offset: {}",
+            packet.network_offset
+        );
     }
-    
+
     // Process transport layer
     println!("Processing transport layer...");
     process_transport_layer(packet, &mut parsed)?;
@@ -135,7 +147,7 @@ pub fn parse_layers(packet: &mut Packet) -> Result<ParsedLayers, LayerError> {
     } else {
         println!("Transport layer processing completed without data");
     }
-    
+
     // Process application layer
     println!("Processing application layer...");
     process_application_layer(packet, &mut parsed)?;
@@ -144,7 +156,7 @@ pub fn parse_layers(packet: &mut Packet) -> Result<ParsedLayers, LayerError> {
     } else {
         println!("Application layer processing completed without data");
     }
-    
+
     println!("Packet parsing completed");
     Ok(parsed)
 }
@@ -154,7 +166,7 @@ fn process_datalink_layer(packet: &mut Packet, parsed: &mut ParsedLayers) {
     println!("Using DatalinkProcessor to process packet");
     match datalink_processor.process(packet) {
         Ok(_) => println!("Datalink layer processed successfully"),
-        Err(e) => println!("Error in datalink processing: {:?}, continuing anyway", e)
+        Err(e) => println!("Error in datalink processing: {:?}, continuing anyway", e),
     }
 }
 
@@ -163,26 +175,31 @@ fn process_network_layer(packet: &mut Packet, parsed: &mut ParsedLayers) -> Resu
     if packet.network_offset >= packet.packet.len() {
         return Err(LayerError::InvalidLength);
     }
-    
+
     // Set the payload to start at the network offset - convert slice to Vec<u8>
     packet.payload = packet.packet[packet.network_offset..].to_vec();
-    
+
     let network_processor = NetworkProcessor;
-    println!("Using NetworkProcessor to process packet starting at offset: {}", packet.network_offset);
+    println!(
+        "Using NetworkProcessor to process packet starting at offset: {}",
+        packet.network_offset
+    );
     println!("Network payload length: {}", packet.payload.len());
-    
+
     // First try to parse as IPv4
     let ipv4_processor = network::ipv4::Ipv4Processor;
     if ipv4_processor.can_parse(packet) {
         match ipv4_processor.parse(packet) {
             Ok(ipv4_header) => {
-                println!("Successfully parsed IPv4 header: source={}, dest={}, proto={}", 
-                         ipv4_header.source, ipv4_header.destination, ipv4_header.protocol);
+                println!(
+                    "Successfully parsed IPv4 header: source={}, dest={}, proto={}",
+                    ipv4_header.source, ipv4_header.destination, ipv4_header.protocol
+                );
                 // Update packet payload to the IPv4 payload for next layers
                 packet.payload = ipv4_header.payload.clone();
                 // Save the IPv4 header in our parsed results
                 parsed.network_ipv4 = Some(ipv4_header);
-                
+
                 return Ok(());
             }
             Err(e) => {
@@ -190,7 +207,7 @@ fn process_network_layer(packet: &mut Packet, parsed: &mut ParsedLayers) -> Resu
             }
         }
     }
-    
+
     // If not IPv4, try the generic processor
     let result = network_processor.process(packet);
     if let Err(ref e) = result {
@@ -199,10 +216,13 @@ fn process_network_layer(packet: &mut Packet, parsed: &mut ParsedLayers) -> Resu
     result
 }
 
-fn process_transport_layer(packet: &mut Packet, parsed: &mut ParsedLayers) -> Result<(), LayerError> {
+fn process_transport_layer(
+    packet: &mut Packet,
+    parsed: &mut ParsedLayers,
+) -> Result<(), LayerError> {
     let transport_processor = TransportProcessor;
     println!("Using TransportProcessor to process packet");
-    
+
     // Use process_with_info to get the transport info
     match transport_processor.process_with_info(packet) {
         Ok(transport_info) => {
@@ -218,7 +238,10 @@ fn process_transport_layer(packet: &mut Packet, parsed: &mut ParsedLayers) -> Re
     }
 }
 
-fn process_application_layer(packet: &mut Packet, parsed: &mut ParsedLayers) -> Result<(), LayerError> {
+fn process_application_layer(
+    packet: &mut Packet,
+    parsed: &mut ParsedLayers,
+) -> Result<(), LayerError> {
     // Process application protocols based on ports from transport layer
     if let Some(transport_info) = &parsed.transport {
         println!("Transport info available, processing application layer");
@@ -235,6 +258,6 @@ fn process_application_layer(packet: &mut Packet, parsed: &mut ParsedLayers) -> 
     } else {
         println!("No transport info available, skipping application layer");
     }
-    
+
     Ok(())
 }
