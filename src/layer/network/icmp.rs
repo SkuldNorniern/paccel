@@ -18,6 +18,8 @@ use crate::packet::Packet;
 /// - `icmp_type`: Specifies the type of the ICMP message.
 /// - `icmp_code`: Provides additional context for the ICMP type.
 /// - `checksum`: 16-bit checksum computed over the entire ICMP message.
+
+#[derive(Debug, Default)]
 pub struct IcmpHeader {
     pub icmp_type: u8,
     pub icmp_code: u8,
@@ -69,7 +71,7 @@ impl ProtocolProcessor<IcmpHeader> for IcmpProcessor {
         if packet.packet.len() < 8 {
             return false;
         }
-        
+
         // Check ICMP type (0-18 are the most common valid types)
         let icmp_type = packet.packet[0];
         icmp_type <= 18
@@ -159,10 +161,7 @@ mod tests {
     #[test]
     fn test_valid_icmp() {
         let payload = create_valid_icmp_payload();
-        let mut packet = Packet {
-            packet: payload,
-            payload: vec![],
-        };
+        let mut packet = Packet::new(payload);
         let processor = IcmpProcessor;
         let icmp_header = processor
             .parse(&mut packet)
@@ -180,10 +179,7 @@ mod tests {
         let mut payload = create_valid_icmp_payload();
         // Tamper with the payload so that the checksum becomes invalid.
         payload[1] = 1; // Change the ICMP code.
-        let mut packet = Packet {
-            packet: payload,
-            payload: vec![],
-        };
+        let mut packet = Packet::new(payload);
         let processor = IcmpProcessor;
         let result = processor.parse(&mut packet);
         assert!(result.is_err());
@@ -199,10 +195,7 @@ mod tests {
     fn test_short_packet() {
         // Create a payload that is too short (less than 8 bytes).
         let payload = vec![8, 0, 0]; // Only 3 bytes.
-        let mut packet = Packet {
-            packet: payload,
-            payload: vec![],
-        };
+        let mut packet = Packet::new(payload);
         let processor = IcmpProcessor;
         let result = processor.parse(&mut packet);
         assert!(result.is_err());
@@ -229,10 +222,7 @@ mod tests {
         // Verify that the checksum now evaluates to 0.
         assert_eq!(compute_checksum(&payload), 0);
 
-        let mut packet = Packet {
-            packet: payload,
-            payload: vec![],
-        };
+        let mut packet = Packet::new(payload);
         let processor = IcmpProcessor;
         let header = processor
             .parse(&mut packet)
