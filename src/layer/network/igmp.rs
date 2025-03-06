@@ -303,7 +303,7 @@ impl ProtocolProcessor<IgmpMessage> for IgmpProcessor {
         if packet.packet.len() < 8 {
             return false;
         }
-        
+
         // Check IGMP type (common types: 0x11, 0x12, 0x16, 0x17, 0x22)
         let igmp_type = packet.packet[0];
         matches!(igmp_type, 0x11 | 0x12 | 0x16 | 0x17 | 0x22)
@@ -486,10 +486,7 @@ mod tests {
     fn test_parse_igmp_query_v1v2() {
         let group_addr = Ipv4Addr::new(224, 0, 0, 1);
         let payload = create_igmp_query_v1v2_payload(10, group_addr, 0x11);
-        let mut packet = Packet {
-            packet: payload,
-            payload: vec![],
-        };
+        let mut packet = Packet::new(payload);
         let processor = IgmpProcessor;
         let msg = processor
             .parse(&mut packet)
@@ -518,10 +515,7 @@ mod tests {
         ];
         let payload =
             create_igmp_query_v3_payload(20, group_addr, true, 3, 100, source_addrs.clone());
-        let mut packet = Packet {
-            packet: payload,
-            payload: vec![],
-        };
+        let mut packet = Packet::new(payload);
         let processor = IgmpProcessor;
         let msg = processor
             .parse(&mut packet)
@@ -555,10 +549,7 @@ mod tests {
     fn test_parse_igmp_report_v1() {
         let group_addr = Ipv4Addr::new(224, 0, 0, 1);
         let payload = create_igmp_report_v1_payload(group_addr);
-        let mut packet = Packet {
-            packet: payload,
-            payload: vec![],
-        };
+        let mut packet = Packet::new(payload);
         let processor = IgmpProcessor;
         let msg = processor
             .parse(&mut packet)
@@ -580,10 +571,7 @@ mod tests {
     fn test_parse_igmp_report_v2() {
         let group_addr = Ipv4Addr::new(224, 0, 0, 1);
         let payload = create_igmp_report_v2_payload(group_addr);
-        let mut packet = Packet {
-            packet: payload,
-            payload: vec![],
-        };
+        let mut packet = Packet::new(payload);
         let processor = IgmpProcessor;
         let msg = processor
             .parse(&mut packet)
@@ -605,10 +593,7 @@ mod tests {
     fn test_parse_igmp_leave_group() {
         let group_addr = Ipv4Addr::new(224, 0, 0, 2);
         let payload = create_igmp_leave_group_payload(group_addr);
-        let mut packet = Packet {
-            packet: payload,
-            payload: vec![],
-        };
+        let mut packet = Packet::new(payload);
         let processor = IgmpProcessor;
         let msg = processor
             .parse(&mut packet)
@@ -638,10 +623,7 @@ mod tests {
             aux_data: vec![],
         };
         let payload = create_igmp_report_v3_payload(record);
-        let mut packet = Packet {
-            packet: payload,
-            payload: vec![],
-        };
+        let mut packet = Packet::new(payload);
         let processor = IgmpProcessor;
         let msg = processor
             .parse(&mut packet)
@@ -672,10 +654,7 @@ mod tests {
         // Create a valid IGMP v1/v2 Query payload (8 bytes) using the helper.
         let group_addr = Ipv4Addr::new(224, 0, 0, 1);
         let payload = create_igmp_query_v1v2_payload(10, group_addr, 0x11);
-        let packet = Packet {
-            packet: payload,
-            payload: vec![],
-        };
+        let packet = Packet::new(payload);
         let processor = IgmpProcessor;
         assert!(processor.can_parse(&packet));
     }
@@ -683,10 +662,7 @@ mod tests {
     #[test]
     fn test_igmp_can_parse_invalid_short() {
         // Provide a packet that is too short to be an IGMP message.
-        let packet = Packet {
-            packet: vec![0x11, 0x00, 0x00], // Only 3 bytes.
-            payload: vec![],
-        };
+        let packet = Packet::new(vec![0x11, 0x00, 0x00]); // Only 3 bytes.
         let processor = IgmpProcessor;
         assert!(!processor.can_parse(&packet));
     }
@@ -696,10 +672,7 @@ mod tests {
         // Create a valid packet then change the IGMP type to an unsupported value.
         let mut payload = create_igmp_query_v1v2_payload(10, Ipv4Addr::new(224, 0, 0, 1), 0x11);
         payload[0] = 0x99; // Change type to an unsupported value.
-        let packet = Packet {
-            packet: payload,
-            payload: vec![],
-        };
+        let packet = Packet::new(payload);
         let processor = IgmpProcessor;
         assert!(!processor.can_parse(&packet));
     }
@@ -709,10 +682,7 @@ mod tests {
         // Use the helper to create a valid IGMP query (checksum computed correctly).
         let group_addr = Ipv4Addr::new(224, 0, 0, 1);
         let payload = create_igmp_query_v1v2_payload(10, group_addr, 0x11);
-        let packet = Packet {
-            packet: payload,
-            payload: vec![],
-        };
+        let packet = Packet::new(payload);
         let processor = IgmpProcessor;
         assert!(processor.is_valid(&packet));
     }
@@ -724,10 +694,7 @@ mod tests {
         let mut payload = create_igmp_query_v1v2_payload(10, group_addr, 0x11);
         // Alter one byte (e.g., in the group address) so that the checksum calculation fails.
         payload[7] ^= 0xFF;
-        let packet = Packet {
-            packet: payload,
-            payload: vec![],
-        };
+        let packet = Packet::new(payload);
         let processor = IgmpProcessor;
         assert!(!processor.is_valid(&packet));
     }
