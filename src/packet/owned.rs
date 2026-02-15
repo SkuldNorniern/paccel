@@ -1,7 +1,5 @@
 use std::fmt;
 
-use super::metadata::PacketMetadata;
-
 #[derive(Debug)]
 pub enum PacketError {
     InvalidHeader,
@@ -17,7 +15,6 @@ pub struct Packet {
     pub packet: Vec<u8>,
     pub payload: Vec<u8>,
     pub network_offset: usize,
-    pub metadata: PacketMetadata,
 }
 
 impl Packet {
@@ -26,7 +23,6 @@ impl Packet {
             packet,
             payload: Vec::new(),
             network_offset: 0,
-            metadata: PacketMetadata::default(),
         }
     }
 }
