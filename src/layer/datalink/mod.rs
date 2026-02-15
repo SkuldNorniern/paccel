@@ -7,8 +7,8 @@ pub mod arp;
 use arp::ArpProcessor;
 
 use super::{LayerProcessor, ProtocolProcessor};
-use crate::packet::Packet;
 use crate::LayerError;
+use crate::packet::Packet;
 
 pub struct DatalinkProcessor;
 
