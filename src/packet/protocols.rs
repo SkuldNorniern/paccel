@@ -5,6 +5,9 @@ pub struct EthernetPacket<'a> {
     data: &'a [u8],
     ethertype: u16,
     payload_offset: usize,
+    vlan_depth: u8,
+    outer_vlan_tag: Option<u16>,
+    inner_vlan_tag: Option<u16>,
 }
 
 impl<'a> EthernetPacket<'a> {
@@ -16,10 +19,20 @@ impl<'a> EthernetPacket<'a> {
         let mut offset = 12usize;
         let mut ethertype = u16::from_be_bytes([data[offset], data[offset + 1]]);
         offset += 2;
+        let mut vlan_depth = 0u8;
+        let mut outer_vlan_tag = None;
+        let mut inner_vlan_tag = None;
 
         while ethertype == 0x8100 || ethertype == 0x88A8 {
             if data.len() < offset + 4 {
                 return None;
+            }
+            let tci = u16::from_be_bytes([data[offset], data[offset + 1]]);
+            vlan_depth = vlan_depth.saturating_add(1);
+            if outer_vlan_tag.is_none() {
+                outer_vlan_tag = Some(tci);
+            } else if inner_vlan_tag.is_none() {
+                inner_vlan_tag = Some(tci);
             }
             ethertype = u16::from_be_bytes([data[offset + 2], data[offset + 3]]);
             offset += 4;
@@ -29,6 +42,9 @@ impl<'a> EthernetPacket<'a> {
             data,
             ethertype,
             payload_offset: offset,
+            vlan_depth,
+            outer_vlan_tag,
+            inner_vlan_tag,
         })
     }
 
@@ -46,6 +62,22 @@ impl<'a> EthernetPacket<'a> {
 
     pub fn ethertype(&self) -> u16 {
         self.ethertype
+    }
+
+    pub fn has_vlan(&self) -> bool {
+        self.vlan_depth > 0
+    }
+
+    pub fn vlan_depth(&self) -> u8 {
+        self.vlan_depth
+    }
+
+    pub fn outer_vlan_tag(&self) -> Option<u16> {
+        self.outer_vlan_tag
+    }
+
+    pub fn inner_vlan_tag(&self) -> Option<u16> {
+        self.inner_vlan_tag
     }
 
     pub fn payload(&self) -> &'a [u8] {
@@ -295,10 +327,71 @@ impl<'a> TcpPacket<'a> {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct IcmpPacket<'a> {
+    data: &'a [u8],
+}
+
+impl<'a> IcmpPacket<'a> {
+    pub fn new(data: &'a [u8]) -> Option<Self> {
+        if data.len() < 4 {
+            return None;
+        }
+        Some(Self { data })
+    }
+
+    pub fn icmp_type(&self) -> u8 {
+        self.data[0]
+    }
+
+    pub fn code(&self) -> u8 {
+        self.data[1]
+    }
+
+    pub fn checksum(&self) -> u16 {
+        u16::from_be_bytes([self.data[2], self.data[3]])
+    }
+
+    pub fn payload(&self) -> &'a [u8] {
+        &self.data[4..]
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Icmpv6Packet<'a> {
+    data: &'a [u8],
+}
+
+impl<'a> Icmpv6Packet<'a> {
+    pub fn new(data: &'a [u8]) -> Option<Self> {
+        if data.len() < 4 {
+            return None;
+        }
+        Some(Self { data })
+    }
+
+    pub fn icmp_type(&self) -> u8 {
+        self.data[0]
+    }
+
+    pub fn code(&self) -> u8 {
+        self.data[1]
+    }
+
+    pub fn checksum(&self) -> u16 {
+        u16::from_be_bytes([self.data[2], self.data[3]])
+    }
+
+    pub fn payload(&self) -> &'a [u8] {
+        &self.data[4..]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        ArpPacket, DnsPacket, EthernetPacket, Ipv4Packet, Ipv6Packet, TcpPacket, UdpPacket,
+        ArpPacket, DnsPacket, EthernetPacket, IcmpPacket, Icmpv6Packet, Ipv4Packet, Ipv6Packet,
+        TcpPacket, UdpPacket,
     };
 
     #[test]
@@ -312,6 +405,7 @@ mod tests {
 
         let eth = EthernetPacket::new(&frame).expect("ethernet should parse");
         assert_eq!(eth.ethertype(), 0x0800);
+        assert!(!eth.has_vlan());
 
         let ip = Ipv4Packet::new(eth.payload()).expect("ipv4 should parse");
         assert_eq!(ip.protocol(), 17);
@@ -319,6 +413,22 @@ mod tests {
         let udp = UdpPacket::new(ip.payload()).expect("udp should parse");
         assert_eq!(udp.source_port(), 1234);
         assert_eq!(udp.destination_port(), 5678);
+    }
+
+    #[test]
+    fn ethernet_vlan_helpers_work() {
+        let frame = [
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0x81, 0x00, // vlan ethertype
+            0x00, 0x64, // vlan tag
+            0x08, 0x00, // inner ethertype
+            0x45, 0x00, 0x00, 0x14, 0, 0, 0, 0, 64, 17, 0, 0, 10, 0, 0, 1, 10, 0, 0, 2,
+        ];
+
+        let eth = EthernetPacket::new(&frame).expect("ethernet should parse");
+        assert!(eth.has_vlan());
+        assert_eq!(eth.vlan_depth(), 1);
+        assert_eq!(eth.outer_vlan_tag(), Some(0x0064));
+        assert_eq!(eth.inner_vlan_tag(), None);
     }
 
     #[test]
@@ -373,5 +483,22 @@ mod tests {
         assert_eq!(pkt.question_count(), 1);
         assert_eq!(pkt.answer_count(), 2);
         assert_eq!(pkt.additional_count(), 1);
+    }
+
+    #[test]
+    fn icmp_views_work() {
+        let icmp = [8, 0, 0x12, 0x34, 1, 2, 3, 4];
+        let pkt = IcmpPacket::new(&icmp).expect("icmp should parse");
+        assert_eq!(pkt.icmp_type(), 8);
+        assert_eq!(pkt.code(), 0);
+        assert_eq!(pkt.checksum(), 0x1234);
+        assert_eq!(pkt.payload(), &[1, 2, 3, 4]);
+
+        let icmp6 = [128, 0, 0xab, 0xcd, 9, 8, 7, 6];
+        let pkt6 = Icmpv6Packet::new(&icmp6).expect("icmpv6 should parse");
+        assert_eq!(pkt6.icmp_type(), 128);
+        assert_eq!(pkt6.code(), 0);
+        assert_eq!(pkt6.checksum(), 0xabcd);
+        assert_eq!(pkt6.payload(), &[9, 8, 7, 6]);
     }
 }
