@@ -31,6 +31,7 @@ pub struct ParsedPacket {
     pub ipv6: Option<Ipv6Header>,
     pub transport: Option<TransportSegment>,
     pub dns: Option<DnsMessage>,
+    pub warnings: Vec<String>,
 }
 
 pub struct BuiltinPacketParser;
@@ -84,16 +85,23 @@ impl BuiltinPacketParser {
                 }
 
                 let ipv6_payload = &l3_bytes[..l4_end];
-                let (next_header, l4_offset) =
+                let (next_header, l4_offset, non_initial_fragment) =
                     resolve_ipv6_transport(ipv6_payload, ipv6.next_header)?;
                 if l4_offset > ipv6_payload.len() {
                     return Err(LayerError::InvalidLength);
                 }
 
-                let l4_bytes = &ipv6_payload[l4_offset..];
-                let (transport, dns) = parse_transport(next_header, l4_bytes)?;
-                parsed.transport = transport;
-                parsed.dns = dns;
+                if non_initial_fragment {
+                    parsed.warnings.push(
+                        "IPv6 non-initial fragment encountered; skipping L4/L7 parse without reassembly"
+                            .to_string(),
+                    );
+                } else {
+                    let l4_bytes = &ipv6_payload[l4_offset..];
+                    let (transport, dns) = parse_transport(next_header, l4_bytes)?;
+                    parsed.transport = transport;
+                    parsed.dns = dns;
+                }
                 parsed.ipv6 = Some(ipv6);
                 Ok(parsed)
             }
@@ -128,8 +136,12 @@ fn parse_transport(
                 let udp_len = udp.length as usize;
                 if udp_len >= 8 && udp_len <= l4_bytes.len() {
                     let app = &l4_bytes[8..udp_len];
-                    let mut dns_packet = Packet::new(app.to_vec());
-                    DnsProcessor.parse(&mut dns_packet).ok()
+                    if likely_dns_message(app) {
+                        let mut dns_packet = Packet::new(app.to_vec());
+                        DnsProcessor.parse(&mut dns_packet).ok()
+                    } else {
+                        None
+                    }
                 } else {
                     None
                 }
@@ -146,7 +158,8 @@ fn parse_transport(
 fn resolve_ipv6_transport(
     packet: &[u8],
     initial_next_header: u8,
-) -> Result<(u8, usize), LayerError> {
+) -> Result<(u8, usize, bool), LayerError> {
+    let mut non_initial_fragment = false;
     let mut next_header = initial_next_header;
     let mut offset = 40usize;
 
@@ -180,7 +193,8 @@ fn resolve_ipv6_transport(
                 offset += 8;
 
                 if frag_offset != 0 {
-                    return Ok((next_header, offset));
+                    non_initial_fragment = true;
+                    return Ok((next_header, offset, non_initial_fragment));
                 }
             }
             51 => {
@@ -198,10 +212,28 @@ fn resolve_ipv6_transport(
                 next_header = ext_next;
                 offset += header_len;
             }
-            50 | 59 => return Ok((next_header, offset)),
-            _ => return Ok((next_header, offset)),
+            50 | 59 => return Ok((next_header, offset, non_initial_fragment)),
+            _ => return Ok((next_header, offset, non_initial_fragment)),
         }
     }
+}
+
+fn likely_dns_message(payload: &[u8]) -> bool {
+    if payload.len() < 12 {
+        return false;
+    }
+
+    let opcode = (payload[2] >> 3) & 0x0f;
+    if opcode > 5 {
+        return false;
+    }
+
+    let qdcount = u16::from_be_bytes([payload[4], payload[5]]);
+    let ancount = u16::from_be_bytes([payload[6], payload[7]]);
+    let nscount = u16::from_be_bytes([payload[8], payload[9]]);
+    let arcount = u16::from_be_bytes([payload[10], payload[11]]);
+
+    qdcount != 0 || ancount != 0 || nscount != 0 || arcount != 0
 }
 
 fn parse_ethernet(raw: &[u8]) -> Result<(EthernetFrame, usize), LayerError> {
@@ -297,5 +329,30 @@ mod tests {
         assert!(parsed.ipv4.is_some());
         assert!(matches!(parsed.transport, Some(TransportSegment::Udp(_))));
         assert!(parsed.dns.is_some());
+    }
+
+    #[test]
+    fn skips_l4_on_ipv6_non_initial_fragment() {
+        let frame = vec![
+            0, 1, 2, 3, 4, 5, // dst mac
+            6, 7, 8, 9, 10, 11, // src mac
+            0x86, 0xdd, // ethertype ipv6
+            0x60, 0x00, 0x00, 0x00, // version/tc/flow label
+            0x00, 0x10, // payload len 16
+            44, 64, // next header = fragment, hop limit
+            // src
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, // dst
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, // fragment header (8 bytes)
+            17, 0, // next header UDP, reserved
+            0x00, 0x09, // frag offset non-zero (1<<3) + M flag
+            0x12, 0x34, 0x56, 0x78, // identification
+            // partial udp bytes (not enough)
+            0x00, 0x35, 0x30, 0x39, 0x00, 0x10, 0x00, 0x00,
+        ];
+
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+        assert!(parsed.ipv6.is_some());
+        assert!(parsed.transport.is_none());
+        assert_eq!(parsed.warnings.len(), 1);
     }
 }
