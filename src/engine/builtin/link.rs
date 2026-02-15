@@ -4,6 +4,51 @@ use crate::layer::LayerError;
 
 use super::types::EthernetFrame;
 
+const SLL_HEADER_LEN: usize = 16;
+const SLL2_HEADER_LEN: usize = 20;
+
+fn looks_like_sll(raw: &[u8]) -> bool {
+    raw.len() >= SLL_HEADER_LEN
+        && raw[0] == 0
+        && raw[1] <= 4
+        && raw[4] == 0
+        && raw[5] == 6
+}
+
+fn looks_like_sll2(raw: &[u8]) -> bool {
+    if raw.len() < SLL2_HEADER_LEN {
+        return false;
+    }
+    let protocol = u16::from_be_bytes([raw[0], raw[1]]);
+    matches!(protocol, 0x0800 | 0x0806 | 0x86DD)
+}
+
+pub(super) fn parse_link(raw: &[u8]) -> Result<(EthernetFrame, usize), LayerError> {
+    if looks_like_sll(raw) {
+        let protocol = u16::from_be_bytes([raw[14], raw[15]]);
+        let frame = EthernetFrame {
+            destination: [0u8; 6],
+            source: [0u8; 6],
+            ethertype: protocol,
+            vlan_tags: Vec::new(),
+            payload_offset: SLL_HEADER_LEN,
+        };
+        return Ok((frame, SLL_HEADER_LEN));
+    }
+    if looks_like_sll2(raw) {
+        let protocol = u16::from_be_bytes([raw[0], raw[1]]);
+        let frame = EthernetFrame {
+            destination: [0u8; 6],
+            source: [0u8; 6],
+            ethertype: protocol,
+            vlan_tags: Vec::new(),
+            payload_offset: SLL2_HEADER_LEN,
+        };
+        return Ok((frame, SLL2_HEADER_LEN));
+    }
+    parse_ethernet(raw)
+}
+
 pub(super) fn parse_ethernet(raw: &[u8]) -> Result<(EthernetFrame, usize), LayerError> {
     if raw.len() < 14 {
         return Err(LayerError::InvalidLength);

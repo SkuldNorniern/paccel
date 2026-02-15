@@ -30,9 +30,6 @@ pub(super) fn parse_ipv4_header(data: &[u8]) -> Result<Ipv4Header, LayerError> {
     let dscp = data[1] >> 2;
     let ecn = data[1] & 0x03;
     let total_length = u16::from_be_bytes([data[2], data[3]]);
-    if data.len() < total_length as usize {
-        return Err(LayerError::InvalidLength);
-    }
 
     let identification = u16::from_be_bytes([data[4], data[5]]);
     let flags_fragment = u16::from_be_bytes([data[6], data[7]]);

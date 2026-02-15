@@ -148,3 +148,90 @@ fn detects_mdns_udp_probe() {
     assert!(parsed.udp_hints.contains(&UdpAppHint::Mdns));
     assert!(parsed.dns.is_some());
 }
+
+#[test]
+fn parses_sll_ipv4_udp() {
+    let mut frame = vec![
+        0x00, 0x00, 0x00, 0x01, 0x00, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x08, 0x00, // SLL header, protocol IPv4
+    ];
+    frame.extend_from_slice(&[
+        0x45, 0x00, 0x00, 0x1c, 0x00, 0x01, 0x40, 0x00, 64, 17, 0, 0, 10, 0, 0, 1, 10, 0, 0, 2,
+    ]);
+    frame.extend_from_slice(&[0x04, 0xd2, 0x00, 0x35, 0x00, 0x08, 0x00, 0x00]);
+
+    let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+    assert!(parsed.ethernet.is_some());
+    assert_eq!(parsed.ethernet.as_ref().unwrap().ethertype, 0x0800);
+    assert!(parsed.ipv4.is_some());
+    assert!(matches!(parsed.transport, Some(TransportSegment::Udp(_))));
+}
+
+#[test]
+fn unknown_ethertype_returns_partial_parse_with_warning() {
+    let frame = vec![
+        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0x88, 0x63, // PPPoE discovery
+        0x11, 0x22, 0x33, 0x44,
+    ];
+
+    let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+    assert!(parsed.ethernet.is_some());
+    assert_eq!(parsed.ethernet.as_ref().unwrap().ethertype, 0x8863);
+    assert!(parsed.ipv4.is_none());
+    assert!(parsed.ipv6.is_none());
+    assert_eq!(parsed.warnings.len(), 1);
+    assert!(matches!(
+        parsed.warnings[0].code,
+        ParseWarningCode::UnsupportedEthertype(0x8863)
+    ));
+}
+
+#[test]
+fn parses_ipv4_icmp() {
+    let frame = vec![
+        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0x08, 0x00, // eth
+        0x45, 0x00, 0x00, 0x1c, 0x00, 0x01, 0x40, 0x00, 64, 1, 0, 0, 192, 168, 1, 1, 192, 168, 1, 2,
+        8, 0, 0xf7, 0xff, 0x00, 0x00, 0x00, 0x00, // ICMP echo request type 8 code 0
+    ];
+
+    let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+    assert!(parsed.ipv4.is_some());
+    assert!(parsed.icmp.is_some());
+    assert_eq!(parsed.icmp.as_ref().unwrap().icmp_type, 8);
+    assert_eq!(parsed.icmp.as_ref().unwrap().icmp_code, 0);
+}
+
+#[test]
+fn parses_ipv6_icmpv6() {
+    let frame = vec![
+        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0x86, 0xdd, // eth
+        0x60, 0x00, 0x00, 0x00, 0x00, 0x08, 58, 64, // IPv6, payload 8, next=ICMPv6
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2,
+        128, 0, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00, // ICMPv6 echo request
+    ];
+
+    let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+    assert!(parsed.ipv6.is_some());
+    assert!(parsed.icmpv6.is_some());
+    assert_eq!(parsed.icmpv6.as_ref().unwrap().icmp_type, 128);
+    assert_eq!(parsed.icmpv6.as_ref().unwrap().icmp_code, 0);
+}
+
+#[test]
+fn ipv4_truncated_adds_warning_and_parses_available_l4() {
+    let frame = vec![
+        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0x08, 0x00,
+        0x45, 0x00, 0x00, 0x64, 0x00, 0x01, 0x40, 0x00, 64, 6, 0, 0, 192, 168, 1, 1, 192, 168, 1, 2,
+        0x00, 0x50, 0x01, 0xbb, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x02, 0x50, 0x10, 0x10,
+        0x00, 0x00, 0x00, 0x00, 0x00,
+    ];
+    let full_packet_len = 14 + 100;
+    assert!(frame.len() < full_packet_len);
+
+    let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+    assert!(parsed.ipv4.is_some());
+    assert_eq!(parsed.ipv4.as_ref().unwrap().total_length, 100);
+    assert!(parsed.warnings.iter().any(|w| matches!(w.code, ParseWarningCode::Ipv4Truncated)));
+    assert!(matches!(parsed.transport, Some(TransportSegment::Tcp(_))));
+}

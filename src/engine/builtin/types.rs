@@ -1,5 +1,7 @@
 use crate::layer::application::dns::DnsMessage;
 use crate::layer::datalink::arp::ArpPacket;
+use crate::layer::network::icmp::IcmpHeader;
+use crate::layer::network::icmpv6::Icmpv6Header;
 use crate::layer::network::ipv4::Ipv4Header;
 use crate::layer::network::ipv6::Ipv6Header;
 use crate::layer::transport::tcp::TcpHeader;
@@ -9,6 +11,8 @@ use crate::layer::transport::udp::UdpHeader;
 pub enum ParseWarningCode {
     Ipv6NonInitialFragment,
     Ipv6ExtensionDepthLimit,
+    UnsupportedEthertype(u16),
+    Ipv4Truncated,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,6 +64,8 @@ pub struct ParsedPacket {
     pub ipv4: Option<Ipv4Header>,
     pub ipv6: Option<Ipv6Header>,
     pub transport: Option<TransportSegment>,
+    pub icmp: Option<IcmpHeader>,
+    pub icmpv6: Option<Icmpv6Header>,
     pub dns: Option<DnsMessage>,
     pub udp_hints: Vec<UdpAppHint>,
     pub warnings: Vec<ParseWarning>,

@@ -5,7 +5,7 @@ mod types;
 
 use crate::layer::LayerError;
 
-use self::link::{parse_arp_packet, parse_ethernet};
+use self::link::{parse_arp_packet, parse_link};
 use self::network::{parse_ipv4_header, parse_ipv6_header, resolve_ipv6_transport};
 use self::transport::parse_transport;
 
@@ -22,7 +22,7 @@ impl BuiltinPacketParser {
     }
 
     pub fn parse_with_config(raw: &[u8], config: ParseConfig) -> Result<ParsedPacket, LayerError> {
-        let (eth, l3_offset) = parse_ethernet(raw)?;
+        let (eth, l3_offset) = parse_link(raw)?;
         let mut parsed = ParsedPacket {
             ethernet: Some(eth.clone()),
             ..ParsedPacket::default()
@@ -45,11 +45,20 @@ impl BuiltinPacketParser {
 
                 let ip_header_len = (ipv4.ihl as usize) * 4;
                 let total_len = ipv4.total_length as usize;
-                if total_len < ip_header_len || total_len > l3_bytes.len() {
+                if total_len < ip_header_len {
                     return Err(LayerError::InvalidLength);
                 }
 
-                let l4_bytes = &l3_bytes[ip_header_len..total_len];
+                let truncated = total_len > l3_bytes.len();
+                if truncated {
+                    parsed.warnings.push(ParseWarning {
+                        code: ParseWarningCode::Ipv4Truncated,
+                        message: "IPv4 total length exceeds capture; L4 may be truncated",
+                    });
+                }
+
+                let l4_end = total_len.min(l3_bytes.len());
+                let l4_bytes = &l3_bytes[ip_header_len..l4_end];
                 let transport_parse = parse_transport(ipv4.protocol, l4_bytes)?;
                 apply_transport_parse(&mut parsed, transport_parse);
                 parsed.ipv4 = Some(ipv4);
@@ -99,13 +108,21 @@ impl BuiltinPacketParser {
                 parsed.ipv6 = Some(ipv6);
                 Ok(parsed)
             }
-            other => Err(LayerError::UnsupportedProtocol((other & 0x00ff) as u8)),
+            other => {
+                parsed.warnings.push(ParseWarning {
+                    code: ParseWarningCode::UnsupportedEthertype(other),
+                    message: "L2 only; unsupported ethertype, L3+ not parsed",
+                });
+                Ok(parsed)
+            }
         }
     }
 }
 
 fn apply_transport_parse(parsed: &mut ParsedPacket, transport_parse: transport::TransportParse) {
     parsed.transport = transport_parse.transport;
+    parsed.icmp = transport_parse.icmp;
+    parsed.icmpv6 = transport_parse.icmpv6;
     parsed.dns = transport_parse.dns;
     parsed.udp_hints = transport_parse.hints;
 }
