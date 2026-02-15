@@ -6,7 +6,10 @@ pub mod error;
 pub mod registry;
 pub mod tree;
 
-pub use builtin::{BuiltinPacketParser, EthernetFrame, ParsedPacket, TransportSegment};
+pub use builtin::{
+    BuiltinPacketParser, EthernetFrame, ParseConfig, ParseWarning, ParseWarningCode, ParsedPacket,
+    TransportSegment, UdpAppHint,
+};
 pub use context::{DecodeConfig, DecodeContext, DecodeMode};
 pub use decoder::{DecodeReport, Decoder};
 pub use error::{DecodeError, DecodeWarning};
