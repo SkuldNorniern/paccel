@@ -387,11 +387,83 @@ impl<'a> Icmpv6Packet<'a> {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct SllPacket<'a> {
+    data: &'a [u8],
+}
+
+impl<'a> SllPacket<'a> {
+    pub fn new(data: &'a [u8]) -> Option<Self> {
+        if data.len() < 16 {
+            return None;
+        }
+        Some(Self { data })
+    }
+
+    pub fn packet_type(&self) -> u16 {
+        u16::from_be_bytes([self.data[0], self.data[1]])
+    }
+
+    pub fn arphrd_type(&self) -> u16 {
+        u16::from_be_bytes([self.data[2], self.data[3]])
+    }
+
+    pub fn address_length(&self) -> u16 {
+        u16::from_be_bytes([self.data[4], self.data[5]])
+    }
+
+    pub fn protocol(&self) -> u16 {
+        u16::from_be_bytes([self.data[14], self.data[15]])
+    }
+
+    pub fn payload(&self) -> &'a [u8] {
+        &self.data[16..]
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Sll2Packet<'a> {
+    data: &'a [u8],
+}
+
+impl<'a> Sll2Packet<'a> {
+    pub fn new(data: &'a [u8]) -> Option<Self> {
+        if data.len() < 20 {
+            return None;
+        }
+        Some(Self { data })
+    }
+
+    pub fn protocol(&self) -> u16 {
+        u16::from_be_bytes([self.data[0], self.data[1]])
+    }
+
+    pub fn if_index(&self) -> u32 {
+        u32::from_be_bytes([self.data[4], self.data[5], self.data[6], self.data[7]])
+    }
+
+    pub fn arphrd_type(&self) -> u16 {
+        u16::from_be_bytes([self.data[8], self.data[9]])
+    }
+
+    pub fn packet_type(&self) -> u8 {
+        self.data[10]
+    }
+
+    pub fn address_length(&self) -> u8 {
+        self.data[11]
+    }
+
+    pub fn payload(&self) -> &'a [u8] {
+        &self.data[20..]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         ArpPacket, DnsPacket, EthernetPacket, IcmpPacket, Icmpv6Packet, Ipv4Packet, Ipv6Packet,
-        TcpPacket, UdpPacket,
+        Sll2Packet, SllPacket, TcpPacket, UdpPacket,
     };
 
     #[test]
@@ -500,5 +572,46 @@ mod tests {
         assert_eq!(pkt6.code(), 0);
         assert_eq!(pkt6.checksum(), 0xabcd);
         assert_eq!(pkt6.payload(), &[9, 8, 7, 6]);
+    }
+
+    #[test]
+    fn sll_view_works() {
+        let frame = [
+            0x00, 0x00, // packet type
+            0x00, 0x01, // arphrd ethernet
+            0x00, 0x06, // address length
+            0, 1, 2, 3, 4, 5, 0, 0, // address (8)
+            0x08, 0x00, // protocol ipv4
+            0x45, 0x00, 0x00, 0x14, // payload begins
+        ];
+
+        let sll = SllPacket::new(&frame).expect("sll should parse");
+        assert_eq!(sll.packet_type(), 0);
+        assert_eq!(sll.arphrd_type(), 1);
+        assert_eq!(sll.address_length(), 6);
+        assert_eq!(sll.protocol(), 0x0800);
+        assert_eq!(sll.payload()[0], 0x45);
+    }
+
+    #[test]
+    fn sll2_view_works() {
+        let frame = [
+            0x86, 0xdd, // protocol ipv6
+            0x00, 0x00, // reserved
+            0x00, 0x00, 0x00, 0x02, // ifindex
+            0x00, 0x01, // arphrd ethernet
+            0x00, // packet type
+            0x06, // address length
+            0, 1, 2, 3, 4, 5, 0, 0, // address (8)
+            0x60, 0x00, 0x00, 0x00, // payload begins
+        ];
+
+        let sll2 = Sll2Packet::new(&frame).expect("sll2 should parse");
+        assert_eq!(sll2.protocol(), 0x86dd);
+        assert_eq!(sll2.if_index(), 2);
+        assert_eq!(sll2.arphrd_type(), 1);
+        assert_eq!(sll2.packet_type(), 0);
+        assert_eq!(sll2.address_length(), 6);
+        assert_eq!(sll2.payload()[0], 0x60);
     }
 }

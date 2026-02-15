@@ -1,4 +1,6 @@
 use crate::layer::application::dns::{parse_dns_message, DnsMessage};
+use crate::layer::network::icmp::IcmpHeader;
+use crate::layer::network::icmpv6::Icmpv6Header;
 use crate::layer::transport::tcp::{TcpFlags, TcpHeader};
 use crate::layer::transport::udp::UdpHeader;
 use crate::layer::LayerError;
@@ -8,6 +10,8 @@ use super::types::{TransportSegment, UdpAppHint};
 #[derive(Debug, Default)]
 pub(super) struct TransportParse {
     pub transport: Option<TransportSegment>,
+    pub icmp: Option<IcmpHeader>,
+    pub icmpv6: Option<Icmpv6Header>,
     pub dns: Option<DnsMessage>,
     pub hints: Vec<UdpAppHint>,
 }
@@ -18,7 +22,10 @@ pub(super) fn parse_transport(protocol: u8, l4_bytes: &[u8]) -> Result<Transport
             let tcp = parse_tcp_header(l4_bytes)?;
             Ok(TransportParse {
                 transport: Some(TransportSegment::Tcp(tcp)),
-                ..TransportParse::default()
+                icmp: None,
+                icmpv6: None,
+                dns: None,
+                hints: Vec::new(),
             })
         }
         17 => {
@@ -57,12 +64,56 @@ pub(super) fn parse_transport(protocol: u8, l4_bytes: &[u8]) -> Result<Transport
 
             Ok(TransportParse {
                 transport: Some(TransportSegment::Udp(udp)),
+                icmp: None,
+                icmpv6: None,
                 dns,
                 hints,
             })
         }
+        1 => {
+            let icmp = parse_icmp_minimal(l4_bytes)?;
+            Ok(TransportParse {
+                transport: None,
+                icmp: Some(icmp),
+                icmpv6: None,
+                dns: None,
+                hints: Vec::new(),
+            })
+        }
+        58 => {
+            let icmpv6 = parse_icmpv6_minimal(l4_bytes)?;
+            Ok(TransportParse {
+                transport: None,
+                icmp: None,
+                icmpv6: Some(icmpv6),
+                dns: None,
+                hints: Vec::new(),
+            })
+        }
         _ => Ok(TransportParse::default()),
     }
+}
+
+fn parse_icmp_minimal(data: &[u8]) -> Result<IcmpHeader, LayerError> {
+    if data.len() < 8 {
+        return Err(LayerError::InvalidLength);
+    }
+    Ok(IcmpHeader {
+        icmp_type: data[0],
+        icmp_code: data[1],
+        checksum: u16::from_be_bytes([data[2], data[3]]),
+    })
+}
+
+fn parse_icmpv6_minimal(data: &[u8]) -> Result<Icmpv6Header, LayerError> {
+    if data.len() < 8 {
+        return Err(LayerError::InvalidLength);
+    }
+    Ok(Icmpv6Header {
+        icmp_type: data[0],
+        icmp_code: data[1],
+        checksum: u16::from_be_bytes([data[2], data[3]]),
+    })
 }
 
 fn parse_tcp_header(l4_bytes: &[u8]) -> Result<TcpHeader, LayerError> {
