@@ -1,9 +1,11 @@
+pub mod builtin;
 pub mod context;
 pub mod decoder;
 pub mod error;
 pub mod registry;
 pub mod tree;
 
+pub use builtin::{BuiltinPacketParser, EthernetFrame, ParsedPacket, TransportSegment};
 pub use context::{DecodeConfig, DecodeContext, DecodeMode};
 pub use decoder::{DecodeReport, Decoder};
 pub use error::{DecodeError, DecodeWarning};

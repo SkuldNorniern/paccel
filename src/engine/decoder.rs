@@ -33,7 +33,7 @@ impl Decoder {
             });
         }
 
-        let view = PacketView::with_metadata(&packet.packet, &packet.metadata);
+        let view = PacketView::new(&packet.packet);
         let mut context = DecodeContext::default();
         let mut tree = DecodeTree::default();
 
