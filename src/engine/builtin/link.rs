@@ -1,6 +1,6 @@
 use crate::engine::cursor::Cursor;
-use crate::layer::LayerError;
 use crate::layer::datalink::arp::{ArpOperation, ArpPacket};
+use crate::layer::LayerError;
 
 use super::types::EthernetFrame;
 

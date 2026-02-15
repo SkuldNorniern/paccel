@@ -1,6 +1,6 @@
-use crate::layer::LayerError;
 use crate::layer::network::ipv4::Ipv4Header;
 use crate::layer::network::ipv6::Ipv6Header;
+use crate::layer::LayerError;
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Ipv6TransportState {
