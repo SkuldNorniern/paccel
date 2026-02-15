@@ -163,7 +163,7 @@ impl ProtocolProcessor<Ipv4Header> for Ipv4Processor {
         if packet.packet.len() < 20 {
             return false;
         }
-        
+
         // Check version (must be 4 for IPv4)
         let version = packet.packet[0] >> 4;
         version == 4
@@ -375,14 +375,14 @@ mod tests {
     /// Creates a minimal valid IPv4 header (20 bytes, no options).
     fn create_valid_ipv4_header() -> Vec<u8> {
         let mut header = vec![
-            0x45,       // Version (4) and IHL (5)
-            0x00,       // DSCP and ECN
+            0x45, // Version (4) and IHL (5)
+            0x00, // DSCP and ECN
             0x00, 0x14, // Total Length = 20 bytes
             0x12, 0x34, // Identification
             0x40, 0x00, // Flags (010) and Fragment Offset
-            64,         // TTL
-            6,          // Protocol (e.g., TCP)
-            0, 0,       // Checksum placeholder
+            64,   // TTL
+            6,    // Protocol (e.g., TCP)
+            0, 0, // Checksum placeholder
             192, 168, 1, 1, // Source IP address
             192, 168, 1, 2, // Destination IP address
         ];
