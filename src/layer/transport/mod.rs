@@ -8,8 +8,8 @@ use tcp::{TcpHeader, TcpProcessor};
 use udp::{UdpHeader, UdpProcessor};
 
 use super::{LayerProcessor, ProtocolProcessor};
-use crate::LayerError;
 use crate::packet::Packet;
+use crate::LayerError;
 
 /// Represents the parsed transport layer information.
 /// This enum will contain either TCP or UDP header data.
