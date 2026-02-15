@@ -39,6 +39,66 @@ pub struct DnsMessage {
     // Answers, authority, and additional sections can be added later.
 }
 
+/// Parses a DNS message directly from a byte slice.
+///
+/// This is the core parser used by both the legacy `ProtocolProcessor` implementation
+/// and the newer engine path.
+pub fn parse_dns_message(packet: &[u8]) -> Result<DnsMessage, LayerError> {
+    if packet.len() < 12 {
+        return Err(LayerError::InvalidLength);
+    }
+
+    let id = u16::from_be_bytes(
+        packet[0..2]
+            .try_into()
+            .map_err(|_| LayerError::MalformedPacket)?,
+    );
+    let flags = u16::from_be_bytes(
+        packet[2..4]
+            .try_into()
+            .map_err(|_| LayerError::MalformedPacket)?,
+    );
+    let qdcount = u16::from_be_bytes(
+        packet[4..6]
+            .try_into()
+            .map_err(|_| LayerError::MalformedPacket)?,
+    );
+    let ancount = u16::from_be_bytes(
+        packet[6..8]
+            .try_into()
+            .map_err(|_| LayerError::MalformedPacket)?,
+    );
+    let nscount = u16::from_be_bytes(
+        packet[8..10]
+            .try_into()
+            .map_err(|_| LayerError::MalformedPacket)?,
+    );
+    let arcount = u16::from_be_bytes(
+        packet[10..12]
+            .try_into()
+            .map_err(|_| LayerError::MalformedPacket)?,
+    );
+
+    let header = DnsHeader {
+        transaction_id: id,
+        flags,
+        questions: qdcount,
+        answers: ancount,
+        authorities: nscount,
+        additionals: arcount,
+    };
+
+    let mut offset = 12;
+    let mut questions = Vec::with_capacity(header.questions as usize);
+    for _ in 0..header.questions {
+        let (question, new_offset) = parse_question(packet, offset)?;
+        questions.push(question);
+        offset = new_offset;
+    }
+
+    Ok(DnsMessage { header, questions })
+}
+
 /// Parses a domain name from the DNS message.
 ///
 /// DNS names are represented as a sequence of labels. Each label is prefixed with
@@ -178,61 +238,7 @@ pub struct DnsProcessor;
 
 impl ProtocolProcessor<DnsMessage> for DnsProcessor {
     fn parse(&self, packet: &mut Packet) -> Result<DnsMessage, LayerError> {
-        // A DNS message must be at least 12 bytes long (the header size).
-        if packet.packet.len() < 12 {
-            return Err(LayerError::InvalidLength);
-        }
-        // Parse DNS header fields (all in network byte order, i.e. big-endian).
-        let id = u16::from_be_bytes(
-            packet.packet[0..2]
-                .try_into()
-                .map_err(|_| LayerError::MalformedPacket)?,
-        );
-        let flags = u16::from_be_bytes(
-            packet.packet[2..4]
-                .try_into()
-                .map_err(|_| LayerError::MalformedPacket)?,
-        );
-        let qdcount = u16::from_be_bytes(
-            packet.packet[4..6]
-                .try_into()
-                .map_err(|_| LayerError::MalformedPacket)?,
-        );
-        let ancount = u16::from_be_bytes(
-            packet.packet[6..8]
-                .try_into()
-                .map_err(|_| LayerError::MalformedPacket)?,
-        );
-        let nscount = u16::from_be_bytes(
-            packet.packet[8..10]
-                .try_into()
-                .map_err(|_| LayerError::MalformedPacket)?,
-        );
-        let arcount = u16::from_be_bytes(
-            packet.packet[10..12]
-                .try_into()
-                .map_err(|_| LayerError::MalformedPacket)?,
-        );
-
-        let header = DnsHeader {
-            transaction_id: id,
-            flags,
-            questions: qdcount,
-            answers: ancount,
-            authorities: nscount,
-            additionals: arcount,
-        };
-
-        let mut offset = 12;
-        let mut questions = Vec::with_capacity(header.questions as usize);
-        // Parse each question record.
-        for _ in 0..header.questions {
-            let (question, new_offset) = parse_question(&packet.packet, offset)?;
-            questions.push(question);
-            offset = new_offset;
-        }
-
-        Ok(DnsMessage { header, questions })
+        parse_dns_message(&packet.packet)
     }
 
     fn can_parse(&self, packet: &Packet) -> bool {

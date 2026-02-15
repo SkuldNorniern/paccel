@@ -1,8 +1,7 @@
-use crate::layer::application::dns::{DnsMessage, DnsProcessor};
+use crate::layer::application::dns::{parse_dns_message, DnsMessage};
 use crate::layer::transport::tcp::{TcpFlags, TcpHeader};
 use crate::layer::transport::udp::UdpHeader;
-use crate::layer::{LayerError, ProtocolProcessor};
-use crate::packet::Packet;
+use crate::layer::LayerError;
 
 use super::types::{TransportSegment, UdpAppHint};
 
@@ -32,14 +31,14 @@ pub(super) fn parse_transport(protocol: u8, l4_bytes: &[u8]) -> Result<Transport
 
             if (udp.source_port == 53 || udp.destination_port == 53) && likely_dns_message(app) {
                 hints.push(UdpAppHint::Dns);
-                dns = parse_dns_message(app);
+                dns = try_parse_dns_message(app);
             }
 
             if (udp.source_port == 5353 || udp.destination_port == 5353) && likely_dns_message(app)
             {
                 push_hint_unique(&mut hints, UdpAppHint::Mdns);
                 if dns.is_none() {
-                    dns = parse_dns_message(app);
+                    dns = try_parse_dns_message(app);
                 }
             }
 
@@ -165,9 +164,8 @@ fn likely_dns_message(payload: &[u8]) -> bool {
     qdcount != 0 || ancount != 0 || nscount != 0 || arcount != 0
 }
 
-fn parse_dns_message(payload: &[u8]) -> Option<DnsMessage> {
-    let mut packet = Packet::new(payload.to_vec());
-    DnsProcessor.parse(&mut packet).ok()
+fn try_parse_dns_message(payload: &[u8]) -> Option<DnsMessage> {
+    parse_dns_message(payload).ok()
 }
 
 fn likely_dhcp_message(payload: &[u8]) -> bool {
