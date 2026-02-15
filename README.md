@@ -1,120 +1,88 @@
 # Paccel
 
-Paccel is a lightweight and efficient Rust library for packet parsing and processing. Designed with performance in mind, Paccel allows you to work with multiple layers of the network stack while keeping error handling robust and resource usage minimal.
+Paccel is an in-progress Rust packet parsing engine focused on practical protocol visibility, correctness, and performance.
 
-## Features
+The goal is to become a strong parsing alternative for Fluere workloads (not a full Wireshark clone).
 
-- **Zero-Copy Design:**
-  - Minimizes memory allocations
-  - Uses borrowed types (`&str`, `&[u8]`) wherever possible
-  - Avoids unnecessary owned types like `String` and `PathBuf`
+## Current status
 
-- **Layered Architecture:**  
-  Protocol processors for multiple network layers:
-  - **Datalink Layer:**
-    - ARP (Address Resolution Protocol)
-  - **Network Layer:**
-    - IPv4 (Internet Protocol version 4)
-    - IPv6 (Internet Protocol version 6)
-    - ICMP (Internet Control Message Protocol)
-    - ICMPv6
-    - IGMP (Internet Group Management Protocol)
-  - **Application Layer:**
-    - DNS (Domain Name System)
+- parser engine scaffolding is in place (`engine/*`)
+- packet model is split into owned + view modules (`packet/*`)
+- built-in parsing path exists for:
+  - Ethernet II
+  - VLAN/QinQ
+  - ARP
+  - IPv4
+  - IPv6 + basic extension header walk
+  - TCP
+  - UDP
+  - DNS over UDP/53 and mDNS over UDP/5353 (heuristic-gated)
+  - UDP app hints for DHCP/NTP/mDNS/DNS
+- low-level borrowed packet wrappers exist for manual parsing flows:
+  - `packet::EthernetPacket`, `packet::Ipv4Packet`, `packet::Ipv6Packet`, `packet::TcpPacket`, `packet::UdpPacket`, `packet::ArpPacket`, `packet::DnsPacket`, `packet::IcmpPacket`, `packet::Icmpv6Packet`
 
-- **Robust Error Handling:**
-  - Custom error types for each layer
-  - No unwrap() or expect() calls in production code
-  - Proper error propagation using the `?` operator
-  - Detailed error messages for debugging
+## What it is not yet
 
-- **Comprehensive Validation:**
-  Each protocol processor implements:
-  - `can_parse(&Packet) -> bool`: Quick packet-type identification
-  - `is_valid(&Packet) -> bool`: Packet integrity verification
-  - `parse(&mut Packet) -> Result<T, LayerError>`: Full packet parsing
+- no fragment reassembly engine yet
+- no TCP stream reassembly yet
+- tshark corpus scaffolding exists, but automated parity checks are not implemented yet
+- baseline pcap-vs-scapy parity test exists, but coverage is still small
+- still uses intermediate allocations in parts of hot path
 
-- **Extensive Testing:**
-  - Unit tests for all protocol processors
-  - Integration tests for multi-layer parsing
-  - Test coverage for edge cases and error conditions
-  - Fuzz testing for robustness
+## Quick usage
 
-## Installation
+```rust
+use paccel::engine::BuiltinPacketParser;
 
-Add Paccel to your project by including it in your `Cargo.toml`:
+fn parse_frame(frame: &[u8]) {
+    match BuiltinPacketParser::parse(frame) {
+        Ok(parsed) => {
+            if let Some(ipv4) = parsed.ipv4 {
+                println!("ipv4 {} -> {}", ipv4.source, ipv4.destination);
+            }
+            if let Some(dns) = parsed.dns {
+                println!("dns txid={}", dns.header.transaction_id);
+            }
+            if !parsed.udp_hints.is_empty() {
+                println!("udp app hints: {:?}", parsed.udp_hints);
+            }
+            for warning in parsed.warnings {
+                println!("warning [{:?}]: {}", warning.code, warning.message);
+            }
+        }
+        Err(err) => {
+            println!("parse error: {}", err);
+        }
+    }
+}
+```
 
-## Protocol Support Details
+You can also call `BuiltinPacketParser::parse_with_config(...)` to tune parse limits (for example IPv6 extension depth).
 
-### Datalink Layer
+For pcap workflows, use `paccel::engine::parse_pcap_frames(...)` and feed each frame into `BuiltinPacketParser`.
 
-#### ARP
-- Supports both requests and replies
-- Hardware type validation
-- Protocol type validation
-- MAC address parsing
+The core `BuiltinPacketParser` is intentionally stateless by design (similar to libpnet/scapy usage patterns).
+Flow/state tracking should be composed on the integration side (for example inside Fluere).
 
-### Network Layer
+## Development notes
 
-#### IPv4
-- Header checksum validation
-- Fragment handling
-- Options parsing
-- Total length verification
+- Main plan and roadmap: `paccel/plan.md`
+- Current architecture notes: `paccel/docs/current-architecture.md`
+- Run tests from crate root:
+  - `cargo test`
+- Generate tshark snapshots for corpus files:
+  - `tests/scripts/generate_tshark_snapshots.sh`
+- Capture a fresh pcap with tcpdump (requires permissions):
+  - `tests/scripts/capture_with_tcpdump.sh tests/pcaps/happy-path/tcpdump_capture.pcap any 200`
+- Generate scapy snapshot for a pcap fixture:
+  - `tests/scripts/generate_scapy_snapshot.py tests/pcaps/happy-path/tcpdump_dns_udp.pcap tests/snapshots/scapy/tcpdump_dns_udp.expected.json`
+- Regenerate scapy snapshot and run parity test:
+  - `tests/scripts/compare_pcap_with_scapy.sh`
 
-#### IPv6
-- Fixed header parsing
-- Extension headers support
-- Flow label handling
-- Payload length verification
+Included fixture:
 
-#### ICMP/ICMPv6
-- Message type validation
-- Checksum verification
-- Echo request/reply support
-- Error message parsing
-
-#### IGMP
-- Version 1, 2, and 3 support
-- Membership queries
-- Membership reports
-- Leave group messages
-
-### Application Layer
-
-#### DNS
-- Query and response parsing
-- Resource record handling
-- Name compression support
-- EDNS0 extensions
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request. For major changes, please open an issue first to discuss what you would like to change.
-
-Please make sure to update tests as appropriate.
-
-### Development Guidelines
-
-1. Follow Rust best practices
-2. Avoid unwrap() and expect() in production code
-3. Add tests for new features
-4. Document public APIs
-5. Run clippy and rustfmt before submitting PRs
+- `tests/pcaps/happy-path/tcpdump_dns_udp.pcap` copied from tcpdump test corpus (`tests/dns_udp.pcap`).
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## Acknowledgments
-
-- Inspired by various packet parsing libraries in the Rust ecosystem
-- Built with modern Rust practices and zero-copy principles
-- Designed for performance and safety
-
-## Version History
-
-- 0.1.0
-  - Initial release
-  - Basic protocol support
-  - Core architecture implementation
+MIT (see `paccel/LICENSE`).
