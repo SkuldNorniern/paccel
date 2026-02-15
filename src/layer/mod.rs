@@ -196,7 +196,11 @@ fn process_network_layer(packet: &mut Packet, parsed: &mut ParsedLayers) -> Resu
                     ipv4_header.source, ipv4_header.destination, ipv4_header.protocol
                 );
                 // Update packet payload to the IPv4 payload for next layers
-                packet.payload = ipv4_header.payload.clone();
+                let header_len = (ipv4_header.ihl as usize) * 4;
+                let total_len = ipv4_header.total_length as usize;
+                if total_len >= header_len && total_len <= packet.payload.len() {
+                    packet.payload = packet.payload[header_len..total_len].to_vec();
+                }
                 // Save the IPv4 header in our parsed results
                 parsed.network_ipv4 = Some(ipv4_header);
 
