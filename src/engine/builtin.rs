@@ -1,3 +1,5 @@
+use super::cursor::Cursor;
+use crate::layer::application::dns::{DnsMessage, DnsProcessor};
 use crate::layer::datalink::arp::{ArpPacket, ArpProcessor};
 use crate::layer::network::ipv4::{Ipv4Header, Ipv4Processor};
 use crate::layer::network::ipv6::{Ipv6Header, Ipv6Processor};
@@ -28,6 +30,7 @@ pub struct ParsedPacket {
     pub ipv4: Option<Ipv4Header>,
     pub ipv6: Option<Ipv6Header>,
     pub transport: Option<TransportSegment>,
+    pub dns: Option<DnsMessage>,
 }
 
 pub struct BuiltinPacketParser;
@@ -64,7 +67,9 @@ impl BuiltinPacketParser {
                 }
 
                 let l4_bytes = &l3_bytes[ip_header_len..total_len];
-                parsed.transport = parse_transport(ipv4.protocol, l4_bytes)?;
+                let (transport, dns) = parse_transport(ipv4.protocol, l4_bytes)?;
+                parsed.transport = transport;
+                parsed.dns = dns;
                 parsed.ipv4 = Some(ipv4);
                 Ok(parsed)
             }
@@ -78,8 +83,17 @@ impl BuiltinPacketParser {
                     return Err(LayerError::InvalidLength);
                 }
 
-                let l4_bytes = &l3_bytes[40..l4_end];
-                parsed.transport = parse_transport(ipv6.next_header, l4_bytes)?;
+                let ipv6_payload = &l3_bytes[..l4_end];
+                let (next_header, l4_offset) =
+                    resolve_ipv6_transport(ipv6_payload, ipv6.next_header)?;
+                if l4_offset > ipv6_payload.len() {
+                    return Err(LayerError::InvalidLength);
+                }
+
+                let l4_bytes = &ipv6_payload[l4_offset..];
+                let (transport, dns) = parse_transport(next_header, l4_bytes)?;
+                parsed.transport = transport;
+                parsed.dns = dns;
                 parsed.ipv6 = Some(ipv6);
                 Ok(parsed)
             }
@@ -88,7 +102,10 @@ impl BuiltinPacketParser {
     }
 }
 
-fn parse_transport(protocol: u8, l4_bytes: &[u8]) -> Result<Option<TransportSegment>, LayerError> {
+fn parse_transport(
+    protocol: u8,
+    l4_bytes: &[u8],
+) -> Result<(Option<TransportSegment>, Option<DnsMessage>), LayerError> {
     match protocol {
         6 => {
             let mut packet = Packet {
@@ -97,7 +114,7 @@ fn parse_transport(protocol: u8, l4_bytes: &[u8]) -> Result<Option<TransportSegm
                 network_offset: 0,
             };
             let tcp = TcpProcessor.parse(&mut packet)?;
-            Ok(Some(TransportSegment::Tcp(tcp)))
+            Ok((Some(TransportSegment::Tcp(tcp)), None))
         }
         17 => {
             let mut packet = Packet {
@@ -106,9 +123,84 @@ fn parse_transport(protocol: u8, l4_bytes: &[u8]) -> Result<Option<TransportSegm
                 network_offset: 0,
             };
             let udp = UdpProcessor.parse(&mut packet)?;
-            Ok(Some(TransportSegment::Udp(udp)))
+
+            let dns = if udp.source_port == 53 || udp.destination_port == 53 {
+                let udp_len = udp.length as usize;
+                if udp_len >= 8 && udp_len <= l4_bytes.len() {
+                    let app = &l4_bytes[8..udp_len];
+                    let mut dns_packet = Packet::new(app.to_vec());
+                    DnsProcessor.parse(&mut dns_packet).ok()
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            Ok((Some(TransportSegment::Udp(udp)), dns))
         }
-        _ => Ok(None),
+        _ => Ok((None, None)),
+    }
+}
+
+fn resolve_ipv6_transport(
+    packet: &[u8],
+    initial_next_header: u8,
+) -> Result<(u8, usize), LayerError> {
+    let mut next_header = initial_next_header;
+    let mut offset = 40usize;
+
+    loop {
+        match next_header {
+            0 | 43 | 60 => {
+                if offset + 2 > packet.len() {
+                    return Err(LayerError::InvalidLength);
+                }
+
+                let ext_next = packet[offset];
+                let ext_len = packet[offset + 1] as usize;
+                let header_len = (ext_len + 1) * 8;
+                if offset + header_len > packet.len() {
+                    return Err(LayerError::InvalidLength);
+                }
+
+                next_header = ext_next;
+                offset += header_len;
+            }
+            44 => {
+                if offset + 8 > packet.len() {
+                    return Err(LayerError::InvalidLength);
+                }
+
+                let ext_next = packet[offset];
+                let frag_off_flags = u16::from_be_bytes([packet[offset + 2], packet[offset + 3]]);
+                let frag_offset = (frag_off_flags & 0xFFF8) >> 3;
+
+                next_header = ext_next;
+                offset += 8;
+
+                if frag_offset != 0 {
+                    return Ok((next_header, offset));
+                }
+            }
+            51 => {
+                if offset + 2 > packet.len() {
+                    return Err(LayerError::InvalidLength);
+                }
+
+                let ext_next = packet[offset];
+                let payload_len = packet[offset + 1] as usize;
+                let header_len = (payload_len + 2) * 4;
+                if offset + header_len > packet.len() {
+                    return Err(LayerError::InvalidLength);
+                }
+
+                next_header = ext_next;
+                offset += header_len;
+            }
+            50 | 59 => return Ok((next_header, offset)),
+            _ => return Ok((next_header, offset)),
+        }
     }
 }
 
@@ -117,27 +209,26 @@ fn parse_ethernet(raw: &[u8]) -> Result<(EthernetFrame, usize), LayerError> {
         return Err(LayerError::InvalidLength);
     }
 
+    let mut cursor = Cursor::new(raw);
+    let destination_bytes = cursor.read_exact(6).ok_or(LayerError::InvalidLength)?;
+    let source_bytes = cursor.read_exact(6).ok_or(LayerError::InvalidLength)?;
+
     let mut destination = [0u8; 6];
-    destination.copy_from_slice(&raw[0..6]);
+    destination.copy_from_slice(destination_bytes);
 
     let mut source = [0u8; 6];
-    source.copy_from_slice(&raw[6..12]);
+    source.copy_from_slice(source_bytes);
 
-    let mut offset = 12;
-    let mut ethertype = u16::from_be_bytes([raw[offset], raw[offset + 1]]);
-    offset += 2;
+    let mut ethertype = cursor.read_u16_be().ok_or(LayerError::InvalidLength)?;
     let mut vlan_tags = Vec::new();
 
     while ethertype == 0x8100 || ethertype == 0x88A8 {
-        if raw.len() < offset + 4 {
-            return Err(LayerError::InvalidLength);
-        }
-
-        let tci = u16::from_be_bytes([raw[offset], raw[offset + 1]]);
+        let tci = cursor.read_u16_be().ok_or(LayerError::InvalidLength)?;
         vlan_tags.push(tci);
-        ethertype = u16::from_be_bytes([raw[offset + 2], raw[offset + 3]]);
-        offset += 4;
+        ethertype = cursor.read_u16_be().ok_or(LayerError::InvalidLength)?;
     }
+
+    let offset = cursor.pos();
 
     Ok((
         EthernetFrame {
@@ -177,5 +268,34 @@ mod tests {
         assert!(parsed.ethernet.is_some());
         assert!(parsed.ipv4.is_some());
         assert!(matches!(parsed.transport, Some(TransportSegment::Tcp(_))));
+    }
+
+    #[test]
+    fn parses_ethernet_vlan_ipv4_udp_dns() {
+        let frame = vec![
+            0, 1, 2, 3, 4, 5, // dst mac
+            6, 7, 8, 9, 10, 11, // src mac
+            0x81, 0x00, // vlan ethertype
+            0x00, 0x64, // vlan tci
+            0x08, 0x00, // inner ethertype ipv4
+            0x45, 0x00, 0x00, 0x3d, // ipv4 total len 61
+            0x12, 0x34, 0x40, 0x00, // id/flags
+            64, 17, 0x00, 0x00, // ttl/proto/checksum(dummy)
+            192, 168, 1, 1, // src ip
+            8, 8, 8, 8, // dst ip
+            0x30, 0x39, 0x00, 0x35, // udp sport/dport=53
+            0x00, 0x29, 0x00, 0x00, // udp len/checksum
+            0x12, 0x34, 0x01, 0x00, // dns id/flags
+            0x00, 0x01, 0x00, 0x00, // qd/an
+            0x00, 0x00, 0x00, 0x00, // ns/ar
+            0x03, b'w', b'w', b'w', 0x07, b'e', b'x', b'a', b'm', b'p', b'l', b'e', 0x03, b'c',
+            b'o', b'm', 0x00, 0x00, 0x01, 0x00, 0x01,
+        ];
+
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+        assert!(parsed.ethernet.is_some());
+        assert!(parsed.ipv4.is_some());
+        assert!(matches!(parsed.transport, Some(TransportSegment::Udp(_))));
+        assert!(parsed.dns.is_some());
     }
 }
