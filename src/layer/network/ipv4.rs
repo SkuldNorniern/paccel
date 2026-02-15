@@ -226,6 +226,7 @@ mod tests {
         let mut packet = Packet {
             packet: header.to_vec(),
             payload: vec![],
+            network_offset: 0,
         };
 
         let result = Ipv4Processor.parse(&mut packet);
@@ -271,6 +272,7 @@ mod tests {
         let mut packet = Packet {
             packet: header.to_vec(),
             payload: vec![],
+            network_offset: 0,
         };
 
         let result = Ipv4Processor.parse(&mut packet);
@@ -296,6 +298,7 @@ mod tests {
         let mut packet = Packet {
             packet: header.to_vec(),
             payload: vec![],
+            network_offset: 0,
         };
 
         let result = Ipv4Processor.parse(&mut packet);
@@ -322,6 +325,7 @@ mod tests {
         let mut packet = Packet {
             packet: header.to_vec(),
             payload: vec![],
+            network_offset: 0,
         };
 
         let result = Ipv4Processor.parse(&mut packet);
@@ -348,6 +352,7 @@ mod tests {
         let mut packet = Packet {
             packet: header.to_vec(),
             payload: vec![],
+            network_offset: 0,
         };
         let result = Ipv4Processor.parse(&mut packet);
         assert!(result.is_err());
@@ -398,6 +403,7 @@ mod tests {
         let packet = Packet {
             packet: header,
             payload: vec![],
+            network_offset: 0,
         };
         let processor = Ipv4Processor;
         assert!(processor.can_parse(&packet));
@@ -409,6 +415,7 @@ mod tests {
         let packet = Packet {
             packet: vec![0x45, 0x00, 0x00, 0x14],
             payload: vec![],
+            network_offset: 0,
         };
         let processor = Ipv4Processor;
         assert!(!processor.can_parse(&packet));
@@ -422,6 +429,7 @@ mod tests {
         let packet = Packet {
             packet: header,
             payload: vec![],
+            network_offset: 0,
         };
         let processor = Ipv4Processor;
         assert!(!processor.can_parse(&packet));
@@ -433,6 +441,7 @@ mod tests {
         let packet = Packet {
             packet: header,
             payload: vec![],
+            network_offset: 0,
         };
         let processor = Ipv4Processor;
         assert!(processor.is_valid(&packet));
@@ -448,6 +457,7 @@ mod tests {
         let packet = Packet {
             packet: header,
             payload: vec![],
+            network_offset: 0,
         };
         let processor = Ipv4Processor;
         assert!(!processor.is_valid(&packet));
@@ -462,6 +472,7 @@ mod tests {
         let packet = Packet {
             packet: header,
             payload: vec![],
+            network_offset: 0,
         };
         let processor = Ipv4Processor;
         assert!(!processor.is_valid(&packet));
