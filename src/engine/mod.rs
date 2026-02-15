@@ -1,5 +1,6 @@
 pub mod builtin;
 pub mod context;
+pub mod cursor;
 pub mod decoder;
 pub mod error;
 pub mod registry;
