@@ -16,6 +16,7 @@ pub enum ParseWarningCode {
     Ipv4Fragmented,
     GreInner,
     PppoeNoPayload,
+    VxlanInner,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,6 +29,9 @@ pub struct IgmpInfo {
 pub struct TcpOptionsParsed {
     pub mss: Option<u16>,
     pub window_scale: Option<u8>,
+    pub sack_permitted: bool,
+    pub ts_val: Option<u32>,
+    pub ts_ecr: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,6 +44,11 @@ pub struct PppoeInfo {
     pub code: u8,
     pub session_id: u16,
     pub length: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VxlanInfo {
+    pub vni: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -97,6 +106,7 @@ pub struct ParsedPacket {
     pub tcp_options: Option<TcpOptionsParsed>,
     pub gre: Option<GreInfo>,
     pub pppoe: Option<PppoeInfo>,
+    pub vxlan: Option<VxlanInfo>,
     pub dns: Option<DnsMessage>,
     pub udp_hints: Vec<UdpAppHint>,
     pub warnings: Vec<ParseWarning>,

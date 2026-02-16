@@ -11,7 +11,7 @@ use self::transport::parse_transport;
 
 pub use self::types::{
     EthernetFrame, GreInfo, IgmpInfo, ParseConfig, ParseWarning, ParseWarningCode, ParsedPacket,
-    PppoeInfo, TcpOptionsParsed, TransportSegment, UdpAppHint,
+    PppoeInfo, TcpOptionsParsed, TransportSegment, UdpAppHint, VxlanInfo,
 };
 
 pub struct BuiltinPacketParser;
@@ -74,6 +74,12 @@ impl BuiltinPacketParser {
                         message: "GRE inner payload; no nested decode yet",
                     });
                 }
+                if parsed.vxlan.is_some() {
+                    parsed.warnings.push(ParseWarning {
+                        code: ParseWarningCode::VxlanInner,
+                        message: "VXLAN inner payload; no nested decode yet",
+                    });
+                }
                 parsed.ipv4 = Some(ipv4);
                 Ok(parsed)
             }
@@ -116,6 +122,12 @@ impl BuiltinPacketParser {
                     let l4_bytes = &ipv6_payload[state.l4_offset..];
                     let transport_parse = parse_transport(state.next_header, l4_bytes)?;
                     apply_transport_parse(&mut parsed, transport_parse);
+                    if parsed.vxlan.is_some() {
+                        parsed.warnings.push(ParseWarning {
+                            code: ParseWarningCode::VxlanInner,
+                            message: "VXLAN inner payload; no nested decode yet",
+                        });
+                    }
                 }
 
                 parsed.ipv6 = Some(ipv6);
@@ -148,9 +160,7 @@ fn apply_transport_parse(parsed: &mut ParsedPacket, transport_parse: transport::
     parsed.igmp = transport_parse.igmp;
     parsed.tcp_options = transport_parse.tcp_options;
     parsed.gre = transport_parse.gre;
+    parsed.vxlan = transport_parse.vxlan;
     parsed.dns = transport_parse.dns;
     parsed.udp_hints = transport_parse.hints;
 }
-
-#[cfg(test)]
-mod tests;
