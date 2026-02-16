@@ -5,13 +5,16 @@ use crate::layer::transport::tcp::{TcpFlags, TcpHeader};
 use crate::layer::transport::udp::UdpHeader;
 use crate::layer::LayerError;
 
-use super::types::{TransportSegment, UdpAppHint};
+use super::types::{GreInfo, IgmpInfo, TcpOptionsParsed, TransportSegment, UdpAppHint};
 
 #[derive(Debug, Default)]
 pub(super) struct TransportParse {
     pub transport: Option<TransportSegment>,
     pub icmp: Option<IcmpHeader>,
     pub icmpv6: Option<Icmpv6Header>,
+    pub igmp: Option<IgmpInfo>,
+    pub tcp_options: Option<TcpOptionsParsed>,
+    pub gre: Option<GreInfo>,
     pub dns: Option<DnsMessage>,
     pub hints: Vec<UdpAppHint>,
 }
@@ -20,10 +23,18 @@ pub(super) fn parse_transport(protocol: u8, l4_bytes: &[u8]) -> Result<Transport
     match protocol {
         6 => {
             let tcp = parse_tcp_header(l4_bytes)?;
+            let tcp_options = tcp
+                .options
+                .as_deref()
+                .map(parse_tcp_options)
+                .unwrap_or_default();
             Ok(TransportParse {
                 transport: Some(TransportSegment::Tcp(tcp)),
                 icmp: None,
                 icmpv6: None,
+                igmp: None,
+                tcp_options: Some(tcp_options),
+                gre: None,
                 dns: None,
                 hints: Vec::new(),
             })
@@ -66,6 +77,9 @@ pub(super) fn parse_transport(protocol: u8, l4_bytes: &[u8]) -> Result<Transport
                 transport: Some(TransportSegment::Udp(udp)),
                 icmp: None,
                 icmpv6: None,
+                igmp: None,
+                tcp_options: None,
+                gre: None,
                 dns,
                 hints,
             })
@@ -76,6 +90,9 @@ pub(super) fn parse_transport(protocol: u8, l4_bytes: &[u8]) -> Result<Transport
                 transport: None,
                 icmp: Some(icmp),
                 icmpv6: None,
+                igmp: None,
+                tcp_options: None,
+                gre: None,
                 dns: None,
                 hints: Vec::new(),
             })
@@ -86,6 +103,35 @@ pub(super) fn parse_transport(protocol: u8, l4_bytes: &[u8]) -> Result<Transport
                 transport: None,
                 icmp: None,
                 icmpv6: Some(icmpv6),
+                igmp: None,
+                tcp_options: None,
+                gre: None,
+                dns: None,
+                hints: Vec::new(),
+            })
+        }
+        2 => {
+            let igmp = parse_igmp_minimal(l4_bytes)?;
+            Ok(TransportParse {
+                transport: None,
+                icmp: None,
+                icmpv6: None,
+                igmp: Some(igmp),
+                tcp_options: None,
+                gre: None,
+                dns: None,
+                hints: Vec::new(),
+            })
+        }
+        47 => {
+            let gre = parse_gre_minimal(l4_bytes)?;
+            Ok(TransportParse {
+                transport: None,
+                icmp: None,
+                icmpv6: None,
+                igmp: None,
+                tcp_options: None,
+                gre: Some(gre),
                 dns: None,
                 hints: Vec::new(),
             })
@@ -114,6 +160,65 @@ fn parse_icmpv6_minimal(data: &[u8]) -> Result<Icmpv6Header, LayerError> {
         icmp_code: data[1],
         checksum: u16::from_be_bytes([data[2], data[3]]),
     })
+}
+
+fn parse_igmp_minimal(data: &[u8]) -> Result<IgmpInfo, LayerError> {
+    if data.len() < 8 {
+        return Err(LayerError::InvalidLength);
+    }
+    let msg_type = data[0];
+    let group_address = Some(std::net::Ipv4Addr::new(
+        data[4], data[5], data[6], data[7],
+    ));
+    Ok(IgmpInfo {
+        msg_type,
+        group_address,
+    })
+}
+
+fn parse_tcp_options(blob: &[u8]) -> TcpOptionsParsed {
+    let mut out = TcpOptionsParsed::default();
+    let mut i = 0;
+    while i + 1 <= blob.len() {
+        let kind = blob[i];
+        if kind == 0 {
+            break;
+        }
+        if kind == 1 {
+            i += 1;
+            continue;
+        }
+        if i + 2 > blob.len() {
+            break;
+        }
+        let len = blob[i + 1] as usize;
+        if len < 2 || i + len > blob.len() {
+            break;
+        }
+        match kind {
+            2 => {
+                if len >= 4 {
+                    out.mss = Some(u16::from_be_bytes([blob[i + 2], blob[i + 3]]));
+                }
+            }
+            3 => {
+                if len >= 3 {
+                    out.window_scale = Some(blob[i + 2]);
+                }
+            }
+            _ => {}
+        }
+        i += len;
+    }
+    out
+}
+
+fn parse_gre_minimal(data: &[u8]) -> Result<GreInfo, LayerError> {
+    if data.len() < 4 {
+        return Err(LayerError::InvalidLength);
+    }
+    let protocol_type = u16::from_be_bytes([data[2], data[3]]);
+    Ok(GreInfo { protocol_type })
 }
 
 fn parse_tcp_header(l4_bytes: &[u8]) -> Result<TcpHeader, LayerError> {

@@ -13,6 +13,33 @@ pub enum ParseWarningCode {
     Ipv6ExtensionDepthLimit,
     UnsupportedEthertype(u16),
     Ipv4Truncated,
+    Ipv4Fragmented,
+    GreInner,
+    PppoeNoPayload,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IgmpInfo {
+    pub msg_type: u8,
+    pub group_address: Option<std::net::Ipv4Addr>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TcpOptionsParsed {
+    pub mss: Option<u16>,
+    pub window_scale: Option<u8>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GreInfo {
+    pub protocol_type: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PppoeInfo {
+    pub code: u8,
+    pub session_id: u16,
+    pub length: u16,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,6 +93,10 @@ pub struct ParsedPacket {
     pub transport: Option<TransportSegment>,
     pub icmp: Option<IcmpHeader>,
     pub icmpv6: Option<Icmpv6Header>,
+    pub igmp: Option<IgmpInfo>,
+    pub tcp_options: Option<TcpOptionsParsed>,
+    pub gre: Option<GreInfo>,
+    pub pppoe: Option<PppoeInfo>,
     pub dns: Option<DnsMessage>,
     pub udp_hints: Vec<UdpAppHint>,
     pub warnings: Vec<ParseWarning>,
