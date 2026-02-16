@@ -5,7 +5,7 @@ use crate::layer::transport::tcp::{TcpFlags, TcpHeader};
 use crate::layer::transport::udp::UdpHeader;
 use crate::layer::LayerError;
 
-use super::types::{GreInfo, IgmpInfo, TcpOptionsParsed, TransportSegment, UdpAppHint};
+use super::types::{GreInfo, IgmpInfo, TcpOptionsParsed, TransportSegment, UdpAppHint, VxlanInfo};
 
 #[derive(Debug, Default)]
 pub(super) struct TransportParse {
@@ -15,6 +15,7 @@ pub(super) struct TransportParse {
     pub igmp: Option<IgmpInfo>,
     pub tcp_options: Option<TcpOptionsParsed>,
     pub gre: Option<GreInfo>,
+    pub vxlan: Option<VxlanInfo>,
     pub dns: Option<DnsMessage>,
     pub hints: Vec<UdpAppHint>,
 }
@@ -35,6 +36,7 @@ pub(super) fn parse_transport(protocol: u8, l4_bytes: &[u8]) -> Result<Transport
                 igmp: None,
                 tcp_options: Some(tcp_options),
                 gre: None,
+                vxlan: None,
                 dns: None,
                 hints: Vec::new(),
             })
@@ -73,6 +75,14 @@ pub(super) fn parse_transport(protocol: u8, l4_bytes: &[u8]) -> Result<Transport
                 push_hint_unique(&mut hints, UdpAppHint::Ntp);
             }
 
+            let vxlan = if (udp.source_port == 4789 || udp.destination_port == 4789)
+                && app.len() >= 8
+            {
+                parse_vxlan_minimal(app).ok()
+            } else {
+                None
+            };
+
             Ok(TransportParse {
                 transport: Some(TransportSegment::Udp(udp)),
                 icmp: None,
@@ -80,6 +90,7 @@ pub(super) fn parse_transport(protocol: u8, l4_bytes: &[u8]) -> Result<Transport
                 igmp: None,
                 tcp_options: None,
                 gre: None,
+                vxlan,
                 dns,
                 hints,
             })
@@ -93,6 +104,7 @@ pub(super) fn parse_transport(protocol: u8, l4_bytes: &[u8]) -> Result<Transport
                 igmp: None,
                 tcp_options: None,
                 gre: None,
+                vxlan: None,
                 dns: None,
                 hints: Vec::new(),
             })
@@ -106,6 +118,7 @@ pub(super) fn parse_transport(protocol: u8, l4_bytes: &[u8]) -> Result<Transport
                 igmp: None,
                 tcp_options: None,
                 gre: None,
+                vxlan: None,
                 dns: None,
                 hints: Vec::new(),
             })
@@ -119,6 +132,7 @@ pub(super) fn parse_transport(protocol: u8, l4_bytes: &[u8]) -> Result<Transport
                 igmp: Some(igmp),
                 tcp_options: None,
                 gre: None,
+                vxlan: None,
                 dns: None,
                 hints: Vec::new(),
             })
@@ -132,6 +146,7 @@ pub(super) fn parse_transport(protocol: u8, l4_bytes: &[u8]) -> Result<Transport
                 igmp: None,
                 tcp_options: None,
                 gre: Some(gre),
+                vxlan: None,
                 dns: None,
                 hints: Vec::new(),
             })
@@ -206,6 +221,21 @@ fn parse_tcp_options(blob: &[u8]) -> TcpOptionsParsed {
                     out.window_scale = Some(blob[i + 2]);
                 }
             }
+            4 => {
+                if len >= 2 {
+                    out.sack_permitted = true;
+                }
+            }
+            8 => {
+                if len >= 10 {
+                    out.ts_val = Some(u32::from_be_bytes([
+                        blob[i + 2], blob[i + 3], blob[i + 4], blob[i + 5],
+                    ]));
+                    out.ts_ecr = Some(u32::from_be_bytes([
+                        blob[i + 6], blob[i + 7], blob[i + 8], blob[i + 9],
+                    ]));
+                }
+            }
             _ => {}
         }
         i += len;
@@ -219,6 +249,14 @@ fn parse_gre_minimal(data: &[u8]) -> Result<GreInfo, LayerError> {
     }
     let protocol_type = u16::from_be_bytes([data[2], data[3]]);
     Ok(GreInfo { protocol_type })
+}
+
+fn parse_vxlan_minimal(data: &[u8]) -> Result<VxlanInfo, LayerError> {
+    if data.len() < 8 {
+        return Err(LayerError::InvalidLength);
+    }
+    let vni = (data[4] as u32) << 16 | (data[5] as u32) << 8 | (data[6] as u32);
+    Ok(VxlanInfo { vni })
 }
 
 fn parse_tcp_header(l4_bytes: &[u8]) -> Result<TcpHeader, LayerError> {
@@ -352,5 +390,195 @@ fn likely_ntp_message(payload: &[u8]) -> bool {
 fn push_hint_unique(hints: &mut Vec<UdpAppHint>, hint: UdpAppHint) {
     if !hints.contains(&hint) {
         hints.push(hint);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::engine::builtin::{
+        BuiltinPacketParser, ParseWarningCode, TransportSegment, UdpAppHint,
+    };
+
+    fn build_ethernet_ipv4_udp_frame(src_port: u16, dst_port: u16, udp_payload: &[u8]) -> Vec<u8> {
+        let udp_len = (8 + udp_payload.len()) as u16;
+        let ip_total_len = (20 + udp_len as usize) as u16;
+
+        let mut frame = Vec::with_capacity(14 + ip_total_len as usize);
+        frame.extend_from_slice(&[0, 1, 2, 3, 4, 5]);
+        frame.extend_from_slice(&[6, 7, 8, 9, 10, 11]);
+        frame.extend_from_slice(&0x0800u16.to_be_bytes());
+
+        frame.push(0x45);
+        frame.push(0x00);
+        frame.extend_from_slice(&ip_total_len.to_be_bytes());
+        frame.extend_from_slice(&0x1234u16.to_be_bytes());
+        frame.extend_from_slice(&0x4000u16.to_be_bytes());
+        frame.push(64);
+        frame.push(17);
+        frame.extend_from_slice(&[0x00, 0x00]);
+        frame.extend_from_slice(&[192, 168, 1, 1]);
+        frame.extend_from_slice(&[224, 0, 0, 251]);
+
+        frame.extend_from_slice(&src_port.to_be_bytes());
+        frame.extend_from_slice(&dst_port.to_be_bytes());
+        frame.extend_from_slice(&udp_len.to_be_bytes());
+        frame.extend_from_slice(&[0x00, 0x00]);
+        frame.extend_from_slice(udp_payload);
+
+        frame
+    }
+
+    #[test]
+    fn parses_ethernet_ipv4_tcp_minimal() {
+        let frame = vec![
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0x08, 0x00,
+            0x45, 0x00, 0x00, 0x28, 0x12, 0x34, 0x40, 0x00, 64, 6, 0x00, 0x00, 192, 168, 1, 1, 192, 168, 1, 2,
+            0x00, 0x50, 0x01, 0xbb, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x02,
+            0x50, 0x10, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ];
+
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+        assert!(parsed.ethernet.is_some());
+        assert!(parsed.ipv4.is_some());
+        assert!(matches!(parsed.transport, Some(TransportSegment::Tcp(_))));
+    }
+
+    #[test]
+    fn parses_ethernet_vlan_ipv4_udp_dns() {
+        let frame = vec![
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11,
+            0x81, 0x00, 0x00, 0x64, 0x08, 0x00,
+            0x45, 0x00, 0x00, 0x3d, 0x12, 0x34, 0x40, 0x00, 64, 17, 0x00, 0x00, 192, 168, 1, 1, 8, 8, 8, 8,
+            0x30, 0x39, 0x00, 0x35, 0x00, 0x29, 0x00, 0x00,
+            0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x03, b'w', b'w', b'w', 0x07, b'e', b'x', b'a', b'm', b'p', b'l', b'e', 0x03, b'c', b'o',
+            b'm', 0x00, 0x00, 0x01, 0x00, 0x01,
+        ];
+
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+        assert!(parsed.ethernet.is_some());
+        assert!(parsed.ipv4.is_some());
+        assert!(matches!(parsed.transport, Some(TransportSegment::Udp(_))));
+        assert!(parsed.dns.is_some());
+        assert!(parsed.udp_hints.contains(&UdpAppHint::Dns));
+    }
+
+    #[test]
+    fn detects_dhcp_udp_probe() {
+        let mut payload = vec![0u8; 240];
+        payload[0] = 1;
+        payload[236..240].copy_from_slice(&[99, 130, 83, 99]);
+
+        let frame = build_ethernet_ipv4_udp_frame(68, 67, &payload);
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+        assert!(parsed.udp_hints.contains(&UdpAppHint::Dhcp));
+    }
+
+    #[test]
+    fn detects_ntp_udp_probe() {
+        let mut payload = vec![0u8; 48];
+        payload[0] = 0x23;
+
+        let frame = build_ethernet_ipv4_udp_frame(123, 123, &payload);
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+        assert!(parsed.udp_hints.contains(&UdpAppHint::Ntp));
+    }
+
+    #[test]
+    fn detects_mdns_udp_probe() {
+        let payload = vec![
+            0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x03, b'w', b'w', b'w', 0x07, b'e', b'x', b'a', b'm', b'p', b'l', b'e', 0x03, b'c', b'o',
+            b'm', 0x00, 0x00, 0x01, 0x00, 0x01,
+        ];
+
+        let frame = build_ethernet_ipv4_udp_frame(5353, 5353, &payload);
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+        assert!(parsed.udp_hints.contains(&UdpAppHint::Mdns));
+        assert!(parsed.dns.is_some());
+    }
+
+    #[test]
+    fn parses_tcp_options_mss_and_window_scale() {
+        let frame = vec![
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0x08, 0x00,
+            0x45, 0x00, 0x00, 0x34, 0x00, 0x01, 0x40, 0x00, 64, 6, 0, 0, 192, 168, 1, 1, 192, 168, 1, 2,
+            0x00, 0x50, 0x01, 0xbb, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x02,
+            0x70, 0x12, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x02, 0x04, 0x05, 0xb4, 0x01, 0x03, 0x03, 0x07, 0x01, 0x01, 0x01, 0x01,
+        ];
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+        let opts = parsed.tcp_options.as_ref().expect("tcp_options");
+        assert_eq!(opts.mss, Some(1460));
+        assert_eq!(opts.window_scale, Some(7));
+    }
+
+    #[test]
+    fn parses_ipv4_gre() {
+        let frame = vec![
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0x08, 0x00,
+            0x45, 0x00, 0x00, 0x28, 0x00, 0x01, 0x40, 0x00, 64, 47, 0, 0, 10, 0, 0, 1, 10, 0, 0, 2,
+            0x00, 0x00, 0x08, 0x00, 0x45, 0x00, 0x00, 0x14, 0x00, 0x01, 0x00, 0x00, 64, 1, 0, 0, 192, 168, 1, 1, 192, 168, 1, 2,
+        ];
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+        assert!(parsed.ipv4.is_some());
+        assert!(parsed.gre.is_some());
+        assert_eq!(parsed.gre.as_ref().unwrap().protocol_type, 0x0800);
+        assert!(parsed.warnings.iter().any(|w| matches!(w.code, ParseWarningCode::GreInner)));
+    }
+
+    #[test]
+    fn gre_minimal_parsed_with_warning() {
+        let frame = vec![
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0x08, 0x00,
+            0x45, 0x00, 0x00, 0x24, 0x00, 0x01, 0x40, 0x00, 64, 47, 0, 0, 10, 0, 0, 1, 10, 0, 0, 2,
+            0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ];
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+        assert!(parsed.gre.is_some());
+        assert_eq!(parsed.gre.as_ref().unwrap().protocol_type, 0x0800);
+        assert!(parsed.warnings.iter().any(|w| matches!(w.code, ParseWarningCode::GreInner)));
+    }
+
+    #[test]
+    fn tcp_options_mss_and_window_scale_parsed() {
+        let frame = vec![
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0x08, 0x00,
+            0x45, 0x00, 0x00, 0x34, 0x00, 0x01, 0x40, 0x00, 64, 6, 0, 0, 192, 168, 1, 1, 192, 168, 1, 2,
+            0x00, 0x50, 0x01, 0xbb, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x02,
+            0x80, 0x12, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x02, 0x04, 0x05, 0xb4, 0x03, 0x03, 0x06, 0x01, 0x01, 0x01, 0x01, 0x01,
+        ];
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+        assert!(parsed.tcp_options.is_some());
+        let opts = parsed.tcp_options.as_ref().unwrap();
+        assert_eq!(opts.mss, Some(0x05b4));
+        assert_eq!(opts.window_scale, Some(6));
+    }
+
+    #[test]
+    fn vxlan_minimal_parsed_with_warning() {
+        let vxlan_header: [u8; 8] = [0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 100, 0];
+        let frame = build_ethernet_ipv4_udp_frame(4789, 4789, &vxlan_header);
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+        assert!(parsed.vxlan.is_some());
+        assert_eq!(parsed.vxlan.as_ref().unwrap().vni, 100);
+        assert!(parsed.warnings.iter().any(|w| matches!(w.code, ParseWarningCode::VxlanInner)));
+    }
+
+    #[test]
+    fn tcp_options_timestamp_and_sack_permitted() {
+        let frame = vec![
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0x08, 0x00,
+            0x45, 0x00, 0x00, 0x3a, 0x00, 0x01, 0x40, 0x00, 64, 6, 0, 0, 192, 168, 1, 1, 192, 168, 1, 2,
+            0x00, 0x50, 0x01, 0xbb, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x02,
+            0x90, 0x12, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x04, 0x02, 0x08, 0x0a, 0x11, 0x11, 0x11, 0x11, 0x22, 0x22, 0x22, 0x22, 0x01, 0x01, 0x01, 0x01,
+        ];
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+        let opts = parsed.tcp_options.as_ref().expect("tcp_options");
+        assert!(opts.sack_permitted);
+        assert_eq!(opts.ts_val, Some(0x1111_1111));
+        assert_eq!(opts.ts_ecr, Some(0x2222_2222));
     }
 }
