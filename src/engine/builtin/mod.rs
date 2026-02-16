@@ -5,13 +5,13 @@ mod types;
 
 use crate::layer::LayerError;
 
-use self::link::{parse_arp_packet, parse_link};
+use self::link::{parse_arp_packet, parse_link, parse_pppoe_minimal};
 use self::network::{parse_ipv4_header, parse_ipv6_header, resolve_ipv6_transport};
 use self::transport::parse_transport;
 
 pub use self::types::{
-    EthernetFrame, ParseConfig, ParseWarning, ParseWarningCode, ParsedPacket, TransportSegment,
-    UdpAppHint,
+    EthernetFrame, GreInfo, IgmpInfo, ParseConfig, ParseWarning, ParseWarningCode, ParsedPacket,
+    PppoeInfo, TcpOptionsParsed, TransportSegment, UdpAppHint,
 };
 
 pub struct BuiltinPacketParser;
@@ -57,10 +57,23 @@ impl BuiltinPacketParser {
                     });
                 }
 
+                if (ipv4.flags & 1) != 0 || ipv4.fragment_offset != 0 {
+                    parsed.warnings.push(ParseWarning {
+                        code: ParseWarningCode::Ipv4Fragmented,
+                        message: "IPv4 fragment; no reassembly, L4 may be incomplete",
+                    });
+                }
+
                 let l4_end = total_len.min(l3_bytes.len());
                 let l4_bytes = &l3_bytes[ip_header_len..l4_end];
                 let transport_parse = parse_transport(ipv4.protocol, l4_bytes)?;
                 apply_transport_parse(&mut parsed, transport_parse);
+                if parsed.gre.is_some() {
+                    parsed.warnings.push(ParseWarning {
+                        code: ParseWarningCode::GreInner,
+                        message: "GRE inner payload; no nested decode yet",
+                    });
+                }
                 parsed.ipv4 = Some(ipv4);
                 Ok(parsed)
             }
@@ -108,6 +121,15 @@ impl BuiltinPacketParser {
                 parsed.ipv6 = Some(ipv6);
                 Ok(parsed)
             }
+            0x8863 | 0x8864 => {
+                let pppoe = parse_pppoe_minimal(l3_bytes)?;
+                parsed.pppoe = Some(pppoe);
+                parsed.warnings.push(ParseWarning {
+                    code: ParseWarningCode::PppoeNoPayload,
+                    message: "PPPoE header only; payload not decoded",
+                });
+                Ok(parsed)
+            }
             other => {
                 parsed.warnings.push(ParseWarning {
                     code: ParseWarningCode::UnsupportedEthertype(other),
@@ -123,6 +145,9 @@ fn apply_transport_parse(parsed: &mut ParsedPacket, transport_parse: transport::
     parsed.transport = transport_parse.transport;
     parsed.icmp = transport_parse.icmp;
     parsed.icmpv6 = transport_parse.icmpv6;
+    parsed.igmp = transport_parse.igmp;
+    parsed.tcp_options = transport_parse.tcp_options;
+    parsed.gre = transport_parse.gre;
     parsed.dns = transport_parse.dns;
     parsed.udp_hints = transport_parse.hints;
 }
