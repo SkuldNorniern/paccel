@@ -210,6 +210,160 @@ impl<'a> UdpPacket<'a> {
 }
 
 #[derive(Debug, Clone, Copy)]
+pub struct DhcpPacket<'a> {
+    data: &'a [u8],
+}
+
+impl<'a> DhcpPacket<'a> {
+    pub fn new(data: &'a [u8]) -> Option<Self> {
+        if data.len() < 240 {
+            return None;
+        }
+        if data[236..240] != [99, 130, 83, 99] {
+            return None;
+        }
+        Some(Self { data })
+    }
+
+    pub fn op(&self) -> u8 {
+        self.data[0]
+    }
+
+    pub fn htype(&self) -> u8 {
+        self.data[1]
+    }
+
+    pub fn hlen(&self) -> u8 {
+        self.data[2]
+    }
+
+    pub fn hops(&self) -> u8 {
+        self.data[3]
+    }
+
+    pub fn xid(&self) -> u32 {
+        u32::from_be_bytes([self.data[4], self.data[5], self.data[6], self.data[7]])
+    }
+
+    pub fn secs(&self) -> u16 {
+        u16::from_be_bytes([self.data[8], self.data[9]])
+    }
+
+    pub fn flags(&self) -> u16 {
+        u16::from_be_bytes([self.data[10], self.data[11]])
+    }
+
+    pub fn ciaddr(&self) -> Ipv4Addr {
+        Ipv4Addr::new(self.data[12], self.data[13], self.data[14], self.data[15])
+    }
+
+    pub fn yiaddr(&self) -> Ipv4Addr {
+        Ipv4Addr::new(self.data[16], self.data[17], self.data[18], self.data[19])
+    }
+
+    pub fn siaddr(&self) -> Ipv4Addr {
+        Ipv4Addr::new(self.data[20], self.data[21], self.data[22], self.data[23])
+    }
+
+    pub fn giaddr(&self) -> Ipv4Addr {
+        Ipv4Addr::new(self.data[24], self.data[25], self.data[26], self.data[27])
+    }
+
+    pub fn chaddr(&self) -> [u8; 6] {
+        let mut out = [0u8; 6];
+        out.copy_from_slice(&self.data[28..34]);
+        out
+    }
+
+    pub fn options(&self) -> &'a [u8] {
+        &self.data[240..]
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct GrePacket<'a> {
+    data: &'a [u8],
+}
+
+impl<'a> GrePacket<'a> {
+    pub fn new(data: &'a [u8]) -> Option<Self> {
+        if data.len() < 4 {
+            return None;
+        }
+        Some(Self { data })
+    }
+
+    pub fn flags_version(&self) -> u16 {
+        u16::from_be_bytes([self.data[0], self.data[1]])
+    }
+
+    pub fn protocol_type(&self) -> u16 {
+        u16::from_be_bytes([self.data[2], self.data[3]])
+    }
+
+    pub fn payload(&self) -> &'a [u8] {
+        &self.data[4..]
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct VxlanPacket<'a> {
+    data: &'a [u8],
+}
+
+impl<'a> VxlanPacket<'a> {
+    pub fn new(data: &'a [u8]) -> Option<Self> {
+        if data.len() < 8 {
+            return None;
+        }
+        Some(Self { data })
+    }
+
+    pub fn flags(&self) -> u8 {
+        self.data[0]
+    }
+
+    pub fn has_vni_flag(&self) -> bool {
+        (self.flags() & 0x08) != 0
+    }
+
+    pub fn vni(&self) -> u32 {
+        (self.data[4] as u32) << 16 | (self.data[5] as u32) << 8 | (self.data[6] as u32)
+    }
+
+    pub fn payload(&self) -> &'a [u8] {
+        &self.data[8..]
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VlanTagView {
+    tci: u16,
+}
+
+impl VlanTagView {
+    pub fn new(tci: u16) -> Self {
+        Self { tci }
+    }
+
+    pub fn tci(self) -> u16 {
+        self.tci
+    }
+
+    pub fn pcp(self) -> u8 {
+        ((self.tci >> 13) & 0x7) as u8
+    }
+
+    pub fn dei(self) -> bool {
+        ((self.tci >> 12) & 0x1) != 0
+    }
+
+    pub fn vlan_id(self) -> u16 {
+        self.tci & 0x0fff
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
 pub struct TcpPacket<'a> {
     data: &'a [u8],
     header_len: usize,
@@ -462,8 +616,9 @@ impl<'a> Sll2Packet<'a> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ArpPacket, DnsPacket, EthernetPacket, IcmpPacket, Icmpv6Packet, Ipv4Packet, Ipv6Packet,
-        Sll2Packet, SllPacket, TcpPacket, UdpPacket,
+        ArpPacket, DhcpPacket, DnsPacket, EthernetPacket, GrePacket, IcmpPacket, Icmpv6Packet,
+        Ipv4Packet, Ipv6Packet, Sll2Packet, SllPacket, TcpPacket, UdpPacket, VlanTagView,
+        VxlanPacket,
     };
 
     #[test]
@@ -572,6 +727,59 @@ mod tests {
         assert_eq!(pkt6.code(), 0);
         assert_eq!(pkt6.checksum(), 0xabcd);
         assert_eq!(pkt6.payload(), &[9, 8, 7, 6]);
+    }
+
+    #[test]
+    fn dhcp_view_works() {
+        let mut dhcp = vec![0u8; 244];
+        dhcp[0] = 1;
+        dhcp[1] = 1;
+        dhcp[2] = 6;
+        dhcp[3] = 0;
+        dhcp[4..8].copy_from_slice(&0x1122_3344u32.to_be_bytes());
+        dhcp[8..10].copy_from_slice(&0x0001u16.to_be_bytes());
+        dhcp[10..12].copy_from_slice(&0x8000u16.to_be_bytes());
+        dhcp[16..20].copy_from_slice(&[192, 168, 1, 10]);
+        dhcp[28..34].copy_from_slice(&[0xde, 0xad, 0xbe, 0xef, 0x00, 0x01]);
+        dhcp[236..240].copy_from_slice(&[99, 130, 83, 99]);
+        dhcp[240..244].copy_from_slice(&[53, 1, 1, 255]);
+
+        let pkt = DhcpPacket::new(&dhcp).expect("dhcp should parse");
+        assert_eq!(pkt.op(), 1);
+        assert_eq!(pkt.htype(), 1);
+        assert_eq!(pkt.hlen(), 6);
+        assert_eq!(pkt.xid(), 0x1122_3344);
+        assert_eq!(pkt.flags(), 0x8000);
+        assert_eq!(pkt.yiaddr().octets(), [192, 168, 1, 10]);
+        assert_eq!(pkt.chaddr(), [0xde, 0xad, 0xbe, 0xef, 0x00, 0x01]);
+        assert_eq!(pkt.options(), &[53, 1, 1, 255]);
+    }
+
+    #[test]
+    fn gre_view_works() {
+        let data = [0x00, 0x00, 0x08, 0x00, 0x45, 0x00, 0x00, 0x14];
+        let pkt = GrePacket::new(&data).expect("gre should parse");
+        assert_eq!(pkt.flags_version(), 0x0000);
+        assert_eq!(pkt.protocol_type(), 0x0800);
+        assert_eq!(pkt.payload(), &[0x45, 0x00, 0x00, 0x14]);
+    }
+
+    #[test]
+    fn vxlan_view_works() {
+        let data = [0x08, 0, 0, 0, 0, 0, 100, 0, 1, 2, 3, 4];
+        let pkt = VxlanPacket::new(&data).expect("vxlan should parse");
+        assert!(pkt.has_vni_flag());
+        assert_eq!(pkt.vni(), 100);
+        assert_eq!(pkt.payload(), &[1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn vlan_tag_view_works() {
+        let tag = VlanTagView::new(0xa064);
+        assert_eq!(tag.tci(), 0xa064);
+        assert_eq!(tag.pcp(), 5);
+        assert!(!tag.dei());
+        assert_eq!(tag.vlan_id(), 100);
     }
 
     #[test]

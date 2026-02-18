@@ -6,7 +6,7 @@ pub mod view;
 pub use metadata::PacketMetadata;
 pub use owned::{Packet, PacketError};
 pub use protocols::{
-    ArpPacket, DnsPacket, EthernetPacket, IcmpPacket, Icmpv6Packet, Ipv4Packet, Ipv6Packet,
-    Sll2Packet, SllPacket, TcpPacket, UdpPacket,
+    ArpPacket, DhcpPacket, DnsPacket, EthernetPacket, GrePacket, IcmpPacket, Icmpv6Packet,
+    Ipv4Packet, Ipv6Packet, Sll2Packet, SllPacket, TcpPacket, UdpPacket, VlanTagView, VxlanPacket,
 };
 pub use view::PacketView;
