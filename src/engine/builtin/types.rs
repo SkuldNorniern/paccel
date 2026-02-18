@@ -32,6 +32,17 @@ pub enum ParseWarningProtocol {
     Tunnel,
 }
 
+impl ParseWarningProtocol {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Link => "link",
+            Self::Network => "network",
+            Self::Transport => "transport",
+            Self::Tunnel => "tunnel",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParseWarningSubcode {
     UnsupportedEthertype,
@@ -47,6 +58,26 @@ pub enum ParseWarningSubcode {
     GeneveInner,
     AhInner,
     EspInner,
+}
+
+impl ParseWarningSubcode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::UnsupportedEthertype => "unsupported-ethertype",
+            Self::Ipv4Truncated => "ipv4-truncated",
+            Self::Ipv4Fragmented => "ipv4-fragmented",
+            Self::Ipv6ExtensionDepthLimit => "ipv6-ext-depth-limit",
+            Self::Ipv6NonInitialFragment => "ipv6-non-initial-fragment",
+            Self::PppoeNoPayload => "pppoe-no-payload",
+            Self::MplsInner => "mpls-inner",
+            Self::MplsLabelDepthLimit => "mpls-label-depth-limit",
+            Self::GreInner => "gre-inner",
+            Self::VxlanInner => "vxlan-inner",
+            Self::GeneveInner => "geneve-inner",
+            Self::AhInner => "ah-inner",
+            Self::EspInner => "esp-inner",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,6 +141,17 @@ pub enum WireGuardMessageType {
     TransportData,
 }
 
+impl WireGuardMessageType {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::HandshakeInitiation => "handshake-initiation",
+            Self::HandshakeResponse => "handshake-response",
+            Self::CookieReply => "cookie-reply",
+            Self::TransportData => "transport-data",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WireGuardInfo {
     pub message_type: WireGuardMessageType,
@@ -161,6 +203,15 @@ pub enum ParseMode {
     Strict,
 }
 
+impl ParseMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Permissive => "permissive",
+            Self::Strict => "strict",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct ParseConfig {
     pub max_ipv6_extension_headers: usize,
@@ -185,6 +236,18 @@ pub enum UdpAppHint {
     Dhcp,
     Ntp,
     WireGuard,
+}
+
+impl UdpAppHint {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Dns => "dns",
+            Self::Mdns => "mdns",
+            Self::Dhcp => "dhcp",
+            Self::Ntp => "ntp",
+            Self::WireGuard => "wireguard",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -224,4 +287,70 @@ pub struct ParsedPacket {
     pub dns: Option<DnsMessage>,
     pub udp_hints: Vec<UdpAppHint>,
     pub warnings: Vec<ParseWarning>,
+}
+
+impl ParsedPacket {
+    pub fn link_protocol_name(&self) -> Option<&'static str> {
+        self.ethernet
+            .as_ref()
+            .map(|eth| crate::engine::constants::ethertype_name(eth.ethertype))
+    }
+
+    pub fn network_protocol_name(&self) -> Option<&'static str> {
+        if self.arp.is_some() {
+            Some("arp")
+        } else if self.ipv4.is_some() {
+            Some("ipv4")
+        } else if self.ipv6.is_some() {
+            Some("ipv6")
+        } else {
+            None
+        }
+    }
+
+    pub fn transport_protocol_name(&self) -> Option<&'static str> {
+        match self.transport {
+            Some(TransportSegment::Tcp(_)) => Some("tcp"),
+            Some(TransportSegment::Udp(_)) => Some("udp"),
+            None => None,
+        }
+    }
+
+    pub fn warning_subcode_names(&self) -> impl Iterator<Item = &'static str> + '_ {
+        self.warnings.iter().map(|w| w.subcode.as_str())
+    }
+
+    pub fn tunnel_protocol_names(&self) -> impl Iterator<Item = &'static str> {
+        [
+            self.gre.as_ref().map(|_| "gre"),
+            self.vxlan.as_ref().map(|_| "vxlan"),
+            self.geneve.as_ref().map(|_| "geneve"),
+            self.mpls.as_ref().map(|_| "mpls"),
+            self.pppoe.as_ref().map(|_| "pppoe"),
+            self.ah.as_ref().map(|_| "ah"),
+            self.esp.as_ref().map(|_| "esp"),
+            self.wireguard.as_ref().map(|_| "wireguard"),
+        ]
+        .into_iter()
+        .flatten()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        ParseMode, ParseWarningProtocol, ParseWarningSubcode, UdpAppHint, WireGuardMessageType,
+    };
+
+    #[test]
+    fn stable_name_helpers_are_exposed() {
+        assert_eq!(ParseMode::Permissive.as_str(), "permissive");
+        assert_eq!(ParseWarningProtocol::Tunnel.as_str(), "tunnel");
+        assert_eq!(ParseWarningSubcode::VxlanInner.as_str(), "vxlan-inner");
+        assert_eq!(UdpAppHint::WireGuard.as_str(), "wireguard");
+        assert_eq!(
+            WireGuardMessageType::HandshakeInitiation.as_str(),
+            "handshake-initiation"
+        );
+    }
 }
