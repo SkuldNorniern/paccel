@@ -17,6 +17,9 @@ pub enum ParseWarningCode {
     GreInner,
     PppoeNoPayload,
     VxlanInner,
+    GeneveInner,
+    MplsInner,
+    MplsLabelDepthLimit,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,6 +54,26 @@ pub struct VxlanInfo {
     pub vni: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GeneveInfo {
+    pub version: u8,
+    pub protocol_type: u16,
+    pub vni: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MplsLabel {
+    pub label: u32,
+    pub exp: u8,
+    pub bottom_of_stack: bool,
+    pub ttl: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MplsInfo {
+    pub labels: Vec<MplsLabel>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParseWarning {
     pub code: ParseWarningCode,
@@ -60,12 +83,14 @@ pub struct ParseWarning {
 #[derive(Debug, Clone, Copy)]
 pub struct ParseConfig {
     pub max_ipv6_extension_headers: usize,
+    pub max_mpls_labels: usize,
 }
 
 impl Default for ParseConfig {
     fn default() -> Self {
         Self {
             max_ipv6_extension_headers: 8,
+            max_mpls_labels: 8,
         }
     }
 }
@@ -107,6 +132,8 @@ pub struct ParsedPacket {
     pub gre: Option<GreInfo>,
     pub pppoe: Option<PppoeInfo>,
     pub vxlan: Option<VxlanInfo>,
+    pub geneve: Option<GeneveInfo>,
+    pub mpls: Option<MplsInfo>,
     pub dns: Option<DnsMessage>,
     pub udp_hints: Vec<UdpAppHint>,
     pub warnings: Vec<ParseWarning>,

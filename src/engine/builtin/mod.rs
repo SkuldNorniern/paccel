@@ -5,13 +5,14 @@ mod types;
 
 use crate::layer::LayerError;
 
-use self::link::{parse_arp_packet, parse_link, parse_pppoe_minimal};
+use self::link::{parse_arp_packet, parse_link, parse_mpls_stack, parse_pppoe_minimal};
 use self::network::{parse_ipv4_header, parse_ipv6_header, resolve_ipv6_transport};
 use self::transport::parse_transport;
 
 pub use self::types::{
-    EthernetFrame, GreInfo, IgmpInfo, ParseConfig, ParseWarning, ParseWarningCode, ParsedPacket,
-    PppoeInfo, TcpOptionsParsed, TransportSegment, UdpAppHint, VxlanInfo,
+    EthernetFrame, GeneveInfo, GreInfo, IgmpInfo, MplsInfo, MplsLabel, ParseConfig, ParseWarning,
+    ParseWarningCode, ParsedPacket, PppoeInfo, TcpOptionsParsed, TransportSegment, UdpAppHint,
+    VxlanInfo,
 };
 
 pub struct BuiltinPacketParser;
@@ -68,18 +69,7 @@ impl BuiltinPacketParser {
                 let l4_bytes = &l3_bytes[ip_header_len..l4_end];
                 let transport_parse = parse_transport(ipv4.protocol, l4_bytes)?;
                 apply_transport_parse(&mut parsed, transport_parse);
-                if parsed.gre.is_some() {
-                    parsed.warnings.push(ParseWarning {
-                        code: ParseWarningCode::GreInner,
-                        message: "GRE inner payload; no nested decode yet",
-                    });
-                }
-                if parsed.vxlan.is_some() {
-                    parsed.warnings.push(ParseWarning {
-                        code: ParseWarningCode::VxlanInner,
-                        message: "VXLAN inner payload; no nested decode yet",
-                    });
-                }
+                push_inner_payload_warnings(&mut parsed);
                 parsed.ipv4 = Some(ipv4);
                 Ok(parsed)
             }
@@ -122,12 +112,7 @@ impl BuiltinPacketParser {
                     let l4_bytes = &ipv6_payload[state.l4_offset..];
                     let transport_parse = parse_transport(state.next_header, l4_bytes)?;
                     apply_transport_parse(&mut parsed, transport_parse);
-                    if parsed.vxlan.is_some() {
-                        parsed.warnings.push(ParseWarning {
-                            code: ParseWarningCode::VxlanInner,
-                            message: "VXLAN inner payload; no nested decode yet",
-                        });
-                    }
+                    push_inner_payload_warnings(&mut parsed);
                 }
 
                 parsed.ipv6 = Some(ipv6);
@@ -142,6 +127,24 @@ impl BuiltinPacketParser {
                 });
                 Ok(parsed)
             }
+            0x8847 | 0x8848 => {
+                let (mpls, mpls_payload_offset, depth_limit_hit) =
+                    parse_mpls_stack(l3_bytes, config.max_mpls_labels)?;
+                parsed.mpls = Some(mpls);
+                if depth_limit_hit {
+                    parsed.warnings.push(ParseWarning {
+                        code: ParseWarningCode::MplsLabelDepthLimit,
+                        message: "MPLS label depth limit reached; skipping inner payload decode",
+                    });
+                }
+                if mpls_payload_offset < l3_bytes.len() {
+                    parsed.warnings.push(ParseWarning {
+                        code: ParseWarningCode::MplsInner,
+                        message: "MPLS inner payload; no nested decode yet",
+                    });
+                }
+                Ok(parsed)
+            }
             other => {
                 parsed.warnings.push(ParseWarning {
                     code: ParseWarningCode::UnsupportedEthertype(other),
@@ -153,6 +156,27 @@ impl BuiltinPacketParser {
     }
 }
 
+fn push_inner_payload_warnings(parsed: &mut ParsedPacket) {
+    if parsed.gre.is_some() {
+        parsed.warnings.push(ParseWarning {
+            code: ParseWarningCode::GreInner,
+            message: "GRE inner payload; no nested decode yet",
+        });
+    }
+    if parsed.vxlan.is_some() {
+        parsed.warnings.push(ParseWarning {
+            code: ParseWarningCode::VxlanInner,
+            message: "VXLAN inner payload; no nested decode yet",
+        });
+    }
+    if parsed.geneve.is_some() {
+        parsed.warnings.push(ParseWarning {
+            code: ParseWarningCode::GeneveInner,
+            message: "GENEVE inner payload; no nested decode yet",
+        });
+    }
+}
+
 fn apply_transport_parse(parsed: &mut ParsedPacket, transport_parse: transport::TransportParse) {
     parsed.transport = transport_parse.transport;
     parsed.icmp = transport_parse.icmp;
@@ -161,6 +185,7 @@ fn apply_transport_parse(parsed: &mut ParsedPacket, transport_parse: transport::
     parsed.tcp_options = transport_parse.tcp_options;
     parsed.gre = transport_parse.gre;
     parsed.vxlan = transport_parse.vxlan;
+    parsed.geneve = transport_parse.geneve;
     parsed.dns = transport_parse.dns;
     parsed.udp_hints = transport_parse.hints;
 }

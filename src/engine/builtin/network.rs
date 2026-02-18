@@ -179,16 +179,14 @@ pub(super) fn resolve_ipv6_transport(
 
 #[cfg(test)]
 mod tests {
-    use crate::engine::builtin::{
-        BuiltinPacketParser, ParseWarningCode, TransportSegment,
-    };
+    use crate::engine::builtin::{BuiltinPacketParser, ParseWarningCode, TransportSegment};
 
     #[test]
     fn parses_ipv4_icmp() {
         let frame = vec![
-            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0x08, 0x00,
-            0x45, 0x00, 0x00, 0x1c, 0x00, 0x01, 0x40, 0x00, 64, 1, 0, 0, 192, 168, 1, 1, 192, 168, 1, 2,
-            8, 0, 0xf7, 0xff, 0x00, 0x00, 0x00, 0x00,
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0x08, 0x00, 0x45, 0x00, 0x00, 0x1c, 0x00, 0x01,
+            0x40, 0x00, 64, 1, 0, 0, 192, 168, 1, 1, 192, 168, 1, 2, 8, 0, 0xf7, 0xff, 0x00, 0x00,
+            0x00, 0x00,
         ];
 
         let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
@@ -201,11 +199,9 @@ mod tests {
     #[test]
     fn parses_ipv6_icmpv6() {
         let frame = vec![
-            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0x86, 0xdd,
-            0x60, 0x00, 0x00, 0x00, 0x00, 0x08, 58, 64,
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2,
-            128, 0, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00,
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0x86, 0xdd, 0x60, 0x00, 0x00, 0x00, 0x00, 0x08,
+            58, 64, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 2, 128, 0, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00,
         ];
 
         let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
@@ -218,9 +214,9 @@ mod tests {
     #[test]
     fn parses_ipv4_igmp() {
         let frame = vec![
-            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0x08, 0x00,
-            0x45, 0x00, 0x00, 0x20, 0x00, 0x01, 0x00, 0x00, 64, 2, 0, 0, 192, 168, 1, 1, 224, 0, 0, 1,
-            0x11, 0x00, 0x00, 0x00, 224, 0, 0, 1,
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0x08, 0x00, 0x45, 0x00, 0x00, 0x20, 0x00, 0x01,
+            0x00, 0x00, 64, 2, 0, 0, 192, 168, 1, 1, 224, 0, 0, 1, 0x11, 0x00, 0x00, 0x00, 224, 0,
+            0, 1,
         ];
 
         let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
@@ -236,24 +232,27 @@ mod tests {
     #[test]
     fn ipv4_fragmented_adds_warning() {
         let frame = vec![
-            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0x08, 0x00,
-            0x45, 0x00, 0x00, 0x24, 0x12, 0x34, 0x20, 0x01, 64, 17, 0, 0, 192, 168, 1, 1, 192, 168, 1, 2,
-            0x04, 0xd2, 0x00, 0x35, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0x08, 0x00, 0x45, 0x00, 0x00, 0x24, 0x12, 0x34,
+            0x20, 0x01, 64, 17, 0, 0, 192, 168, 1, 1, 192, 168, 1, 2, 0x04, 0xd2, 0x00, 0x35, 0x00,
+            0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         ];
         assert_eq!(frame.len(), 14 + 36);
 
         let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
         assert!(parsed.ipv4.is_some());
-        assert!(parsed.warnings.iter().any(|w| matches!(w.code, ParseWarningCode::Ipv4Fragmented)));
+        assert!(parsed
+            .warnings
+            .iter()
+            .any(|w| matches!(w.code, ParseWarningCode::Ipv4Fragmented)));
     }
 
     #[test]
     fn ipv4_truncated_adds_warning_and_parses_available_l4() {
         let frame = vec![
-            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0x08, 0x00,
-            0x45, 0x00, 0x00, 0x64, 0x00, 0x01, 0x40, 0x00, 64, 6, 0, 0, 192, 168, 1, 1, 192, 168, 1, 2,
-            0x00, 0x50, 0x01, 0xbb, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x02, 0x50, 0x10, 0x10,
-            0x00, 0x00, 0x00, 0x00, 0x00,
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0x08, 0x00, 0x45, 0x00, 0x00, 0x64, 0x00, 0x01,
+            0x40, 0x00, 64, 6, 0, 0, 192, 168, 1, 1, 192, 168, 1, 2, 0x00, 0x50, 0x01, 0xbb, 0x00,
+            0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x02, 0x50, 0x10, 0x10, 0x00, 0x00, 0x00, 0x00,
+            0x00,
         ];
         let full_packet_len = 14 + 100;
         assert!(frame.len() < full_packet_len);
@@ -261,19 +260,20 @@ mod tests {
         let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
         assert!(parsed.ipv4.is_some());
         assert_eq!(parsed.ipv4.as_ref().unwrap().total_length, 100);
-        assert!(parsed.warnings.iter().any(|w| matches!(w.code, ParseWarningCode::Ipv4Truncated)));
+        assert!(parsed
+            .warnings
+            .iter()
+            .any(|w| matches!(w.code, ParseWarningCode::Ipv4Truncated)));
         assert!(matches!(parsed.transport, Some(TransportSegment::Tcp(_))));
     }
 
     #[test]
     fn skips_l4_on_ipv6_non_initial_fragment() {
         let frame = vec![
-            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0x86, 0xdd,
-            0x60, 0x00, 0x00, 0x00, 0x00, 0x10, 44, 64,
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2,
-            17, 0, 0x00, 0x09, 0x12, 0x34, 0x56, 0x78,
-            0x00, 0x35, 0x30, 0x39, 0x00, 0x10, 0x00, 0x00,
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0x86, 0xdd, 0x60, 0x00, 0x00, 0x00, 0x00, 0x10,
+            44, 64, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 2, 17, 0, 0x00, 0x09, 0x12, 0x34, 0x56, 0x78, 0x00, 0x35, 0x30, 0x39,
+            0x00, 0x10, 0x00, 0x00,
         ];
 
         let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
