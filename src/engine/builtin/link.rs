@@ -1,3 +1,4 @@
+use crate::engine::constants::ethertype;
 use crate::engine::cursor::Cursor;
 use crate::layer::datalink::arp::{ArpOperation, ArpPacket};
 use crate::layer::LayerError;
@@ -16,8 +17,6 @@ const SLL_PROTOCOL_OFFSET: usize = 14;
 const SLL2_PROTOCOL_OFFSET: usize = 0;
 
 const VLAN_TAG_LEN: usize = 4;
-const VLAN_ETHERTYPE_8021Q: u16 = 0x8100;
-const VLAN_ETHERTYPE_QINQ: u16 = 0x88A8;
 
 const ARP_MIN_LEN: usize = 28;
 const ARP_HEADER_LEN: usize = 8;
@@ -70,10 +69,16 @@ fn ethertype_at_offset_12(raw: &[u8]) -> Option<u16> {
     read_u16_be_at(raw, ETHERTYPE_OFFSET)
 }
 
-fn is_common_ethertype(ethertype: u16) -> bool {
+fn is_common_ethertype(value: u16) -> bool {
     matches!(
-        ethertype,
-        0x0800 | 0x0806 | 0x86DD | 0x8100 | 0x88A8 | 0x8847 | 0x8848
+        value,
+        ethertype::IPV4
+            | ethertype::ARP
+            | ethertype::IPV6
+            | ethertype::VLAN_8021Q
+            | ethertype::QINQ_8021AD
+            | ethertype::MPLS_UNICAST
+            | ethertype::MPLS_MULTICAST
     )
 }
 
@@ -87,7 +92,7 @@ fn looks_like_sll2(raw: &[u8]) -> bool {
     raw.len() >= SLL2_HEADER_LEN
         && matches!(
             read_u16_be_at(raw, SLL2_PROTOCOL_OFFSET),
-            Some(0x0800) | Some(0x0806) | Some(0x86DD)
+            Some(ethertype::IPV4) | Some(ethertype::ARP) | Some(ethertype::IPV6)
         )
 }
 
@@ -114,8 +119,8 @@ fn parse_sll2(raw: &[u8]) -> Result<(EthernetFrame, usize), LayerError> {
     Ok(synthetic_link_frame(protocol, SLL2_HEADER_LEN))
 }
 
-fn is_vlan_ethertype(ethertype: u16) -> bool {
-    matches!(ethertype, VLAN_ETHERTYPE_8021Q | VLAN_ETHERTYPE_QINQ)
+fn is_vlan_ethertype(value: u16) -> bool {
+    matches!(value, ethertype::VLAN_8021Q | ethertype::QINQ_8021AD)
 }
 
 pub(super) fn parse_link(raw: &[u8]) -> Result<(EthernetFrame, usize), LayerError> {

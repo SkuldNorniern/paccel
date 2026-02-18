@@ -1,3 +1,4 @@
+use crate::engine::constants::ip_proto;
 use crate::layer::network::ipv4::Ipv4Header;
 use crate::layer::network::ipv6::Ipv6Header;
 use crate::layer::LayerError;
@@ -155,7 +156,7 @@ pub(super) fn resolve_ipv6_transport(
                     return Ok(state);
                 }
             }
-            51 => {
+            ip_proto::AH => {
                 if state.l4_offset + 2 > packet.len() {
                     return Err(LayerError::InvalidLength);
                 }
@@ -171,7 +172,7 @@ pub(super) fn resolve_ipv6_transport(
                 state.l4_offset += header_len;
                 depth += 1;
             }
-            50 | 59 => return Ok(state),
+            ip_proto::ESP | 59 => return Ok(state),
             _ => return Ok(state),
         }
     }

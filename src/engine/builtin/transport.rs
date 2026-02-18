@@ -1,3 +1,4 @@
+use crate::engine::constants::ip_proto;
 use crate::layer::application::dns::{parse_dns_message, DnsMessage};
 use crate::layer::network::icmp::IcmpHeader;
 use crate::layer::network::icmpv6::Icmpv6Header;
@@ -9,15 +10,6 @@ use super::types::{
     AhInfo, EspInfo, GeneveInfo, GreInfo, IgmpInfo, TcpOptionsParsed, TransportSegment, UdpAppHint,
     VxlanInfo, WireGuardInfo, WireGuardMessageType,
 };
-
-const PROTO_ICMP: u8 = 1;
-const PROTO_IGMP: u8 = 2;
-const PROTO_TCP: u8 = 6;
-const PROTO_UDP: u8 = 17;
-const PROTO_GRE: u8 = 47;
-const PROTO_ESP: u8 = 50;
-const PROTO_AH: u8 = 51;
-const PROTO_ICMPV6: u8 = 58;
 
 const UDP_HEADER_LEN: usize = 8;
 const UDP_PORT_DNS: u16 = 53;
@@ -120,7 +112,7 @@ impl TransportParse {
 
 pub(super) fn parse_transport(protocol: u8, l4_bytes: &[u8]) -> Result<TransportParse, LayerError> {
     match protocol {
-        PROTO_TCP => {
+        ip_proto::TCP => {
             let tcp = parse_tcp_header(l4_bytes)?;
             let tcp_options = tcp
                 .options
@@ -129,28 +121,28 @@ pub(super) fn parse_transport(protocol: u8, l4_bytes: &[u8]) -> Result<Transport
                 .unwrap_or_default();
             Ok(TransportParse::with_tcp(tcp, tcp_options))
         }
-        PROTO_UDP => parse_udp_transport(l4_bytes),
-        PROTO_ICMP => {
+        ip_proto::UDP => parse_udp_transport(l4_bytes),
+        ip_proto::ICMP => {
             let icmp = parse_icmp_minimal(l4_bytes)?;
             Ok(TransportParse::with_icmp(icmp))
         }
-        PROTO_ICMPV6 => {
+        ip_proto::ICMPV6 => {
             let icmpv6 = parse_icmpv6_minimal(l4_bytes)?;
             Ok(TransportParse::with_icmpv6(icmpv6))
         }
-        PROTO_IGMP => {
+        ip_proto::IGMP => {
             let igmp = parse_igmp_minimal(l4_bytes)?;
             Ok(TransportParse::with_igmp(igmp))
         }
-        PROTO_GRE => {
+        ip_proto::GRE => {
             let gre = parse_gre_minimal(l4_bytes)?;
             Ok(TransportParse::with_gre(gre))
         }
-        PROTO_AH => {
+        ip_proto::AH => {
             let ah = parse_ah_minimal(l4_bytes)?;
             Ok(TransportParse::with_ah(ah))
         }
-        PROTO_ESP => {
+        ip_proto::ESP => {
             let esp = parse_esp_minimal(l4_bytes)?;
             Ok(TransportParse::with_esp(esp))
         }
@@ -548,7 +540,7 @@ fn push_hint_unique(hints: &mut Vec<UdpAppHint>, hint: UdpAppHint) {
 #[cfg(test)]
 mod tests {
     use crate::engine::builtin::{
-        BuiltinPacketParser, ParseWarningCode, TransportSegment, UdpAppHint,
+        BuiltinPacketParser, ParseWarningCode, TransportSegment, UdpAppHint, WireGuardMessageType,
     };
 
     fn build_ethernet_ipv4_udp_frame(src_port: u16, dst_port: u16, udp_payload: &[u8]) -> Vec<u8> {
@@ -599,6 +591,12 @@ mod tests {
         frame.extend_from_slice(&[10, 0, 0, 2]);
         frame.extend_from_slice(l4_payload);
         frame
+    }
+
+    fn wireguard_payload(message_type: u8, total_len: usize) -> Vec<u8> {
+        let mut payload = vec![0u8; total_len];
+        payload[0] = message_type;
+        payload
     }
 
     #[test]
@@ -761,14 +759,49 @@ mod tests {
 
     #[test]
     fn classifies_wireguard_handshake_initiation() {
-        let mut wg = vec![0u8; 148];
-        wg[0] = 1;
+        let wg = wireguard_payload(1, 148);
         let frame = build_ethernet_ipv4_udp_frame(51820, 51820, &wg);
         let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
         assert!(parsed.wireguard.is_some());
         assert_eq!(
             parsed.wireguard.as_ref().unwrap().message_type,
-            crate::engine::builtin::WireGuardMessageType::HandshakeInitiation
+            WireGuardMessageType::HandshakeInitiation
+        );
+        assert!(parsed.udp_hints.contains(&UdpAppHint::WireGuard));
+    }
+
+    #[test]
+    fn classifies_wireguard_handshake_response() {
+        let wg = wireguard_payload(2, 92);
+        let frame = build_ethernet_ipv4_udp_frame(51821, 51821, &wg);
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+        assert_eq!(
+            parsed.wireguard.as_ref().unwrap().message_type,
+            WireGuardMessageType::HandshakeResponse
+        );
+        assert!(parsed.udp_hints.contains(&UdpAppHint::WireGuard));
+    }
+
+    #[test]
+    fn classifies_wireguard_cookie_reply() {
+        let wg = wireguard_payload(3, 64);
+        let frame = build_ethernet_ipv4_udp_frame(51820, 9999, &wg);
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+        assert_eq!(
+            parsed.wireguard.as_ref().unwrap().message_type,
+            WireGuardMessageType::CookieReply
+        );
+        assert!(parsed.udp_hints.contains(&UdpAppHint::WireGuard));
+    }
+
+    #[test]
+    fn classifies_wireguard_transport_data() {
+        let wg = wireguard_payload(4, 32);
+        let frame = build_ethernet_ipv4_udp_frame(9999, 51820, &wg);
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+        assert_eq!(
+            parsed.wireguard.as_ref().unwrap().message_type,
+            WireGuardMessageType::TransportData
         );
         assert!(parsed.udp_hints.contains(&UdpAppHint::WireGuard));
     }

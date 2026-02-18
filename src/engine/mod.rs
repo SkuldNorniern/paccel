@@ -1,4 +1,5 @@
 pub mod builtin;
+pub mod constants;
 pub mod context;
 pub mod cursor;
 pub mod decoder;
@@ -12,6 +13,7 @@ pub use builtin::{
     MplsLabel, ParseConfig, ParseWarning, ParseWarningCode, ParsedPacket, PppoeInfo,
     TcpOptionsParsed, TransportSegment, UdpAppHint, VxlanInfo, WireGuardInfo, WireGuardMessageType,
 };
+pub use constants::{ethertype_name, ip_protocol_name};
 pub use context::{DecodeConfig, DecodeContext, DecodeMode};
 pub use decoder::{DecodeReport, Decoder};
 pub use error::{DecodeError, DecodeWarning};

@@ -3,6 +3,7 @@ mod network;
 mod transport;
 mod types;
 
+use crate::engine::constants::ethertype;
 use crate::layer::LayerError;
 
 use self::link::{parse_arp_packet, parse_link, parse_mpls_stack, parse_pppoe_minimal};
@@ -36,12 +37,12 @@ impl BuiltinPacketParser {
         let l3_bytes = &raw[l3_offset..];
 
         match eth.ethertype {
-            0x0806 => {
+            ethertype::ARP => {
                 let arp = parse_arp_packet(l3_bytes)?;
                 parsed.arp = Some(arp);
                 Ok(parsed)
             }
-            0x0800 => {
+            ethertype::IPV4 => {
                 let ipv4 = parse_ipv4_header(l3_bytes)?;
 
                 let ip_header_len = (ipv4.ihl as usize) * 4;
@@ -73,7 +74,7 @@ impl BuiltinPacketParser {
                 parsed.ipv4 = Some(ipv4);
                 Ok(parsed)
             }
-            0x86DD => {
+            ethertype::IPV6 => {
                 let ipv6 = parse_ipv6_header(l3_bytes)?;
 
                 let payload_len = ipv6.payload_length as usize;
@@ -118,7 +119,7 @@ impl BuiltinPacketParser {
                 parsed.ipv6 = Some(ipv6);
                 Ok(parsed)
             }
-            0x8863 | 0x8864 => {
+            ethertype::PPPOE_DISCOVERY | ethertype::PPPOE_SESSION => {
                 let pppoe = parse_pppoe_minimal(l3_bytes)?;
                 parsed.pppoe = Some(pppoe);
                 parsed.warnings.push(ParseWarning {
@@ -127,7 +128,7 @@ impl BuiltinPacketParser {
                 });
                 Ok(parsed)
             }
-            0x8847 | 0x8848 => {
+            ethertype::MPLS_UNICAST | ethertype::MPLS_MULTICAST => {
                 let (mpls, mpls_payload_offset, depth_limit_hit) =
                     parse_mpls_stack(l3_bytes, config.max_mpls_labels)?;
                 parsed.mpls = Some(mpls);
@@ -203,4 +204,34 @@ fn apply_transport_parse(parsed: &mut ParsedPacket, transport_parse: transport::
     parsed.wireguard = transport_parse.wireguard;
     parsed.dns = transport_parse.dns;
     parsed.udp_hints = transport_parse.hints;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BuiltinPacketParser, ParseConfig, ParseWarningCode};
+
+    #[test]
+    fn mpls_label_limit_in_config_emits_depth_warning() {
+        let frame = vec![
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0x88, 0x47, 0x00, 0x01, 0x00, 0x40, 0x00, 0x02,
+            0x01, 0x40, 0x45, 0x00, 0x00, 0x14, 0x00, 0x01, 0x00, 0x00, 64, 1, 0, 0, 10, 0, 0, 1,
+            10, 0, 0, 2,
+        ];
+
+        let parsed = BuiltinPacketParser::parse_with_config(
+            &frame,
+            ParseConfig {
+                max_mpls_labels: 1,
+                ..ParseConfig::default()
+            },
+        )
+        .expect("parse should succeed");
+
+        let mpls = parsed.mpls.as_ref().expect("mpls parsed");
+        assert_eq!(mpls.labels.len(), 1);
+        assert!(parsed
+            .warnings
+            .iter()
+            .any(|w| matches!(w.code, ParseWarningCode::MplsLabelDepthLimit)));
+    }
 }
