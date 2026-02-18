@@ -6,8 +6,27 @@ use crate::layer::transport::udp::UdpHeader;
 use crate::layer::LayerError;
 
 use super::types::{
-    GeneveInfo, GreInfo, IgmpInfo, TcpOptionsParsed, TransportSegment, UdpAppHint, VxlanInfo,
+    AhInfo, EspInfo, GeneveInfo, GreInfo, IgmpInfo, TcpOptionsParsed, TransportSegment, UdpAppHint,
+    VxlanInfo,
 };
+
+const PROTO_ICMP: u8 = 1;
+const PROTO_IGMP: u8 = 2;
+const PROTO_TCP: u8 = 6;
+const PROTO_UDP: u8 = 17;
+const PROTO_GRE: u8 = 47;
+const PROTO_ESP: u8 = 50;
+const PROTO_AH: u8 = 51;
+const PROTO_ICMPV6: u8 = 58;
+
+const UDP_HEADER_LEN: usize = 8;
+const UDP_PORT_DNS: u16 = 53;
+const UDP_PORT_MDNS: u16 = 5353;
+const UDP_PORT_DHCP_SERVER: u16 = 67;
+const UDP_PORT_DHCP_CLIENT: u16 = 68;
+const UDP_PORT_NTP: u16 = 123;
+const UDP_PORT_VXLAN: u16 = 4789;
+const UDP_PORT_GENEVE: u16 = 6081;
 
 #[derive(Debug, Default)]
 pub(super) struct TransportParse {
@@ -19,119 +38,196 @@ pub(super) struct TransportParse {
     pub gre: Option<GreInfo>,
     pub vxlan: Option<VxlanInfo>,
     pub geneve: Option<GeneveInfo>,
+    pub ah: Option<AhInfo>,
+    pub esp: Option<EspInfo>,
     pub dns: Option<DnsMessage>,
     pub hints: Vec<UdpAppHint>,
 }
 
+impl TransportParse {
+    fn with_tcp(tcp: TcpHeader, tcp_options: TcpOptionsParsed) -> Self {
+        Self {
+            transport: Some(TransportSegment::Tcp(tcp)),
+            tcp_options: Some(tcp_options),
+            ..Self::default()
+        }
+    }
+
+    fn with_udp(
+        udp: UdpHeader,
+        dns: Option<DnsMessage>,
+        hints: Vec<UdpAppHint>,
+        vxlan: Option<VxlanInfo>,
+        geneve: Option<GeneveInfo>,
+    ) -> Self {
+        Self {
+            transport: Some(TransportSegment::Udp(udp)),
+            dns,
+            hints,
+            vxlan,
+            geneve,
+            ..Self::default()
+        }
+    }
+
+    fn with_icmp(icmp: IcmpHeader) -> Self {
+        Self {
+            icmp: Some(icmp),
+            ..Self::default()
+        }
+    }
+
+    fn with_icmpv6(icmpv6: Icmpv6Header) -> Self {
+        Self {
+            icmpv6: Some(icmpv6),
+            ..Self::default()
+        }
+    }
+
+    fn with_igmp(igmp: IgmpInfo) -> Self {
+        Self {
+            igmp: Some(igmp),
+            ..Self::default()
+        }
+    }
+
+    fn with_gre(gre: GreInfo) -> Self {
+        Self {
+            gre: Some(gre),
+            ..Self::default()
+        }
+    }
+
+    fn with_ah(ah: AhInfo) -> Self {
+        Self {
+            ah: Some(ah),
+            ..Self::default()
+        }
+    }
+
+    fn with_esp(esp: EspInfo) -> Self {
+        Self {
+            esp: Some(esp),
+            ..Self::default()
+        }
+    }
+}
+
 pub(super) fn parse_transport(protocol: u8, l4_bytes: &[u8]) -> Result<TransportParse, LayerError> {
     match protocol {
-        6 => {
+        PROTO_TCP => {
             let tcp = parse_tcp_header(l4_bytes)?;
             let tcp_options = tcp
                 .options
                 .as_deref()
                 .map(parse_tcp_options)
                 .unwrap_or_default();
-            Ok(TransportParse {
-                transport: Some(TransportSegment::Tcp(tcp)),
-                icmp: None,
-                icmpv6: None,
-                igmp: None,
-                tcp_options: Some(tcp_options),
-                gre: None,
-                vxlan: None,
-                geneve: None,
-                dns: None,
-                hints: Vec::new(),
-            })
+            Ok(TransportParse::with_tcp(tcp, tcp_options))
         }
-        17 => {
-            let udp = parse_udp_header(l4_bytes)?;
-            let udp_len = udp.length as usize;
-            let app = &l4_bytes[8..udp_len];
-
-            let mut hints = Vec::new();
-            let mut dns = None;
-
-            if (udp.source_port == 53 || udp.destination_port == 53) && likely_dns_message(app) {
-                hints.push(UdpAppHint::Dns);
-                dns = try_parse_dns_message(app);
-            }
-
-            if (udp.source_port == 5353 || udp.destination_port == 5353) && likely_dns_message(app)
-            {
-                push_hint_unique(&mut hints, UdpAppHint::Mdns);
-                if dns.is_none() {
-                    dns = try_parse_dns_message(app);
-                }
-            }
-
-            if (udp.source_port == 67
-                || udp.destination_port == 67
-                || udp.source_port == 68
-                || udp.destination_port == 68)
-                && likely_dhcp_message(app)
-            {
-                push_hint_unique(&mut hints, UdpAppHint::Dhcp);
-            }
-
-            if (udp.source_port == 123 || udp.destination_port == 123) && likely_ntp_message(app) {
-                push_hint_unique(&mut hints, UdpAppHint::Ntp);
-            }
-
-            let vxlan =
-                if (udp.source_port == 4789 || udp.destination_port == 4789) && app.len() >= 8 {
-                    parse_vxlan_minimal(app).ok()
-                } else {
-                    None
-                };
-
-            let geneve =
-                if (udp.source_port == 6081 || udp.destination_port == 6081) && app.len() >= 8 {
-                    parse_geneve_minimal(app).ok()
-                } else {
-                    None
-                };
-
-            Ok(TransportParse {
-                transport: Some(TransportSegment::Udp(udp)),
-                icmp: None,
-                icmpv6: None,
-                igmp: None,
-                tcp_options: None,
-                gre: None,
-                vxlan,
-                geneve,
-                dns,
-                hints,
-            })
-        }
-        1 => {
+        PROTO_UDP => parse_udp_transport(l4_bytes),
+        PROTO_ICMP => {
             let icmp = parse_icmp_minimal(l4_bytes)?;
-            let mut p = TransportParse::default();
-            p.icmp = Some(icmp);
-            Ok(p)
+            Ok(TransportParse::with_icmp(icmp))
         }
-        58 => {
+        PROTO_ICMPV6 => {
             let icmpv6 = parse_icmpv6_minimal(l4_bytes)?;
-            let mut p = TransportParse::default();
-            p.icmpv6 = Some(icmpv6);
-            Ok(p)
+            Ok(TransportParse::with_icmpv6(icmpv6))
         }
-        2 => {
+        PROTO_IGMP => {
             let igmp = parse_igmp_minimal(l4_bytes)?;
-            let mut p = TransportParse::default();
-            p.igmp = Some(igmp);
-            Ok(p)
+            Ok(TransportParse::with_igmp(igmp))
         }
-        47 => {
+        PROTO_GRE => {
             let gre = parse_gre_minimal(l4_bytes)?;
-            let mut p = TransportParse::default();
-            p.gre = Some(gre);
-            Ok(p)
+            Ok(TransportParse::with_gre(gre))
+        }
+        PROTO_AH => {
+            let ah = parse_ah_minimal(l4_bytes)?;
+            Ok(TransportParse::with_ah(ah))
+        }
+        PROTO_ESP => {
+            let esp = parse_esp_minimal(l4_bytes)?;
+            Ok(TransportParse::with_esp(esp))
         }
         _ => Ok(TransportParse::default()),
     }
+}
+
+fn parse_udp_transport(l4_bytes: &[u8]) -> Result<TransportParse, LayerError> {
+    let udp = parse_udp_header(l4_bytes)?;
+    let app = &l4_bytes[UDP_HEADER_LEN..udp.length as usize];
+    let mut hints = Vec::new();
+    let mut dns = None;
+
+    maybe_probe_dns_udp(&udp, app, &mut hints, &mut dns);
+    maybe_probe_mdns_udp(&udp, app, &mut hints, &mut dns);
+    maybe_probe_dhcp_udp(&udp, app, &mut hints);
+    maybe_probe_ntp_udp(&udp, app, &mut hints);
+
+    let vxlan = maybe_parse_vxlan(&udp, app);
+    let geneve = maybe_parse_geneve(&udp, app);
+
+    Ok(TransportParse::with_udp(udp, dns, hints, vxlan, geneve))
+}
+
+fn maybe_probe_dns_udp(
+    udp: &UdpHeader,
+    payload: &[u8],
+    hints: &mut Vec<UdpAppHint>,
+    dns: &mut Option<DnsMessage>,
+) {
+    if !is_udp_port_match(udp, UDP_PORT_DNS) || !likely_dns_message(payload) {
+        return;
+    }
+    push_hint_unique(hints, UdpAppHint::Dns);
+    *dns = try_parse_dns_message(payload);
+}
+
+fn maybe_probe_mdns_udp(
+    udp: &UdpHeader,
+    payload: &[u8],
+    hints: &mut Vec<UdpAppHint>,
+    dns: &mut Option<DnsMessage>,
+) {
+    if !is_udp_port_match(udp, UDP_PORT_MDNS) || !likely_dns_message(payload) {
+        return;
+    }
+    push_hint_unique(hints, UdpAppHint::Mdns);
+    if dns.is_none() {
+        *dns = try_parse_dns_message(payload);
+    }
+}
+
+fn maybe_probe_dhcp_udp(udp: &UdpHeader, payload: &[u8], hints: &mut Vec<UdpAppHint>) {
+    let is_dhcp_port = is_udp_port_match(udp, UDP_PORT_DHCP_SERVER)
+        || is_udp_port_match(udp, UDP_PORT_DHCP_CLIENT);
+    if is_dhcp_port && likely_dhcp_message(payload) {
+        push_hint_unique(hints, UdpAppHint::Dhcp);
+    }
+}
+
+fn maybe_probe_ntp_udp(udp: &UdpHeader, payload: &[u8], hints: &mut Vec<UdpAppHint>) {
+    if is_udp_port_match(udp, UDP_PORT_NTP) && likely_ntp_message(payload) {
+        push_hint_unique(hints, UdpAppHint::Ntp);
+    }
+}
+
+fn maybe_parse_vxlan(udp: &UdpHeader, payload: &[u8]) -> Option<VxlanInfo> {
+    if !is_udp_port_match(udp, UDP_PORT_VXLAN) || payload.len() < 8 {
+        return None;
+    }
+    parse_vxlan_minimal(payload).ok()
+}
+
+fn maybe_parse_geneve(udp: &UdpHeader, payload: &[u8]) -> Option<GeneveInfo> {
+    if !is_udp_port_match(udp, UDP_PORT_GENEVE) || payload.len() < 8 {
+        return None;
+    }
+    parse_geneve_minimal(payload).ok()
+}
+
+fn is_udp_port_match(udp: &UdpHeader, port: u16) -> bool {
+    udp.source_port == port || udp.destination_port == port
 }
 
 fn parse_icmp_minimal(data: &[u8]) -> Result<IcmpHeader, LayerError> {
@@ -232,6 +328,28 @@ fn parse_gre_minimal(data: &[u8]) -> Result<GreInfo, LayerError> {
     }
     let protocol_type = u16::from_be_bytes([data[2], data[3]]);
     Ok(GreInfo { protocol_type })
+}
+
+fn parse_ah_minimal(data: &[u8]) -> Result<AhInfo, LayerError> {
+    if data.len() < 12 {
+        return Err(LayerError::InvalidLength);
+    }
+    Ok(AhInfo {
+        next_header: data[0],
+        payload_len: data[1],
+        spi: u32::from_be_bytes([data[4], data[5], data[6], data[7]]),
+        sequence: u32::from_be_bytes([data[8], data[9], data[10], data[11]]),
+    })
+}
+
+fn parse_esp_minimal(data: &[u8]) -> Result<EspInfo, LayerError> {
+    if data.len() < 8 {
+        return Err(LayerError::InvalidLength);
+    }
+    Ok(EspInfo {
+        spi: u32::from_be_bytes([data[0], data[1], data[2], data[3]]),
+        sequence: u32::from_be_bytes([data[4], data[5], data[6], data[7]]),
+    })
 }
 
 fn parse_vxlan_minimal(data: &[u8]) -> Result<VxlanInfo, LayerError> {
@@ -425,6 +543,27 @@ mod tests {
         frame
     }
 
+    fn build_ethernet_ipv4_l4_frame(protocol: u8, l4_payload: &[u8]) -> Vec<u8> {
+        let ip_total_len = (20 + l4_payload.len()) as u16;
+        let mut frame = Vec::with_capacity(14 + ip_total_len as usize);
+        frame.extend_from_slice(&[0, 1, 2, 3, 4, 5]);
+        frame.extend_from_slice(&[6, 7, 8, 9, 10, 11]);
+        frame.extend_from_slice(&0x0800u16.to_be_bytes());
+
+        frame.push(0x45);
+        frame.push(0x00);
+        frame.extend_from_slice(&ip_total_len.to_be_bytes());
+        frame.extend_from_slice(&0x1234u16.to_be_bytes());
+        frame.extend_from_slice(&0x4000u16.to_be_bytes());
+        frame.push(64);
+        frame.push(protocol);
+        frame.extend_from_slice(&[0x00, 0x00]);
+        frame.extend_from_slice(&[10, 0, 0, 1]);
+        frame.extend_from_slice(&[10, 0, 0, 2]);
+        frame.extend_from_slice(l4_payload);
+        frame
+    }
+
     #[test]
     fn parses_ethernet_ipv4_tcp_minimal() {
         let frame = vec![
@@ -581,6 +720,35 @@ mod tests {
             .warnings
             .iter()
             .any(|w| matches!(w.code, ParseWarningCode::GeneveInner)));
+    }
+
+    #[test]
+    fn ah_minimal_parsed_with_warning() {
+        let ah = [58, 1, 0, 0, 0x11, 0x22, 0x33, 0x44, 0x00, 0x00, 0x00, 0x09];
+        let frame = build_ethernet_ipv4_l4_frame(51, &ah);
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+        assert!(parsed.ah.is_some());
+        assert_eq!(parsed.ah.as_ref().unwrap().next_header, 58);
+        assert_eq!(parsed.ah.as_ref().unwrap().spi, 0x1122_3344);
+        assert_eq!(parsed.ah.as_ref().unwrap().sequence, 9);
+        assert!(parsed
+            .warnings
+            .iter()
+            .any(|w| matches!(w.code, ParseWarningCode::AhInner)));
+    }
+
+    #[test]
+    fn esp_minimal_parsed_with_warning() {
+        let esp = [0xaa, 0xbb, 0xcc, 0xdd, 0x00, 0x00, 0x00, 0x02];
+        let frame = build_ethernet_ipv4_l4_frame(50, &esp);
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+        assert!(parsed.esp.is_some());
+        assert_eq!(parsed.esp.as_ref().unwrap().spi, 0xaabb_ccdd);
+        assert_eq!(parsed.esp.as_ref().unwrap().sequence, 2);
+        assert!(parsed
+            .warnings
+            .iter()
+            .any(|w| matches!(w.code, ParseWarningCode::EspInner)));
     }
 
     #[test]

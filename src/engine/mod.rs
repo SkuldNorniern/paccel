@@ -8,9 +8,9 @@ pub mod registry;
 pub mod tree;
 
 pub use builtin::{
-    BuiltinPacketParser, EthernetFrame, GeneveInfo, GreInfo, IgmpInfo, MplsInfo, MplsLabel,
-    ParseConfig, ParseWarning, ParseWarningCode, ParsedPacket, PppoeInfo, TcpOptionsParsed,
-    TransportSegment, UdpAppHint, VxlanInfo,
+    AhInfo, BuiltinPacketParser, EspInfo, EthernetFrame, GeneveInfo, GreInfo, IgmpInfo, MplsInfo,
+    MplsLabel, ParseConfig, ParseWarning, ParseWarningCode, ParsedPacket, PppoeInfo,
+    TcpOptionsParsed, TransportSegment, UdpAppHint, VxlanInfo,
 };
 pub use context::{DecodeConfig, DecodeContext, DecodeMode};
 pub use decoder::{DecodeReport, Decoder};
