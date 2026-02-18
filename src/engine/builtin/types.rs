@@ -78,6 +78,19 @@ pub struct EspInfo {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WireGuardMessageType {
+    HandshakeInitiation,
+    HandshakeResponse,
+    CookieReply,
+    TransportData,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WireGuardInfo {
+    pub message_type: WireGuardMessageType,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MplsLabel {
     pub label: u32,
     pub exp: u8,
@@ -117,6 +130,7 @@ pub enum UdpAppHint {
     Mdns,
     Dhcp,
     Ntp,
+    WireGuard,
 }
 
 #[derive(Debug, Clone)]
@@ -151,6 +165,7 @@ pub struct ParsedPacket {
     pub geneve: Option<GeneveInfo>,
     pub ah: Option<AhInfo>,
     pub esp: Option<EspInfo>,
+    pub wireguard: Option<WireGuardInfo>,
     pub mpls: Option<MplsInfo>,
     pub dns: Option<DnsMessage>,
     pub udp_hints: Vec<UdpAppHint>,

@@ -12,7 +12,7 @@ use self::transport::parse_transport;
 pub use self::types::{
     AhInfo, EspInfo, EthernetFrame, GeneveInfo, GreInfo, IgmpInfo, MplsInfo, MplsLabel,
     ParseConfig, ParseWarning, ParseWarningCode, ParsedPacket, PppoeInfo, TcpOptionsParsed,
-    TransportSegment, UdpAppHint, VxlanInfo,
+    TransportSegment, UdpAppHint, VxlanInfo, WireGuardInfo, WireGuardMessageType,
 };
 
 pub struct BuiltinPacketParser;
@@ -200,6 +200,7 @@ fn apply_transport_parse(parsed: &mut ParsedPacket, transport_parse: transport::
     parsed.geneve = transport_parse.geneve;
     parsed.ah = transport_parse.ah;
     parsed.esp = transport_parse.esp;
+    parsed.wireguard = transport_parse.wireguard;
     parsed.dns = transport_parse.dns;
     parsed.udp_hints = transport_parse.hints;
 }

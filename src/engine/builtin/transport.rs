@@ -7,7 +7,7 @@ use crate::layer::LayerError;
 
 use super::types::{
     AhInfo, EspInfo, GeneveInfo, GreInfo, IgmpInfo, TcpOptionsParsed, TransportSegment, UdpAppHint,
-    VxlanInfo,
+    VxlanInfo, WireGuardInfo, WireGuardMessageType,
 };
 
 const PROTO_ICMP: u8 = 1;
@@ -27,6 +27,8 @@ const UDP_PORT_DHCP_CLIENT: u16 = 68;
 const UDP_PORT_NTP: u16 = 123;
 const UDP_PORT_VXLAN: u16 = 4789;
 const UDP_PORT_GENEVE: u16 = 6081;
+const UDP_PORT_WIREGUARD: u16 = 51820;
+const UDP_PORT_WIREGUARD_ALT: u16 = 51821;
 
 #[derive(Debug, Default)]
 pub(super) struct TransportParse {
@@ -40,6 +42,7 @@ pub(super) struct TransportParse {
     pub geneve: Option<GeneveInfo>,
     pub ah: Option<AhInfo>,
     pub esp: Option<EspInfo>,
+    pub wireguard: Option<WireGuardInfo>,
     pub dns: Option<DnsMessage>,
     pub hints: Vec<UdpAppHint>,
 }
@@ -59,6 +62,7 @@ impl TransportParse {
         hints: Vec<UdpAppHint>,
         vxlan: Option<VxlanInfo>,
         geneve: Option<GeneveInfo>,
+        wireguard: Option<WireGuardInfo>,
     ) -> Self {
         Self {
             transport: Some(TransportSegment::Udp(udp)),
@@ -66,6 +70,7 @@ impl TransportParse {
             hints,
             vxlan,
             geneve,
+            wireguard,
             ..Self::default()
         }
     }
@@ -163,11 +168,14 @@ fn parse_udp_transport(l4_bytes: &[u8]) -> Result<TransportParse, LayerError> {
     maybe_probe_mdns_udp(&udp, app, &mut hints, &mut dns);
     maybe_probe_dhcp_udp(&udp, app, &mut hints);
     maybe_probe_ntp_udp(&udp, app, &mut hints);
+    let wireguard = maybe_classify_wireguard_udp(&udp, app, &mut hints);
 
     let vxlan = maybe_parse_vxlan(&udp, app);
     let geneve = maybe_parse_geneve(&udp, app);
 
-    Ok(TransportParse::with_udp(udp, dns, hints, vxlan, geneve))
+    Ok(TransportParse::with_udp(
+        udp, dns, hints, vxlan, geneve, wireguard,
+    ))
 }
 
 fn maybe_probe_dns_udp(
@@ -224,6 +232,35 @@ fn maybe_parse_geneve(udp: &UdpHeader, payload: &[u8]) -> Option<GeneveInfo> {
         return None;
     }
     parse_geneve_minimal(payload).ok()
+}
+
+fn maybe_classify_wireguard_udp(
+    udp: &UdpHeader,
+    payload: &[u8],
+    hints: &mut Vec<UdpAppHint>,
+) -> Option<WireGuardInfo> {
+    let is_wg_port = is_udp_port_match(udp, UDP_PORT_WIREGUARD)
+        || is_udp_port_match(udp, UDP_PORT_WIREGUARD_ALT);
+    if !is_wg_port {
+        return None;
+    }
+
+    let info = classify_wireguard_message(payload)?;
+    push_hint_unique(hints, UdpAppHint::WireGuard);
+    Some(info)
+}
+
+fn classify_wireguard_message(payload: &[u8]) -> Option<WireGuardInfo> {
+    let message_type = *payload.first()?;
+    let message_type = match message_type {
+        1 if payload.len() >= 148 => WireGuardMessageType::HandshakeInitiation,
+        2 if payload.len() >= 92 => WireGuardMessageType::HandshakeResponse,
+        3 if payload.len() >= 64 => WireGuardMessageType::CookieReply,
+        4 if payload.len() >= 32 => WireGuardMessageType::TransportData,
+        _ => return None,
+    };
+
+    Some(WireGuardInfo { message_type })
 }
 
 fn is_udp_port_match(udp: &UdpHeader, port: u16) -> bool {
@@ -720,6 +757,30 @@ mod tests {
             .warnings
             .iter()
             .any(|w| matches!(w.code, ParseWarningCode::GeneveInner)));
+    }
+
+    #[test]
+    fn classifies_wireguard_handshake_initiation() {
+        let mut wg = vec![0u8; 148];
+        wg[0] = 1;
+        let frame = build_ethernet_ipv4_udp_frame(51820, 51820, &wg);
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+        assert!(parsed.wireguard.is_some());
+        assert_eq!(
+            parsed.wireguard.as_ref().unwrap().message_type,
+            crate::engine::builtin::WireGuardMessageType::HandshakeInitiation
+        );
+        assert!(parsed.udp_hints.contains(&UdpAppHint::WireGuard));
+    }
+
+    #[test]
+    fn does_not_classify_wireguard_when_payload_too_short() {
+        let mut wg = vec![0u8; 40];
+        wg[0] = 1;
+        let frame = build_ethernet_ipv4_udp_frame(51820, 51820, &wg);
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+        assert!(parsed.wireguard.is_none());
+        assert!(!parsed.udp_hints.contains(&UdpAppHint::WireGuard));
     }
 
     #[test]
