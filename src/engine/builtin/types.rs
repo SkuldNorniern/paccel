@@ -18,6 +18,8 @@ pub enum ParseWarningCode {
     PppoeNoPayload,
     VxlanInner,
     GeneveInner,
+    AhInner,
+    EspInner,
     MplsInner,
     MplsLabelDepthLimit,
 }
@@ -59,6 +61,20 @@ pub struct GeneveInfo {
     pub version: u8,
     pub protocol_type: u16,
     pub vni: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AhInfo {
+    pub next_header: u8,
+    pub payload_len: u8,
+    pub spi: u32,
+    pub sequence: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EspInfo {
+    pub spi: u32,
+    pub sequence: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -133,6 +149,8 @@ pub struct ParsedPacket {
     pub pppoe: Option<PppoeInfo>,
     pub vxlan: Option<VxlanInfo>,
     pub geneve: Option<GeneveInfo>,
+    pub ah: Option<AhInfo>,
+    pub esp: Option<EspInfo>,
     pub mpls: Option<MplsInfo>,
     pub dns: Option<DnsMessage>,
     pub udp_hints: Vec<UdpAppHint>,

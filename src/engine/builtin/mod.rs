@@ -10,9 +10,9 @@ use self::network::{parse_ipv4_header, parse_ipv6_header, resolve_ipv6_transport
 use self::transport::parse_transport;
 
 pub use self::types::{
-    EthernetFrame, GeneveInfo, GreInfo, IgmpInfo, MplsInfo, MplsLabel, ParseConfig, ParseWarning,
-    ParseWarningCode, ParsedPacket, PppoeInfo, TcpOptionsParsed, TransportSegment, UdpAppHint,
-    VxlanInfo,
+    AhInfo, EspInfo, EthernetFrame, GeneveInfo, GreInfo, IgmpInfo, MplsInfo, MplsLabel,
+    ParseConfig, ParseWarning, ParseWarningCode, ParsedPacket, PppoeInfo, TcpOptionsParsed,
+    TransportSegment, UdpAppHint, VxlanInfo,
 };
 
 pub struct BuiltinPacketParser;
@@ -175,6 +175,18 @@ fn push_inner_payload_warnings(parsed: &mut ParsedPacket) {
             message: "GENEVE inner payload; no nested decode yet",
         });
     }
+    if parsed.ah.is_some() {
+        parsed.warnings.push(ParseWarning {
+            code: ParseWarningCode::AhInner,
+            message: "AH payload present; no nested decode yet",
+        });
+    }
+    if parsed.esp.is_some() {
+        parsed.warnings.push(ParseWarning {
+            code: ParseWarningCode::EspInner,
+            message: "ESP payload present; no nested decode yet",
+        });
+    }
 }
 
 fn apply_transport_parse(parsed: &mut ParsedPacket, transport_parse: transport::TransportParse) {
@@ -186,6 +198,8 @@ fn apply_transport_parse(parsed: &mut ParsedPacket, transport_parse: transport::
     parsed.gre = transport_parse.gre;
     parsed.vxlan = transport_parse.vxlan;
     parsed.geneve = transport_parse.geneve;
+    parsed.ah = transport_parse.ah;
+    parsed.esp = transport_parse.esp;
     parsed.dns = transport_parse.dns;
     parsed.udp_hints = transport_parse.hints;
 }
