@@ -12,8 +12,9 @@ use self::transport::parse_transport;
 
 pub use self::types::{
     AhInfo, EspInfo, EthernetFrame, GeneveInfo, GreInfo, IgmpInfo, MplsInfo, MplsLabel,
-    ParseConfig, ParseWarning, ParseWarningCode, ParsedPacket, PppoeInfo, TcpOptionsParsed,
-    TransportSegment, UdpAppHint, VxlanInfo, WireGuardInfo, WireGuardMessageType,
+    ParseConfig, ParseMode, ParseWarning, ParseWarningCode, ParseWarningProtocol,
+    ParseWarningSubcode, ParsedPacket, PppoeInfo, TcpOptionsParsed, TransportSegment, UdpAppHint,
+    VxlanInfo, WireGuardInfo, WireGuardMessageType,
 };
 
 pub struct BuiltinPacketParser;
@@ -53,8 +54,14 @@ impl BuiltinPacketParser {
 
                 let truncated = total_len > l3_bytes.len();
                 if truncated {
+                    if config.mode == ParseMode::Strict {
+                        return Err(LayerError::InvalidLength);
+                    }
                     parsed.warnings.push(ParseWarning {
                         code: ParseWarningCode::Ipv4Truncated,
+                        protocol: ParseWarningProtocol::Network,
+                        subcode: ParseWarningSubcode::Ipv4Truncated,
+                        offset: l3_offset,
                         message: "IPv4 total length exceeds capture; L4 may be truncated",
                     });
                 }
@@ -62,6 +69,9 @@ impl BuiltinPacketParser {
                 if (ipv4.flags & 1) != 0 || ipv4.fragment_offset != 0 {
                     parsed.warnings.push(ParseWarning {
                         code: ParseWarningCode::Ipv4Fragmented,
+                        protocol: ParseWarningProtocol::Network,
+                        subcode: ParseWarningSubcode::Ipv4Fragmented,
+                        offset: l3_offset + 6,
                         message: "IPv4 fragment; no reassembly, L4 may be incomplete",
                     });
                 }
@@ -70,7 +80,7 @@ impl BuiltinPacketParser {
                 let l4_bytes = &l3_bytes[ip_header_len..l4_end];
                 let transport_parse = parse_transport(ipv4.protocol, l4_bytes)?;
                 apply_transport_parse(&mut parsed, transport_parse);
-                push_inner_payload_warnings(&mut parsed);
+                push_inner_payload_warnings(&mut parsed, l3_offset + ip_header_len);
                 parsed.ipv4 = Some(ipv4);
                 Ok(parsed)
             }
@@ -97,6 +107,9 @@ impl BuiltinPacketParser {
                 if state.depth_limit_hit {
                     parsed.warnings.push(ParseWarning {
                         code: ParseWarningCode::Ipv6ExtensionDepthLimit,
+                        protocol: ParseWarningProtocol::Network,
+                        subcode: ParseWarningSubcode::Ipv6ExtensionDepthLimit,
+                        offset: l3_offset + state.l4_offset,
                         message: "IPv6 extension header depth limit reached; skipping L4/L7 parse",
                     });
                 }
@@ -104,6 +117,9 @@ impl BuiltinPacketParser {
                 if state.non_initial_fragment {
                     parsed.warnings.push(ParseWarning {
                         code: ParseWarningCode::Ipv6NonInitialFragment,
+                        protocol: ParseWarningProtocol::Network,
+                        subcode: ParseWarningSubcode::Ipv6NonInitialFragment,
+                        offset: l3_offset + state.l4_offset,
                         message:
                             "IPv6 non-initial fragment encountered; skipping L4/L7 parse without reassembly",
                     });
@@ -113,7 +129,7 @@ impl BuiltinPacketParser {
                     let l4_bytes = &ipv6_payload[state.l4_offset..];
                     let transport_parse = parse_transport(state.next_header, l4_bytes)?;
                     apply_transport_parse(&mut parsed, transport_parse);
-                    push_inner_payload_warnings(&mut parsed);
+                    push_inner_payload_warnings(&mut parsed, l3_offset + state.l4_offset);
                 }
 
                 parsed.ipv6 = Some(ipv6);
@@ -124,6 +140,9 @@ impl BuiltinPacketParser {
                 parsed.pppoe = Some(pppoe);
                 parsed.warnings.push(ParseWarning {
                     code: ParseWarningCode::PppoeNoPayload,
+                    protocol: ParseWarningProtocol::Tunnel,
+                    subcode: ParseWarningSubcode::PppoeNoPayload,
+                    offset: l3_offset,
                     message: "PPPoE header only; payload not decoded",
                 });
                 Ok(parsed)
@@ -135,20 +154,34 @@ impl BuiltinPacketParser {
                 if depth_limit_hit {
                     parsed.warnings.push(ParseWarning {
                         code: ParseWarningCode::MplsLabelDepthLimit,
+                        protocol: ParseWarningProtocol::Tunnel,
+                        subcode: ParseWarningSubcode::MplsLabelDepthLimit,
+                        offset: l3_offset + mpls_payload_offset,
                         message: "MPLS label depth limit reached; skipping inner payload decode",
                     });
                 }
                 if mpls_payload_offset < l3_bytes.len() {
                     parsed.warnings.push(ParseWarning {
                         code: ParseWarningCode::MplsInner,
+                        protocol: ParseWarningProtocol::Tunnel,
+                        subcode: ParseWarningSubcode::MplsInner,
+                        offset: l3_offset + mpls_payload_offset,
                         message: "MPLS inner payload; no nested decode yet",
                     });
                 }
                 Ok(parsed)
             }
             other => {
+                if config.mode == ParseMode::Strict {
+                    return Err(LayerError::ValidationError(format!(
+                        "unsupported ethertype: 0x{other:04x}"
+                    )));
+                }
                 parsed.warnings.push(ParseWarning {
                     code: ParseWarningCode::UnsupportedEthertype(other),
+                    protocol: ParseWarningProtocol::Link,
+                    subcode: ParseWarningSubcode::UnsupportedEthertype,
+                    offset: 12,
                     message: "L2 only; unsupported ethertype, L3+ not parsed",
                 });
                 Ok(parsed)
@@ -157,34 +190,49 @@ impl BuiltinPacketParser {
     }
 }
 
-fn push_inner_payload_warnings(parsed: &mut ParsedPacket) {
+fn push_inner_payload_warnings(parsed: &mut ParsedPacket, offset: usize) {
     if parsed.gre.is_some() {
         parsed.warnings.push(ParseWarning {
             code: ParseWarningCode::GreInner,
+            protocol: ParseWarningProtocol::Tunnel,
+            subcode: ParseWarningSubcode::GreInner,
+            offset,
             message: "GRE inner payload; no nested decode yet",
         });
     }
     if parsed.vxlan.is_some() {
         parsed.warnings.push(ParseWarning {
             code: ParseWarningCode::VxlanInner,
+            protocol: ParseWarningProtocol::Tunnel,
+            subcode: ParseWarningSubcode::VxlanInner,
+            offset,
             message: "VXLAN inner payload; no nested decode yet",
         });
     }
     if parsed.geneve.is_some() {
         parsed.warnings.push(ParseWarning {
             code: ParseWarningCode::GeneveInner,
+            protocol: ParseWarningProtocol::Tunnel,
+            subcode: ParseWarningSubcode::GeneveInner,
+            offset,
             message: "GENEVE inner payload; no nested decode yet",
         });
     }
     if parsed.ah.is_some() {
         parsed.warnings.push(ParseWarning {
             code: ParseWarningCode::AhInner,
+            protocol: ParseWarningProtocol::Tunnel,
+            subcode: ParseWarningSubcode::AhInner,
+            offset,
             message: "AH payload present; no nested decode yet",
         });
     }
     if parsed.esp.is_some() {
         parsed.warnings.push(ParseWarning {
             code: ParseWarningCode::EspInner,
+            protocol: ParseWarningProtocol::Tunnel,
+            subcode: ParseWarningSubcode::EspInner,
+            offset,
             message: "ESP payload present; no nested decode yet",
         });
     }
@@ -208,7 +256,10 @@ fn apply_transport_parse(parsed: &mut ParsedPacket, transport_parse: transport::
 
 #[cfg(test)]
 mod tests {
-    use super::{BuiltinPacketParser, ParseConfig, ParseWarningCode};
+    use super::{
+        BuiltinPacketParser, ParseConfig, ParseMode, ParseWarningCode, ParseWarningProtocol,
+        ParseWarningSubcode,
+    };
 
     #[test]
     fn mpls_label_limit_in_config_emits_depth_warning() {
@@ -233,5 +284,52 @@ mod tests {
             .warnings
             .iter()
             .any(|w| matches!(w.code, ParseWarningCode::MplsLabelDepthLimit)));
+    }
+
+    #[test]
+    fn strict_mode_rejects_unknown_ethertype() {
+        let frame = vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0x88, 0xcc, 0x00, 0x00];
+        let err = BuiltinPacketParser::parse_with_config(
+            &frame,
+            ParseConfig {
+                mode: ParseMode::Strict,
+                ..ParseConfig::default()
+            },
+        )
+        .expect_err("strict mode should reject unsupported ethertype");
+
+        assert!(matches!(err, crate::layer::LayerError::ValidationError(_)));
+    }
+
+    #[test]
+    fn strict_mode_rejects_ipv4_truncated_frame() {
+        let frame = vec![
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0x08, 0x00, 0x45, 0x00, 0x00, 0x64, 0x00, 0x01,
+            0x40, 0x00, 64, 6, 0, 0, 192, 168, 1, 1, 192, 168, 1, 2, 0x00, 0x50, 0x01, 0xbb, 0x00,
+            0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x02, 0x50, 0x10, 0x10, 0x00, 0x00, 0x00, 0x00,
+            0x00,
+        ];
+
+        let err = BuiltinPacketParser::parse_with_config(
+            &frame,
+            ParseConfig {
+                mode: ParseMode::Strict,
+                ..ParseConfig::default()
+            },
+        )
+        .expect_err("strict mode should reject truncated IPv4");
+
+        assert!(matches!(err, crate::layer::LayerError::InvalidLength));
+    }
+
+    #[test]
+    fn warning_metadata_contains_protocol_subcode_and_offset() {
+        let frame = vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0x88, 0xcc, 0x00, 0x00];
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+        let warning = parsed.warnings.first().expect("warning expected");
+
+        assert_eq!(warning.protocol, ParseWarningProtocol::Link);
+        assert_eq!(warning.subcode, ParseWarningSubcode::UnsupportedEthertype);
+        assert_eq!(warning.offset, 12);
     }
 }

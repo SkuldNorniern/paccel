@@ -25,6 +25,31 @@ pub enum ParseWarningCode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParseWarningProtocol {
+    Link,
+    Network,
+    Transport,
+    Tunnel,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParseWarningSubcode {
+    UnsupportedEthertype,
+    Ipv4Truncated,
+    Ipv4Fragmented,
+    Ipv6ExtensionDepthLimit,
+    Ipv6NonInitialFragment,
+    PppoeNoPayload,
+    MplsInner,
+    MplsLabelDepthLimit,
+    GreInner,
+    VxlanInner,
+    GeneveInner,
+    AhInner,
+    EspInner,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IgmpInfo {
     pub msg_type: u8,
     pub group_address: Option<std::net::Ipv4Addr>,
@@ -106,13 +131,41 @@ pub struct MplsInfo {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParseWarning {
     pub code: ParseWarningCode,
+    pub protocol: ParseWarningProtocol,
+    pub subcode: ParseWarningSubcode,
+    pub offset: usize,
     pub message: &'static str,
+}
+
+impl ParseWarning {
+    pub fn new(
+        code: ParseWarningCode,
+        protocol: ParseWarningProtocol,
+        subcode: ParseWarningSubcode,
+        offset: usize,
+        message: &'static str,
+    ) -> Self {
+        Self {
+            code,
+            protocol,
+            subcode,
+            offset,
+            message,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParseMode {
+    Permissive,
+    Strict,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct ParseConfig {
     pub max_ipv6_extension_headers: usize,
     pub max_mpls_labels: usize,
+    pub mode: ParseMode,
 }
 
 impl Default for ParseConfig {
@@ -120,6 +173,7 @@ impl Default for ParseConfig {
         Self {
             max_ipv6_extension_headers: 8,
             max_mpls_labels: 8,
+            mode: ParseMode::Permissive,
         }
     }
 }
