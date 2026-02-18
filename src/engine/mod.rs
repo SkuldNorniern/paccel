@@ -10,7 +10,7 @@ pub mod tree;
 pub use builtin::{
     AhInfo, BuiltinPacketParser, EspInfo, EthernetFrame, GeneveInfo, GreInfo, IgmpInfo, MplsInfo,
     MplsLabel, ParseConfig, ParseWarning, ParseWarningCode, ParsedPacket, PppoeInfo,
-    TcpOptionsParsed, TransportSegment, UdpAppHint, VxlanInfo,
+    TcpOptionsParsed, TransportSegment, UdpAppHint, VxlanInfo, WireGuardInfo, WireGuardMessageType,
 };
 pub use context::{DecodeConfig, DecodeContext, DecodeMode};
 pub use decoder::{DecodeReport, Decoder};
