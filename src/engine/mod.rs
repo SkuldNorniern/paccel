@@ -18,6 +18,9 @@ pub use constants::{ethertype_name, ip_protocol_name};
 pub use context::{DecodeConfig, DecodeContext, DecodeMode};
 pub use decoder::{DecodeReport, Decoder};
 pub use error::{DecodeError, DecodeWarning};
-pub use pcap::{parse_pcap_frames, PcapFrame};
+pub use pcap::{
+    iter_capture_frames, iter_pcap_frames, iter_pcapng_frames, parse_capture_frames,
+    parse_pcap_frames, CaptureFrameIter, PcapFrame, PcapFrameIter, PcapNgFrameIter,
+};
 pub use registry::{Dissector, DissectorRegistry, ProbeResult};
 pub use tree::{DecodeEvent, DecodeTree};
