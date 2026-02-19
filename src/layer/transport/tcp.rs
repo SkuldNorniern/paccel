@@ -165,7 +165,7 @@ mod tests {
 
     /// Helper function to create a valid TCP packet for testing
     fn create_test_tcp_packet() -> Vec<u8> {
-        let mut packet = vec![
+        let packet = vec![
             0x12, 0x34, // Source port: 4660
             0x00, 0x50, // Destination port: 80
             0x00, 0x00, 0x00, 0x01, // Sequence number: 1
@@ -182,7 +182,7 @@ mod tests {
 
     /// Helper function to create a TCP packet with options
     fn create_test_tcp_packet_with_options() -> Vec<u8> {
-        let mut packet = vec![
+        let packet = vec![
             0x12, 0x34, // Source port: 4660
             0x00, 0x50, // Destination port: 80
             0x00, 0x00, 0x00, 0x01, // Sequence number: 1
@@ -198,11 +198,12 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::cognitive_complexity)]
     fn test_parse_valid_tcp() {
         let payload = create_test_tcp_packet();
         let mut packet = Packet {
             packet: vec![],
-            payload: payload,
+            payload,
             network_offset: 0,
         };
         let processor = TcpProcessor;
@@ -228,7 +229,7 @@ mod tests {
         let payload = create_test_tcp_packet_with_options();
         let mut packet = Packet {
             packet: vec![],
-            payload: payload,
+            payload,
             network_offset: 0,
         };
         let processor = TcpProcessor;
@@ -254,7 +255,7 @@ mod tests {
 
         let mut packet = Packet {
             packet: vec![],
-            payload: payload,
+            payload,
             network_offset: 0,
         };
         let processor = TcpProcessor;
@@ -270,7 +271,7 @@ mod tests {
         let payload = vec![0, 80, 0, 80, 0, 0, 0, 1]; // Only 8 bytes
         let mut packet = Packet {
             packet: vec![],
-            payload: payload,
+            payload,
             network_offset: 0,
         };
         let processor = TcpProcessor;
@@ -285,7 +286,7 @@ mod tests {
         let payload = create_test_tcp_packet();
         let packet = Packet {
             packet: vec![],
-            payload: payload,
+            payload,
             network_offset: 0,
         };
         let processor = TcpProcessor;
@@ -301,7 +302,7 @@ mod tests {
 
         let packet = Packet {
             packet: vec![],
-            payload: payload,
+            payload,
             network_offset: 0,
         };
         let processor = TcpProcessor;
@@ -314,7 +315,7 @@ mod tests {
         let payload = create_test_tcp_packet();
         let packet = Packet {
             packet: vec![],
-            payload: payload,
+            payload,
             network_offset: 0,
         };
         let processor = TcpProcessor;
