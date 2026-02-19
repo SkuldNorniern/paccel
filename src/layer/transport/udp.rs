@@ -120,7 +120,7 @@ mod tests {
         let payload = create_test_udp_packet();
         let mut packet = Packet {
             packet: vec![],
-            payload: payload,
+            payload,
             network_offset: 0,
         };
         let processor = UdpProcessor;
@@ -144,7 +144,7 @@ mod tests {
 
         let mut packet = Packet {
             packet: vec![],
-            payload: payload,
+            payload,
             network_offset: 0,
         };
         let processor = UdpProcessor;
@@ -160,7 +160,7 @@ mod tests {
         let payload = vec![0, 80, 0, 80, 0, 8]; // Only 6 bytes
         let mut packet = Packet {
             packet: vec![],
-            payload: payload,
+            payload,
             network_offset: 0,
         };
         let processor = UdpProcessor;
@@ -175,7 +175,7 @@ mod tests {
         let payload = create_test_udp_packet();
         let packet = Packet {
             packet: vec![],
-            payload: payload,
+            payload,
             network_offset: 0,
         };
         let processor = UdpProcessor;
@@ -188,7 +188,7 @@ mod tests {
         let payload = vec![0, 80, 0, 80]; // Only 4 bytes
         let packet = Packet {
             packet: vec![],
-            payload: payload,
+            payload,
             network_offset: 0,
         };
         let processor = UdpProcessor;
@@ -201,7 +201,7 @@ mod tests {
         let payload = create_test_udp_packet();
         let packet = Packet {
             packet: vec![],
-            payload: payload,
+            payload,
             network_offset: 0,
         };
         let processor = UdpProcessor;

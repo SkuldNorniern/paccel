@@ -296,7 +296,7 @@ fn parse_igmp_minimal(data: &[u8]) -> Result<IgmpInfo, LayerError> {
 fn parse_tcp_options(blob: &[u8]) -> TcpOptionsParsed {
     let mut out = TcpOptionsParsed::default();
     let mut i = 0;
-    while i + 1 <= blob.len() {
+    while i < blob.len() {
         let kind = blob[i];
         if kind == 0 {
             break;
@@ -312,43 +312,33 @@ fn parse_tcp_options(blob: &[u8]) -> TcpOptionsParsed {
         if len < 2 || i + len > blob.len() {
             break;
         }
-        match kind {
-            2 => {
-                if len >= 4 {
-                    out.mss = Some(u16::from_be_bytes([blob[i + 2], blob[i + 3]]));
-                }
-            }
-            3 => {
-                if len >= 3 {
-                    out.window_scale = Some(blob[i + 2]);
-                }
-            }
-            4 => {
-                if len >= 2 {
-                    out.sack_permitted = true;
-                }
-            }
-            8 => {
-                if len >= 10 {
-                    out.ts_val = Some(u32::from_be_bytes([
-                        blob[i + 2],
-                        blob[i + 3],
-                        blob[i + 4],
-                        blob[i + 5],
-                    ]));
-                    out.ts_ecr = Some(u32::from_be_bytes([
-                        blob[i + 6],
-                        blob[i + 7],
-                        blob[i + 8],
-                        blob[i + 9],
-                    ]));
-                }
-            }
-            _ => {}
-        }
+        parse_tcp_option(kind, &blob[i..i + len], &mut out);
         i += len;
     }
     out
+}
+
+fn parse_tcp_option(kind: u8, option: &[u8], out: &mut TcpOptionsParsed) {
+    match kind {
+        2 if option.len() >= 4 => {
+            out.mss = Some(u16::from_be_bytes([option[2], option[3]]));
+        }
+        3 if option.len() >= 3 => {
+            out.window_scale = Some(option[2]);
+        }
+        4 => {
+            out.sack_permitted = true;
+        }
+        8 if option.len() >= 10 => {
+            out.ts_val = Some(u32::from_be_bytes([
+                option[2], option[3], option[4], option[5],
+            ]));
+            out.ts_ecr = Some(u32::from_be_bytes([
+                option[6], option[7], option[8], option[9],
+            ]));
+        }
+        _ => {}
+    }
 }
 
 fn parse_gre_minimal(data: &[u8]) -> Result<GreInfo, LayerError> {

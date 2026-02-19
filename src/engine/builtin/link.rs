@@ -124,10 +124,10 @@ fn is_vlan_ethertype(value: u16) -> bool {
 }
 
 pub(super) fn parse_link(raw: &[u8]) -> Result<(EthernetFrame, usize), LayerError> {
-    if let Some(et) = ethertype_at_offset_12(raw) {
-        if is_common_ethertype(et) {
-            return parse_ethernet(raw);
-        }
+    if let Some(et) = ethertype_at_offset_12(raw)
+        && is_common_ethertype(et)
+    {
+        return parse_ethernet(raw);
     }
 
     if looks_like_sll(raw) {

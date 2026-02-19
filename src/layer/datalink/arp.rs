@@ -364,7 +364,7 @@ mod tests {
 
     /// Helper function to create a valid ARP packet
     fn create_test_arp_packet() -> Packet {
-        let mut packet = vec![
+        let packet = vec![
             0x00, 0x01, // Hardware type: Ethernet (1)
             0x08, 0x00, // Protocol type: IPv4 (0x0800)
             0x06, // Hardware length: 6
