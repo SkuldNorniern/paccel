@@ -359,10 +359,10 @@ fn parse_pcapng_interface_desc(
             return Err(LayerError::InvalidLength);
         }
 
-        if code == PCAPNG_OPT_IF_TSRESOL && len >= 1 {
-            if let Some(value) = parse_tsresol(input[value_start]) {
-                ts_ticks_per_second = value;
-            }
+        if code == PCAPNG_OPT_IF_TSRESOL && len >= 1
+            && let Some(value) = parse_tsresol(input[value_start])
+        {
+            ts_ticks_per_second = value;
         }
 
         cursor = value_end + padding_len(len);
@@ -448,7 +448,7 @@ fn validate_pcapng_block(
     block_len: usize,
     little_endian: bool,
 ) -> Result<(), LayerError> {
-    if block_len < 12 || (block_len % 4) != 0 {
+    if block_len < 12 || (block_len & 3) != 0 {
         return Err(LayerError::InvalidLength);
     }
     if offset + block_len > input.len() {

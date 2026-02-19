@@ -28,10 +28,10 @@ impl ApplicationProcessor {
             // DNS - Port 53
             if port == 53 {
                 let dns_processor = dns::DnsProcessor;
-                if dns_processor.can_parse(packet) {
-                    if let Ok(dns_message) = dns_processor.parse(packet) {
-                        return Ok(ApplicationData::Dns(dns_message));
-                    }
+                if dns_processor.can_parse(packet)
+                    && let Ok(dns_message) = dns_processor.parse(packet)
+                {
+                    return Ok(ApplicationData::Dns(dns_message));
                 }
             }
 

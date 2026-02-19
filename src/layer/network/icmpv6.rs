@@ -21,7 +21,7 @@ use crate::packet::Packet;
 /// - `icmp_type`: The ICMPv6 message type (e.g., Echo Request is 128, Echo Reply is 129).
 /// - `icmp_code`: Provides additional context for the ICMPv6 type.
 /// - `checksum`: 16-bit checksum computed (using ones' complement arithmetic) over the
-///               pseudo header (from the IPv6 layer) and the ICMPv6 message.
+///   pseudo header (from the IPv6 layer) and the ICMPv6 message.
 ///
 /// For more details, see [ICMPv6 on Wikipedia](https://en.wikipedia.org/wiki/ICMPv6).
 #[derive(Debug, Default)]
