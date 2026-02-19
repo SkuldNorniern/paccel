@@ -31,7 +31,7 @@ The goal is to become a strong parsing alternative for Fluere workloads (not a f
 
 - no fragment reassembly engine yet
 - no TCP stream reassembly yet
-- tshark corpus scaffolding exists, but automated parity checks are not implemented yet
+- tshark corpus scaffolding exists; parity automation is in place, but tshark-based differential coverage is still being expanded
 - baseline pcap-vs-scapy parity test exists, but coverage is still small
 - still uses intermediate allocations in parts of hot path
 
@@ -97,35 +97,6 @@ Flow/state tracking should be composed on the integration side (for example insi
 - No raw datalink/transport send/receive runtime in core parser.
 - No macro-heavy mutable packet construction API in core crate.
 
-## Development notes
-
-- Main plan and roadmap: `paccel/plan.md`
-- Current architecture notes: `paccel/docs/current-architecture.md`
-- Fluere `pcap` adapter notes: `paccel/docs/fluere-pcap-adapter.md`
-- Parser perf baseline notes: `paccel/docs/perf-baseline.md`
-- Run tests from crate root:
-  - `cargo test`
-- Run parser benchmarks:
-  - `cargo bench --bench builtin_parser_baseline`
-- Run parser benchmark regression guard:
-  - `python3 tests/scripts/check_benchmark_guard.py`
-- Refresh benchmark baseline doc from current run:
-  - `python3 tests/scripts/update_perf_baseline.py`
-- Generate tshark snapshots for corpus files:
-  - `tests/scripts/generate_tshark_snapshots.sh`
-- Capture a fresh pcap with tcpdump (requires permissions):
-  - `tests/scripts/capture_with_tcpdump.sh tests/pcaps/happy-path/tcpdump_capture.pcap any 200`
-- Generate scapy snapshot for a pcap fixture:
-  - `tests/scripts/generate_scapy_snapshot.py tests/pcaps/happy-path/tcpdump_dns_udp.pcap tests/snapshots/scapy/tcpdump_dns_udp.expected.json`
-- Regenerate scapy snapshot and run parity test:
-  - `tests/scripts/compare_pcap_with_scapy.sh`
-
-Included fixture:
-
-- `tests/pcaps/happy-path/tcpdump_dns_udp.pcap` copied from tcpdump test corpus (`tests/dns_udp.pcap`).
-- `tests/pcaps/happy-path/tcpdump_ntp.pcap` copied from tcpdump test corpus (`tests/ntp.pcap`).
-- `tests/pcaps/happy-path/tcpdump_icmpv6.pcap` copied from tcpdump test corpus (`tests/icmpv6.pcap`).
-
 ## License
 
-MIT (see `paccel/LICENSE`).
+Apache-2.0 (see `LICENSE`).
