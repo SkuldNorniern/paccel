@@ -113,8 +113,8 @@ pub fn parse_layers(packet: &mut Packet) -> Result<ParsedLayers, LayerError> {
     })?;
     packet.network_offset = capture_info.network_offset;
     println!(
-        "Detected capture format with network offset: {}",
-        capture_info.network_offset
+        "Detected capture format {:?} with network offset: {}",
+        capture_info.format, capture_info.network_offset
     );
 
     // Process datalink layer
@@ -161,7 +161,7 @@ pub fn parse_layers(packet: &mut Packet) -> Result<ParsedLayers, LayerError> {
     Ok(parsed)
 }
 
-fn process_datalink_layer(packet: &mut Packet, parsed: &mut ParsedLayers) {
+fn process_datalink_layer(packet: &mut Packet, _parsed: &mut ParsedLayers) {
     let datalink_processor = DatalinkProcessor;
     println!("Using DatalinkProcessor to process packet");
     match datalink_processor.process(packet) {
