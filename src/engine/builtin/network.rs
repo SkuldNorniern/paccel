@@ -1,3 +1,5 @@
+use std::net::{Ipv4Addr, Ipv6Addr};
+
 use crate::engine::constants::ip_proto;
 use crate::layer::network::ipv4::Ipv4Header;
 use crate::layer::network::ipv6::Ipv6Header;
@@ -39,8 +41,8 @@ pub(super) fn parse_ipv4_header(data: &[u8]) -> Result<Ipv4Header, LayerError> {
     let ttl = data[8];
     let protocol = data[9];
     let checksum = u16::from_be_bytes([data[10], data[11]]);
-    let source = std::net::Ipv4Addr::new(data[12], data[13], data[14], data[15]);
-    let destination = std::net::Ipv4Addr::new(data[16], data[17], data[18], data[19]);
+    let source = Ipv4Addr::new(data[12], data[13], data[14], data[15]);
+    let destination = Ipv4Addr::new(data[16], data[17], data[18], data[19]);
     let options = if ihl > 5 {
         Some(data[20..header_len].to_vec())
     } else {
@@ -82,10 +84,10 @@ pub(super) fn parse_ipv6_header(data: &[u8]) -> Result<Ipv6Header, LayerError> {
     let next_header = data[6];
     let hop_limit = data[7];
 
-    let source = std::net::Ipv6Addr::from(
+    let source = Ipv6Addr::from(
         <[u8; 16]>::try_from(&data[8..24]).map_err(|_| LayerError::InvalidHeader)?,
     );
-    let destination = std::net::Ipv6Addr::from(
+    let destination = Ipv6Addr::from(
         <[u8; 16]>::try_from(&data[24..40]).map_err(|_| LayerError::InvalidHeader)?,
     );
 

@@ -1,3 +1,4 @@
+use std::error::Error;
 use std::fmt;
 
 use crate::layer::capture::CaptureInfo;
@@ -51,7 +52,7 @@ impl fmt::Display for LayerError {
     }
 }
 
-impl std::error::Error for LayerError {}
+impl Error for LayerError {}
 
 /// Protocol processors handle specific protocol parsing.
 /// T is the protocol-specific data structure that will be returned after parsing.

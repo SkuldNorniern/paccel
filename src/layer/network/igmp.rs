@@ -317,11 +317,11 @@ impl ProtocolProcessor<IgmpMessage> for IgmpProcessor {
         // Verify IGMP checksum
         let mut sum = 0u32;
         for i in (0..packet.packet.len()).step_by(2) {
-            let word = if i + 1 < packet.packet.len() {
+            let word = u32::from(if i + 1 < packet.packet.len() {
                 u16::from_be_bytes([packet.packet[i], packet.packet[i + 1]])
             } else {
                 u16::from_be_bytes([packet.packet[i], 0])
-            } as u32;
+            });
             sum += word;
         }
         while sum > 0xFFFF {
@@ -338,17 +338,17 @@ fn compute_igmp_checksum(data: &[u8]) -> u16 {
     let mut sum: u32 = 0;
     let mut chunks = data.chunks_exact(2);
     for chunk in chunks.by_ref() {
-        let word = u16::from_be_bytes([chunk[0], chunk[1]]) as u32;
+        let word = u32::from(u16::from_be_bytes([chunk[0], chunk[1]]));
         sum = sum.wrapping_add(word);
     }
     if let Some(&rem) = chunks.remainder().first() {
         // Pad the remaining byte as the high-order byte.
-        sum = sum.wrapping_add((rem as u32) << 8);
+        sum = sum.wrapping_add(u32::from(rem) << 8);
     }
     while (sum >> 16) != 0 {
         sum = (sum & 0xffff) + (sum >> 16);
     }
-    !(sum as u16)
+    !((sum & 0xffff) as u16)
 }
 
 #[cfg(test)]

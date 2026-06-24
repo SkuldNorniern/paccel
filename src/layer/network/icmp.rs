@@ -85,11 +85,11 @@ impl ProtocolProcessor<IcmpHeader> for IcmpProcessor {
         // Verify ICMP checksum
         let mut sum = 0u32;
         for i in (0..packet.packet.len()).step_by(2) {
-            let word = if i + 1 < packet.packet.len() {
+            let word = u32::from(if i + 1 < packet.packet.len() {
                 u16::from_be_bytes([packet.packet[i], packet.packet[i + 1]])
             } else {
                 u16::from_be_bytes([packet.packet[i], 0])
-            } as u32;
+            });
             sum += word;
         }
         while sum > 0xFFFF {
@@ -116,13 +116,13 @@ fn compute_checksum(data: &[u8]) -> u16 {
     let mut chunks = data.chunks_exact(2);
     for chunk in chunks.by_ref() {
         // It is safe to use try_into here since each chunk is guaranteed to have exactly 2 bytes.
-        let word = u16::from_be_bytes([chunk[0], chunk[1]]) as u32;
+        let word = u32::from(u16::from_be_bytes([chunk[0], chunk[1]]));
         sum = sum.wrapping_add(word);
     }
 
     // If there's a remaining byte, process it as the high order byte of a 16-bit word.
     if let Some(&rem) = chunks.remainder().first() {
-        sum = sum.wrapping_add((rem as u32) << 8);
+        sum = sum.wrapping_add(u32::from(rem) << 8);
     }
 
     // Fold the 32-bit sum to 16 bits: add the overflow bits from the upper 16 bits.
@@ -131,7 +131,7 @@ fn compute_checksum(data: &[u8]) -> u16 {
     }
 
     // Return the one's complement of the 16-bit sum.
-    !(sum as u16)
+    !((sum & 0xffff) as u16)
 }
 
 #[cfg(test)]

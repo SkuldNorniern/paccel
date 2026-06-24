@@ -1,3 +1,5 @@
+use std::net::Ipv4Addr;
+
 use crate::engine::constants::ethertype;
 use crate::engine::cursor::Cursor;
 use crate::layer::datalink::arp::{ArpOperation, ArpPacket};
@@ -56,8 +58,8 @@ fn read_mac_at(raw: &[u8], offset: usize) -> Option<[u8; MAC_ADDR_LEN]> {
     Some(out)
 }
 
-fn read_ipv4_at(raw: &[u8], offset: usize) -> Option<std::net::Ipv4Addr> {
-    Some(std::net::Ipv4Addr::new(
+fn read_ipv4_at(raw: &[u8], offset: usize) -> Option<Ipv4Addr> {
+    Some(Ipv4Addr::new(
         *raw.get(offset)?,
         *raw.get(offset + 1)?,
         *raw.get(offset + 2)?,

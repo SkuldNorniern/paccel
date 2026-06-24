@@ -328,7 +328,7 @@ impl<'a> VxlanPacket<'a> {
     }
 
     pub fn vni(&self) -> u32 {
-        (self.data[4] as u32) << 16 | (self.data[5] as u32) << 8 | (self.data[6] as u32)
+        u32::from(self.data[4]) << 16 | u32::from(self.data[5]) << 8 | u32::from(self.data[6])
     }
 
     pub fn payload(&self) -> &'a [u8] {
