@@ -124,7 +124,9 @@ fn compute_icmpv6_checksum(icmpv6: &[u8], src: &Ipv6Addr, dst: &Ipv6Addr) -> u16
     sum = add_bytes_to_sum(&dst_octets, sum);
 
     // --- Add Upper-Layer Packet Length (4 bytes) ---
-    let len = (icmpv6.len() as u32).to_be_bytes();
+    let len = u32::try_from(icmpv6.len())
+        .unwrap_or(u32::MAX)
+        .to_be_bytes();
     sum = add_bytes_to_sum(&len, sum);
 
     // --- Add Next Header field (4 bytes): 3 zero bytes followed by 58 ---
@@ -140,7 +142,7 @@ fn compute_icmpv6_checksum(icmpv6: &[u8], src: &Ipv6Addr, dst: &Ipv6Addr) -> u16
     }
 
     // The checksum is the one's complement of the computed sum.
-    !(sum as u16)
+    !((sum & 0xffff) as u16)
 }
 
 /// Helper function to sum the bytes of a slice in 16-bit words.
@@ -149,12 +151,12 @@ fn compute_icmpv6_checksum(icmpv6: &[u8], src: &Ipv6Addr, dst: &Ipv6Addr) -> u16
 fn add_bytes_to_sum(data: &[u8], mut sum: u32) -> u32 {
     let mut chunks = data.chunks_exact(2);
     for chunk in chunks.by_ref() {
-        let word = u16::from_be_bytes([chunk[0], chunk[1]]) as u32;
+        let word = u32::from(u16::from_be_bytes([chunk[0], chunk[1]]));
         sum = sum.wrapping_add(word);
     }
     if let Some(&rem) = chunks.remainder().first() {
         // Treat the remaining byte as the high-order part.
-        sum = sum.wrapping_add((rem as u32) << 8);
+        sum = sum.wrapping_add(u32::from(rem) << 8);
     }
     sum
 }

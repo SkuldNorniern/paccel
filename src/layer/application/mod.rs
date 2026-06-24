@@ -1,4 +1,8 @@
 pub mod dns;
+#[allow(dead_code)]
+mod openvpn;
+#[allow(dead_code)]
+mod wireguard;
 
 use crate::layer::transport::TransportInfo;
 use crate::layer::{LayerError, ProtocolProcessor};

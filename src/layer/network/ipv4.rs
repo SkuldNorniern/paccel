@@ -189,7 +189,7 @@ impl ProtocolProcessor<Ipv4Header> for Ipv4Processor {
         // Verify header checksum
         let mut sum = 0u32;
         for i in (0..20).step_by(2) {
-            sum += u16::from_be_bytes([packet.packet[i], packet.packet[i + 1]]) as u32;
+            sum += u32::from(u16::from_be_bytes([packet.packet[i], packet.packet[i + 1]]));
         }
         while sum > 0xFFFF {
             sum = (sum & 0xFFFF) + (sum >> 16);

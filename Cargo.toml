@@ -5,6 +5,16 @@ edition = "2024"
 
 [dependencies]
 
+[lints.rust]
+unsafe_code = "forbid"
+
 [lints.clippy]
+# correctness
 unwrap_used = "deny"
 cognitive_complexity = "deny"
+panic = "deny"
+cast_possible_truncation = "deny"
+cast_sign_loss = "deny"
+# style / clarity
+cast_lossless = "deny"
+absolute_paths = "deny"

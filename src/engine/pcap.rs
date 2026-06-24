@@ -389,8 +389,8 @@ fn parse_pcapng_enhanced_packet<'a>(
     }
 
     let interface_id = read_u32(input, offset + 8, little_endian)? as usize;
-    let ts_high = read_u32(input, offset + 12, little_endian)? as u64;
-    let ts_low = read_u32(input, offset + 16, little_endian)? as u64;
+    let ts_high = u64::from(read_u32(input, offset + 12, little_endian)?);
+    let ts_low = u64::from(read_u32(input, offset + 16, little_endian)?);
     let cap_len = read_u32(input, offset + 20, little_endian)? as usize;
 
     let data_start = offset + 28;
@@ -468,21 +468,23 @@ fn split_timestamp(raw: u64, ticks_per_second: u64) -> (u32, u32) {
         return (0, 0);
     }
 
-    let sec = (raw / ticks_per_second).min(u32::MAX as u64) as u32;
-    let sub = (raw % ticks_per_second).min(u32::MAX as u64) as u32;
+    let sec = u32::try_from((raw / ticks_per_second).min(u64::from(u32::MAX)))
+        .unwrap_or(u32::MAX);
+    let sub = u32::try_from((raw % ticks_per_second).min(u64::from(u32::MAX)))
+        .unwrap_or(u32::MAX);
     (sec, sub)
 }
 
 fn parse_tsresol(value: u8) -> Option<u64> {
     if (value & 0x80) == 0 {
-        let exp = value as u32;
+        let exp = u32::from(value);
         let mut out = 1u64;
         for _ in 0..exp {
             out = out.checked_mul(10)?;
         }
         Some(out)
     } else {
-        let exp = (value & 0x7f) as u32;
+        let exp = u32::from(value & 0x7f);
         if exp > 63 {
             return None;
         }
@@ -532,7 +534,7 @@ fn read_u32(input: &[u8], offset: usize, little_endian: bool) -> Result<u32, Lay
 
 #[cfg(test)]
 mod tests {
-    use super::{iter_capture_frames, iter_pcap_frames, parse_pcap_frames};
+    use super::{iter_capture_frames, iter_pcap_frames, iter_pcapng_frames, parse_pcap_frames};
 
     #[test]
     fn iterates_single_frame_pcap() {
@@ -595,6 +597,74 @@ mod tests {
         let first = iter.next().expect("one frame").expect("frame should parse");
         assert_eq!(first.data, frame);
         assert!(iter.next().is_none());
+    }
+
+    // ── Additional pcap file tests ─────────────────────────────────────
+
+    #[test]
+    fn dns_pcapng_file_has_one_frame() {
+        let bytes = include_bytes!("../../tests/pcaps/happy-path/dns_udp_ipv4.pcapng");
+        let mut iter = iter_pcapng_frames(bytes).expect("pcapng iterator should init");
+        let first = iter.next().expect("one frame").expect("frame should parse");
+        assert!(!first.data.is_empty());
+        assert!(iter.next().is_none());
+    }
+
+    #[test]
+    fn multi_frame_pcap_yields_three_frames() {
+        let bytes = include_bytes!("../../tests/pcaps/happy-path/multi_frame.pcap");
+        let frames = parse_pcap_frames(bytes).expect("multi-frame pcap should parse");
+        assert_eq!(frames.len(), 3);
+        for frame in &frames {
+            assert!(!frame.data.is_empty());
+        }
+    }
+
+    #[test]
+    fn pcap_timestamps_are_present() {
+        let bytes = include_bytes!("../../tests/pcaps/happy-path/dns_udp_ipv4.pcap");
+        let frames = parse_pcap_frames(bytes).expect("pcap should parse");
+        assert_eq!(frames.len(), 1);
+        // Scapy writes a non-zero timestamp for the first frame
+        assert!(frames[0].timestamp_sec > 0 || frames[0].timestamp_subsec > 0);
+    }
+
+    #[test]
+    fn iter_capture_frames_accepts_pcap_file() {
+        let bytes = include_bytes!("../../tests/pcaps/happy-path/tcp_syn_ipv4.pcap");
+        let count = iter_capture_frames(bytes)
+            .expect("iter init")
+            .filter_map(|r| r.ok())
+            .count();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn arp_pcap_frame_is_non_empty() {
+        let bytes = include_bytes!("../../tests/pcaps/happy-path/arp_request.pcap");
+        let frames = parse_pcap_frames(bytes).expect("arp pcap should parse");
+        assert_eq!(frames.len(), 1);
+        assert!(!frames[0].data.is_empty());
+    }
+
+    #[test]
+    fn icmp_pcap_frame_is_non_empty() {
+        let bytes = include_bytes!("../../tests/pcaps/happy-path/icmp_echo_ipv4.pcap");
+        let frames = parse_pcap_frames(bytes).expect("icmp pcap should parse");
+        assert_eq!(frames.len(), 1);
+        assert!(!frames[0].data.is_empty());
+    }
+
+    #[test]
+    fn malformed_magic_returns_error() {
+        let bad: &[u8] = &[0xDE, 0xAD, 0xBE, 0xEF, 0, 0, 0, 0];
+        assert!(parse_pcap_frames(bad).is_err());
+    }
+
+    #[test]
+    fn empty_input_returns_error() {
+        assert!(parse_pcap_frames(&[]).is_err());
+        assert!(iter_pcapng_frames(&[]).is_err());
     }
 
     fn build_minimal_pcapng_epb(frame: &[u8]) -> Vec<u8> {

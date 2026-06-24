@@ -1,3 +1,5 @@
+use std::net::Ipv4Addr;
+
 use crate::engine::constants::ip_proto;
 use crate::layer::application::dns::{parse_dns_message, DnsMessage};
 use crate::layer::network::icmp::IcmpHeader;
@@ -286,7 +288,7 @@ fn parse_igmp_minimal(data: &[u8]) -> Result<IgmpInfo, LayerError> {
         return Err(LayerError::InvalidLength);
     }
     let msg_type = data[0];
-    let group_address = Some(std::net::Ipv4Addr::new(data[4], data[5], data[6], data[7]));
+    let group_address = Some(Ipv4Addr::new(data[4], data[5], data[6], data[7]));
     Ok(IgmpInfo {
         msg_type,
         group_address,
@@ -375,7 +377,7 @@ fn parse_vxlan_minimal(data: &[u8]) -> Result<VxlanInfo, LayerError> {
     if data.len() < 8 {
         return Err(LayerError::InvalidLength);
     }
-    let vni = (data[4] as u32) << 16 | (data[5] as u32) << 8 | (data[6] as u32);
+    let vni = u32::from(data[4]) << 16 | u32::from(data[5]) << 8 | u32::from(data[6]);
     Ok(VxlanInfo { vni })
 }
 
@@ -385,7 +387,7 @@ fn parse_geneve_minimal(data: &[u8]) -> Result<GeneveInfo, LayerError> {
     }
     let version = (data[0] >> 6) & 0x03;
     let protocol_type = u16::from_be_bytes([data[2], data[3]]);
-    let vni = (data[4] as u32) << 16 | (data[5] as u32) << 8 | (data[6] as u32);
+    let vni = u32::from(data[4]) << 16 | u32::from(data[5]) << 8 | u32::from(data[6]);
     Ok(GeneveInfo {
         version,
         protocol_type,

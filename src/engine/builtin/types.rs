@@ -1,3 +1,6 @@
+use std::net::Ipv4Addr;
+
+use crate::engine::constants::ethertype_name;
 use crate::layer::application::dns::DnsMessage;
 use crate::layer::datalink::arp::ArpPacket;
 use crate::layer::network::icmp::IcmpHeader;
@@ -83,7 +86,7 @@ impl ParseWarningSubcode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IgmpInfo {
     pub msg_type: u8,
-    pub group_address: Option<std::net::Ipv4Addr>,
+    pub group_address: Option<Ipv4Addr>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -293,7 +296,7 @@ impl ParsedPacket {
     pub fn link_protocol_name(&self) -> Option<&'static str> {
         self.ethernet
             .as_ref()
-            .map(|eth| crate::engine::constants::ethertype_name(eth.ethertype))
+            .map(|eth| ethertype_name(eth.ethertype))
     }
 
     pub fn network_protocol_name(&self) -> Option<&'static str> {
