@@ -89,7 +89,9 @@ pub fn parse_dns_message(packet: &[u8]) -> Result<DnsMessage, LayerError> {
     };
 
     let mut offset = 12;
-    let mut questions = Vec::with_capacity(header.questions as usize);
+    // A question needs at least one root-name byte, plus qtype and qclass.
+    let question_capacity = (header.questions as usize).min((packet.len() - 12) / 5);
+    let mut questions = Vec::with_capacity(question_capacity);
     for _ in 0..header.questions {
         let (question, new_offset) = parse_question(packet, offset)?;
         questions.push(question);
@@ -419,6 +421,16 @@ mod tests {
         let processor = DnsProcessor;
         let result = processor.parse(&mut packet);
         assert!(result.is_err());
+        assert!(matches!(result, Err(LayerError::InvalidLength)));
+    }
+
+    #[test]
+    fn test_parse_large_question_count_without_questions() {
+        let mut packet = vec![0; 12];
+        packet[4] = 0xff;
+        packet[5] = 0xff;
+
+        let result = parse_dns_message(&packet);
         assert!(matches!(result, Err(LayerError::InvalidLength)));
     }
 
