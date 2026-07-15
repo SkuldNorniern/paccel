@@ -181,6 +181,7 @@ pub(super) fn resolve_ipv6_transport(
 }
 
 #[cfg(test)]
+#[allow(clippy::absolute_paths)]
 mod tests {
     use crate::engine::builtin::{BuiltinPacketParser, ParseWarningCode, TransportSegment};
 

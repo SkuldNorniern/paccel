@@ -123,6 +123,7 @@ impl ProtocolProcessor<Ipv6Header> for Ipv6Processor {
 }
 
 #[cfg(test)]
+#[allow(clippy::panic)]
 mod tests {
     use super::*;
     use crate::layer::{LayerError, ProtocolProcessor};

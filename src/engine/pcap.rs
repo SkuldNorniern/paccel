@@ -533,6 +533,7 @@ fn read_u32(input: &[u8], offset: usize, little_endian: bool) -> Result<u32, Lay
 }
 
 #[cfg(test)]
+#[allow(clippy::absolute_paths, clippy::cast_possible_truncation)]
 mod tests {
     use super::{iter_capture_frames, iter_pcap_frames, iter_pcapng_frames, parse_pcap_frames};
 

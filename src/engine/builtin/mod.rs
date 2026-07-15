@@ -255,6 +255,7 @@ fn apply_transport_parse(parsed: &mut ParsedPacket, transport_parse: transport::
 }
 
 #[cfg(test)]
+#[allow(clippy::absolute_paths)]
 mod tests {
     use super::{
         BuiltinPacketParser, ParseConfig, ParseMode, ParseWarningCode, ParseWarningProtocol,

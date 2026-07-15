@@ -195,6 +195,7 @@ impl ProtocolProcessor<ArpPacket> for ArpProcessor {
 }
 
 #[cfg(test)]
+#[allow(clippy::panic)]
 mod tests {
     use super::*;
     use crate::packet::Packet;

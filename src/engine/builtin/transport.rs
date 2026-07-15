@@ -530,6 +530,7 @@ fn push_hint_unique(hints: &mut Vec<UdpAppHint>, hint: UdpAppHint) {
 }
 
 #[cfg(test)]
+#[allow(clippy::cast_possible_truncation)]
 mod tests {
     use crate::engine::builtin::{
         BuiltinPacketParser, ParseWarningCode, TransportSegment, UdpAppHint, WireGuardMessageType,

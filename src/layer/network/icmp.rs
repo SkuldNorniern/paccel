@@ -135,6 +135,7 @@ fn compute_checksum(data: &[u8]) -> u16 {
 }
 
 #[cfg(test)]
+#[allow(clippy::panic)]
 mod tests {
     use super::*;
     use crate::packet::Packet;

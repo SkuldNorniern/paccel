@@ -162,6 +162,7 @@ fn add_bytes_to_sum(data: &[u8], mut sum: u32) -> u32 {
 }
 
 #[cfg(test)]
+#[allow(clippy::panic)]
 mod tests {
     use super::*;
     use crate::packet::Packet;

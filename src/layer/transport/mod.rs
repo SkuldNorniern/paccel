@@ -93,6 +93,7 @@ pub fn protocol_name(protocol: u8) -> Option<&'static str> {
 }
 
 #[cfg(test)]
+#[allow(clippy::panic)]
 mod tests {
     use super::*;
 

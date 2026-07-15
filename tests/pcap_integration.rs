@@ -1,3 +1,5 @@
+#![allow(clippy::cognitive_complexity, clippy::panic)]
+
 use std::net::Ipv4Addr;
 
 use paccel::engine::{

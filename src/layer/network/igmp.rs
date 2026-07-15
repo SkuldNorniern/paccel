@@ -352,6 +352,7 @@ fn compute_igmp_checksum(data: &[u8]) -> u16 {
 }
 
 #[cfg(test)]
+#[allow(clippy::cast_possible_truncation, clippy::panic)]
 mod tests {
     use super::*;
     use crate::packet::Packet;
