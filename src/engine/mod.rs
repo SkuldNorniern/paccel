@@ -7,6 +7,7 @@ pub mod error;
 pub mod pcap;
 pub mod reassembly;
 pub mod registry;
+pub mod session;
 pub mod tree;
 
 pub use builtin::{
@@ -25,4 +26,5 @@ pub use pcap::{
 };
 pub use reassembly::{IpFragmentReassembler, TcpStreamReassembler};
 pub use registry::{Dissector, DissectorRegistry, ProbeResult};
+pub use session::{SessionTracker, StreamEvent, StreamL7};
 pub use tree::{DecodeEvent, DecodeTree};
