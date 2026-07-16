@@ -14,9 +14,9 @@ use self::transport::parse_transport;
 
 pub use self::types::{
     AhInfo, EspInfo, EthernetFrame, GeneveInfo, GreInfo, IgmpInfo, MplsInfo, MplsLabel,
-    ParseConfig, ParseMode, ParseWarning, ParseWarningCode, ParseWarningProtocol,
-    ParseWarningSubcode, ParsedPacket, PppoeInfo, TcpOptionsParsed, TransportSegment, UdpAppHint,
-    VxlanInfo, WireGuardInfo, WireGuardMessageType,
+    LldpInfo, LldpTlv, ParseConfig, ParseMode, ParseWarning, ParseWarningCode, ParseWarningProtocol,
+    ParseWarningSubcode, ParsedPacket, PppoeInfo, SctpChunk, SctpInfo, StpBpdu, TcpOptionsParsed,
+    TransportSegment, UdpAppHint, VxlanInfo, WireGuardInfo, WireGuardMessageType,
 };
 
 pub struct BuiltinPacketParser;
@@ -64,6 +64,12 @@ impl BuiltinPacketParser {
 
         if l3_offset >= raw.len() {
             return Err(LayerError::InvalidLength);
+        }
+
+        if eth.ethertype == 0 && eth.payload_offset == 17 {
+            let mut parsed = parsed;
+            parsed.stp = Some(parse_stp(&raw[l3_offset..])?);
+            return Ok(parsed);
         }
 
         Self::parse_ethertype(
@@ -291,6 +297,10 @@ impl BuiltinPacketParser {
                 }
                 Ok(parsed)
             }
+            ethertype::LLDP => {
+                parsed.lldp = Some(parse_lldp(l3_bytes));
+                Ok(parsed)
+            }
             other => {
                 if config.mode == ParseMode::Strict {
                     return Err(LayerError::ValidationError(format!(
@@ -486,6 +496,7 @@ fn apply_transport_parse(parsed: &mut ParsedPacket, transport_parse: transport::
     parsed.icmp = transport_parse.icmp;
     parsed.icmpv6 = transport_parse.icmpv6;
     parsed.igmp = transport_parse.igmp;
+    parsed.sctp = transport_parse.sctp;
     parsed.tcp_options = transport_parse.tcp_options;
     parsed.gre = transport_parse.gre;
     parsed.vxlan = transport_parse.vxlan;
@@ -497,6 +508,65 @@ fn apply_transport_parse(parsed: &mut ParsedPacket, transport_parse: transport::
     parsed.dhcp = transport_parse.dhcp;
     parsed.ntp = transport_parse.ntp;
     parsed.udp_hints = transport_parse.hints;
+}
+
+fn parse_lldp(data: &[u8]) -> LldpInfo {
+    let mut info = LldpInfo {
+        chassis_id: None,
+        port_id: None,
+        ttl: None,
+        tlvs: Vec::new(),
+    };
+    let mut offset = 0;
+
+    while offset + 2 <= data.len() {
+        let header = u16::from_be_bytes([data[offset], data[offset + 1]]);
+        offset += 2;
+        let tlv_type = (header >> 9) as u8;
+        if tlv_type == 0 {
+            break;
+        }
+        let declared_len = usize::from(header & 0x01ff);
+        let truncated = declared_len > data.len().saturating_sub(offset);
+        let end = offset.saturating_add(declared_len).min(data.len());
+        let value = data[offset..end].to_vec();
+
+        match tlv_type {
+            1 => info.chassis_id = value.get(1..).map(<[u8]>::to_vec),
+            2 => info.port_id = value.get(1..).map(<[u8]>::to_vec),
+            3 if value.len() >= 2 => {
+                info.ttl = Some(u16::from_be_bytes([value[0], value[1]]));
+            }
+            _ => {}
+        }
+        info.tlvs.push(LldpTlv { tlv_type, value });
+        offset = end;
+        if truncated {
+            break;
+        }
+    }
+
+    info
+}
+
+fn parse_stp(data: &[u8]) -> Result<StpBpdu, LayerError> {
+    if data.len() < 35 {
+        return Err(LayerError::InvalidLength);
+    }
+    let protocol_id = u16::from_be_bytes([data[0], data[1]]);
+    if protocol_id != 0 {
+        return Err(LayerError::InvalidHeader);
+    }
+    Ok(StpBpdu {
+        protocol_id,
+        version: data[2],
+        bpdu_type: data[3],
+        flags: data[4],
+        root_id: u64::from_be_bytes(data[5..13].try_into().expect("fixed-length slice")),
+        root_path_cost: u32::from_be_bytes(data[13..17].try_into().expect("fixed-length slice")),
+        bridge_id: u64::from_be_bytes(data[17..25].try_into().expect("fixed-length slice")),
+        port_id: u16::from_be_bytes([data[25], data[26]]),
+    })
 }
 
 #[cfg(test)]
@@ -550,7 +620,7 @@ mod tests {
 
     #[test]
     fn strict_mode_rejects_unknown_ethertype() {
-        let frame = vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0x88, 0xcc, 0x00, 0x00];
+        let frame = vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0x12, 0x34, 0x00, 0x00];
         let err = BuiltinPacketParser::parse_with_config(
             &frame,
             ParseConfig {
@@ -638,12 +708,53 @@ mod tests {
 
     #[test]
     fn warning_metadata_contains_protocol_subcode_and_offset() {
-        let frame = vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0x88, 0xcc, 0x00, 0x00];
+        let frame = vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0x12, 0x34, 0x00, 0x00];
         let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
         let warning = parsed.warnings.first().expect("warning expected");
 
         assert_eq!(warning.protocol, ParseWarningProtocol::Link);
         assert_eq!(warning.subcode, ParseWarningSubcode::UnsupportedEthertype);
         assert_eq!(warning.offset, 12);
+    }
+
+    #[test]
+    fn parses_lldp_mandatory_tlvs() {
+        let frame = vec![
+            0x01, 0x80, 0xc2, 0x00, 0x00, 0x0e, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x88, 0xcc,
+            0x02, 0x07, 0x04, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x04, 0x05, 0x05, b'e', b't',
+            b'h', b'0', 0x06, 0x02, 0x00, 0x78, 0x00, 0x00,
+        ];
+
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+        let lldp = parsed.lldp.as_ref().expect("lldp");
+
+        assert_eq!(lldp.ttl, Some(120));
+        assert_eq!(lldp.chassis_id.as_deref(), Some(&[0x00, 0x11, 0x22, 0x33, 0x44, 0x55][..]));
+        assert_eq!(lldp.port_id.as_deref(), Some(&b"eth0"[..]));
+        assert_eq!(lldp.tlvs.len(), 3);
+        assert!(parsed.warnings.is_empty());
+    }
+
+    #[test]
+    fn parses_stp_config_bpdu_in_802_3_llc_frame() {
+        let mut frame = Vec::new();
+        frame.extend_from_slice(&[0x01, 0x80, 0xc2, 0x00, 0x00, 0x00]);
+        frame.extend_from_slice(&[0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b]);
+        frame.extend_from_slice(&38u16.to_be_bytes());
+        frame.extend_from_slice(&[0x42, 0x42, 0x03]);
+        frame.extend_from_slice(&[
+            0x00, 0x00, 0x00, 0x00, 0x01, 0x80, 0x00, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55,
+            0x00, 0x00, 0x00, 0x04, 0x80, 0x00, 0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x80,
+            0x01, 0x00, 0x00, 0x14, 0x00, 0x02, 0x00, 0x0f, 0x00,
+        ]);
+
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+        let stp = parsed.stp.as_ref().expect("stp");
+
+        assert_eq!(stp.protocol_id, 0);
+        assert_eq!(stp.bpdu_type, 0);
+        assert_eq!(stp.root_path_cost, 4);
+        assert_eq!(parsed.ethernet.as_ref().expect("ethernet").ethertype, 0);
+        assert_eq!(parsed.ethernet.as_ref().expect("ethernet").payload_offset, 17);
     }
 }
