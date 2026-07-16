@@ -22,6 +22,7 @@ use crate::packet::Packet;
 /// - `icmp_code`: Provides additional context for the ICMPv6 type.
 /// - `checksum`: 16-bit checksum computed (using ones' complement arithmetic) over the
 ///   pseudo header (from the IPv6 layer) and the ICMPv6 message.
+/// - `rest_of_header`: The message-specific 32-bit rest-of-header field.
 ///
 /// For more details, see [ICMPv6 on Wikipedia](https://en.wikipedia.org/wiki/ICMPv6).
 #[derive(Debug, Default)]
@@ -29,7 +30,19 @@ pub struct Icmpv6Header {
     pub icmp_type: u8,
     pub icmp_code: u8,
     pub checksum: u16,
-    // Additional fields can be added here (e.g., identifier, sequence number for Echo messages)
+    pub rest_of_header: [u8; 4],
+}
+
+impl Icmpv6Header {
+    pub fn echo_identifier(&self) -> Option<u16> {
+        matches!(self.icmp_type, 128 | 129)
+            .then(|| u16::from_be_bytes([self.rest_of_header[0], self.rest_of_header[1]]))
+    }
+
+    pub fn echo_sequence(&self) -> Option<u16> {
+        matches!(self.icmp_type, 128 | 129)
+            .then(|| u16::from_be_bytes([self.rest_of_header[2], self.rest_of_header[3]]))
+    }
 }
 
 /// Processor for handling ICMPv6 packet parsing.
@@ -69,6 +82,12 @@ impl ProtocolProcessor<Icmpv6Header> for Icmpv6Processor {
             icmp_type,
             icmp_code,
             checksum,
+            rest_of_header: [
+                packet.packet[4],
+                packet.packet[5],
+                packet.packet[6],
+                packet.packet[7],
+            ],
         })
     }
 

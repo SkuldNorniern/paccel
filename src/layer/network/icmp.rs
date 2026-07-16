@@ -18,12 +18,26 @@ use crate::packet::Packet;
 /// - `icmp_type`: Specifies the type of the ICMP message.
 /// - `icmp_code`: Provides additional context for the ICMP type.
 /// - `checksum`: 16-bit checksum computed over the entire ICMP message.
+/// - `rest_of_header`: The message-specific 32-bit rest-of-header field.
 
 #[derive(Debug, Default)]
 pub struct IcmpHeader {
     pub icmp_type: u8,
     pub icmp_code: u8,
     pub checksum: u16,
+    pub rest_of_header: [u8; 4],
+}
+
+impl IcmpHeader {
+    pub fn echo_identifier(&self) -> Option<u16> {
+        matches!(self.icmp_type, 0 | 8)
+            .then(|| u16::from_be_bytes([self.rest_of_header[0], self.rest_of_header[1]]))
+    }
+
+    pub fn echo_sequence(&self) -> Option<u16> {
+        matches!(self.icmp_type, 0 | 8)
+            .then(|| u16::from_be_bytes([self.rest_of_header[2], self.rest_of_header[3]]))
+    }
 }
 
 /// Processor for handling ICMP packet parsing.
@@ -63,6 +77,12 @@ impl ProtocolProcessor<IcmpHeader> for IcmpProcessor {
             icmp_type,
             icmp_code,
             checksum,
+            rest_of_header: [
+                packet.packet[4],
+                packet.packet[5],
+                packet.packet[6],
+                packet.packet[7],
+            ],
         })
     }
 

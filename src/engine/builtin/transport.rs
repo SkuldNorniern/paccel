@@ -270,6 +270,7 @@ fn parse_icmp_minimal(data: &[u8]) -> Result<IcmpHeader, LayerError> {
         icmp_type: data[0],
         icmp_code: data[1],
         checksum: u16::from_be_bytes([data[2], data[3]]),
+        rest_of_header: [data[4], data[5], data[6], data[7]],
     })
 }
 
@@ -281,6 +282,7 @@ fn parse_icmpv6_minimal(data: &[u8]) -> Result<Icmpv6Header, LayerError> {
         icmp_type: data[0],
         icmp_code: data[1],
         checksum: u16::from_be_bytes([data[2], data[3]]),
+        rest_of_header: [data[4], data[5], data[6], data[7]],
     })
 }
 
@@ -630,6 +632,25 @@ mod tests {
         frame
     }
 
+    fn build_ethernet_ipv6_l4_frame(next_header: u8, l4_payload: &[u8]) -> Vec<u8> {
+        let payload_len = l4_payload.len() as u16;
+        let mut frame = Vec::with_capacity(14 + 40 + l4_payload.len());
+        frame.extend_from_slice(&[0, 1, 2, 3, 4, 5]);
+        frame.extend_from_slice(&[6, 7, 8, 9, 10, 11]);
+        frame.extend_from_slice(&0x86ddu16.to_be_bytes());
+
+        frame.extend_from_slice(&[0x60, 0x00, 0x00, 0x00]);
+        frame.extend_from_slice(&payload_len.to_be_bytes());
+        frame.push(next_header);
+        frame.push(64);
+        frame.extend_from_slice(&[0; 15]);
+        frame.push(1);
+        frame.extend_from_slice(&[0; 15]);
+        frame.push(1);
+        frame.extend_from_slice(l4_payload);
+        frame
+    }
+
     fn wireguard_payload(message_type: u8, total_len: usize) -> Vec<u8> {
         let mut payload = vec![0u8; total_len];
         payload[0] = message_type;
@@ -649,6 +670,26 @@ mod tests {
         assert!(parsed.ethernet.is_some());
         assert!(parsed.ipv4.is_some());
         assert!(matches!(parsed.transport, Some(TransportSegment::Tcp(_))));
+    }
+
+    #[test]
+    fn parses_icmp_echo_identifier_and_sequence() {
+        let frame = build_ethernet_ipv4_l4_frame(1, &[8, 0, 0, 0, 0x12, 0x34, 0xab, 0xcd]);
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+        let icmp = parsed.icmp.as_ref().expect("icmp");
+
+        assert_eq!(icmp.echo_identifier(), Some(0x1234));
+        assert_eq!(icmp.echo_sequence(), Some(0xabcd));
+    }
+
+    #[test]
+    fn parses_icmpv6_echo_identifier_and_sequence() {
+        let frame = build_ethernet_ipv6_l4_frame(58, &[128, 0, 0, 0, 0x56, 0x78, 0x9a, 0xbc]);
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+        let icmpv6 = parsed.icmpv6.as_ref().expect("icmpv6");
+
+        assert_eq!(icmpv6.echo_identifier(), Some(0x5678));
+        assert_eq!(icmpv6.echo_sequence(), Some(0x9abc));
     }
 
     #[test]
