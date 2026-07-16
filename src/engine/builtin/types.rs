@@ -100,6 +100,48 @@ pub struct IgmpInfo {
     pub group_address: Option<Ipv4Addr>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SctpChunk {
+    pub chunk_type: u8,
+    pub flags: u8,
+    pub length: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SctpInfo {
+    pub source_port: u16,
+    pub destination_port: u16,
+    pub verification_tag: u32,
+    pub checksum: u32,
+    pub chunks: Vec<SctpChunk>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LldpTlv {
+    pub tlv_type: u8,
+    pub value: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LldpInfo {
+    pub chassis_id: Option<Vec<u8>>,
+    pub port_id: Option<Vec<u8>>,
+    pub ttl: Option<u16>,
+    pub tlvs: Vec<LldpTlv>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StpBpdu {
+    pub protocol_id: u16,
+    pub version: u8,
+    pub bpdu_type: u8,
+    pub flags: u8,
+    pub root_id: u64,
+    pub root_path_cost: u32,
+    pub bridge_id: u64,
+    pub port_id: u16,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct TcpOptionsParsed {
     pub mss: Option<u16>,
@@ -299,6 +341,7 @@ pub struct ParsedPacket {
     pub icmp: Option<IcmpHeader>,
     pub icmpv6: Option<Icmpv6Header>,
     pub igmp: Option<IgmpInfo>,
+    pub sctp: Option<SctpInfo>,
     pub tcp_options: Option<TcpOptionsParsed>,
     pub gre: Option<GreInfo>,
     pub pppoe: Option<PppoeInfo>,
@@ -308,6 +351,8 @@ pub struct ParsedPacket {
     pub esp: Option<EspInfo>,
     pub wireguard: Option<WireGuardInfo>,
     pub mpls: Option<MplsInfo>,
+    pub lldp: Option<LldpInfo>,
+    pub stp: Option<StpBpdu>,
     pub dns: Option<DnsMessage>,
     pub dhcp: Option<DhcpMessage>,
     pub ntp: Option<NtpMessage>,
@@ -339,6 +384,7 @@ impl ParsedPacket {
         match self.transport {
             Some(TransportSegment::Tcp(_)) => Some("tcp"),
             Some(TransportSegment::Udp(_)) => Some("udp"),
+            None if self.sctp.is_some() => Some("sctp"),
             None => None,
         }
     }

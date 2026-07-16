@@ -10,6 +10,9 @@ use super::types::{EthernetFrame, MplsInfo, MplsLabel, PppoeInfo};
 const MAC_ADDR_LEN: usize = 6;
 const ETH_HEADER_LEN: usize = 14;
 const ETHERTYPE_OFFSET: usize = 12;
+const IEEE_8023_MAX_LENGTH: u16 = 1500;
+const STP_DESTINATION: [u8; MAC_ADDR_LEN] = [0x01, 0x80, 0xc2, 0x00, 0x00, 0x00];
+const STP_LLC_HEADER: [u8; 3] = [0x42, 0x42, 0x03];
 
 const SLL_HEADER_LEN: usize = 16;
 const SLL2_HEADER_LEN: usize = 20;
@@ -187,6 +190,27 @@ pub(super) fn parse_ethernet(raw: &[u8]) -> Result<(EthernetFrame, usize), Layer
 
     let mut ethertype = cursor.read_u16_be().ok_or(LayerError::InvalidLength)?;
     let mut vlan_tags = Vec::new();
+
+    if ethertype <= IEEE_8023_MAX_LENGTH {
+        let offset = if destination == STP_DESTINATION
+            && raw.get(ETH_HEADER_LEN..ETH_HEADER_LEN + STP_LLC_HEADER.len())
+                == Some(STP_LLC_HEADER.as_slice())
+        {
+            ETH_HEADER_LEN + STP_LLC_HEADER.len()
+        } else {
+            ETH_HEADER_LEN
+        };
+        return Ok((
+            EthernetFrame {
+                destination,
+                source,
+                ethertype: 0,
+                vlan_tags,
+                payload_offset: offset,
+            },
+            offset,
+        ));
+    }
 
     while is_vlan_ethertype(ethertype) {
         if raw.len() < cursor.pos() + VLAN_TAG_LEN {
@@ -413,17 +437,17 @@ mod tests {
 
     #[test]
     fn unknown_ethertype_returns_partial_parse_with_warning() {
-        let frame = vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0x88, 0xcc, 0x00, 0x00];
+        let frame = vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0x12, 0x34, 0x00, 0x00];
 
         let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
         assert!(parsed.ethernet.is_some());
-        assert_eq!(parsed.ethernet.as_ref().unwrap().ethertype, 0x88cc);
+        assert_eq!(parsed.ethernet.as_ref().unwrap().ethertype, 0x1234);
         assert!(parsed.ipv4.is_none());
         assert!(parsed.ipv6.is_none());
         assert_eq!(parsed.warnings.len(), 1);
         assert!(matches!(
             parsed.warnings[0].code,
-            ParseWarningCode::UnsupportedEthertype(0x88cc)
+            ParseWarningCode::UnsupportedEthertype(0x1234)
         ));
     }
 

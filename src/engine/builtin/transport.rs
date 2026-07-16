@@ -11,8 +11,8 @@ use crate::layer::transport::udp::UdpHeader;
 use crate::layer::LayerError;
 
 use super::types::{
-    AhInfo, EspInfo, GeneveInfo, GreInfo, IgmpInfo, TcpOptionsParsed, TransportSegment, UdpAppHint,
-    VxlanInfo, WireGuardInfo, WireGuardMessageType,
+    AhInfo, EspInfo, GeneveInfo, GreInfo, IgmpInfo, SctpChunk, SctpInfo, TcpOptionsParsed,
+    TransportSegment, UdpAppHint, VxlanInfo, WireGuardInfo, WireGuardMessageType,
 };
 
 const UDP_HEADER_LEN: usize = 8;
@@ -32,6 +32,7 @@ pub(super) struct TransportParse {
     pub icmp: Option<IcmpHeader>,
     pub icmpv6: Option<Icmpv6Header>,
     pub igmp: Option<IgmpInfo>,
+    pub sctp: Option<SctpInfo>,
     pub tcp_options: Option<TcpOptionsParsed>,
     pub gre: Option<GreInfo>,
     pub vxlan: Option<VxlanInfo>,
@@ -71,6 +72,13 @@ impl TransportParse {
     fn with_igmp(igmp: IgmpInfo) -> Self {
         Self {
             igmp: Some(igmp),
+            ..Self::default()
+        }
+    }
+
+    fn with_sctp(sctp: SctpInfo) -> Self {
+        Self {
+            sctp: Some(sctp),
             ..Self::default()
         }
     }
@@ -120,6 +128,10 @@ pub(super) fn parse_transport(protocol: u8, l4_bytes: &[u8]) -> Result<Transport
         ip_proto::IGMP => {
             let igmp = parse_igmp_minimal(l4_bytes)?;
             Ok(TransportParse::with_igmp(igmp))
+        }
+        ip_proto::SCTP => {
+            let sctp = parse_sctp_minimal(l4_bytes)?;
+            Ok(TransportParse::with_sctp(sctp))
         }
         ip_proto::GRE => {
             let gre = parse_gre_minimal(l4_bytes)?;
@@ -302,6 +314,43 @@ fn parse_igmp_minimal(data: &[u8]) -> Result<IgmpInfo, LayerError> {
     Ok(IgmpInfo {
         msg_type,
         group_address,
+    })
+}
+
+fn parse_sctp_minimal(data: &[u8]) -> Result<SctpInfo, LayerError> {
+    if data.len() < 12 {
+        return Err(LayerError::InvalidLength);
+    }
+
+    let mut chunks = Vec::new();
+    let mut offset = 12;
+    while offset + 4 <= data.len() {
+        let length = u16::from_be_bytes([data[offset + 2], data[offset + 3]]);
+        let chunk_len = usize::from(length);
+        if chunk_len < 4 || offset + chunk_len > data.len() {
+            break;
+        }
+        chunks.push(SctpChunk {
+            chunk_type: data[offset],
+            flags: data[offset + 1],
+            length,
+        });
+        let padded_len = match chunk_len.checked_add(3) {
+            Some(length) => length & !3,
+            None => break,
+        };
+        offset = match offset.checked_add(padded_len) {
+            Some(next) => next,
+            None => break,
+        };
+    }
+
+    Ok(SctpInfo {
+        source_port: u16::from_be_bytes([data[0], data[1]]),
+        destination_port: u16::from_be_bytes([data[2], data[3]]),
+        verification_tag: u32::from_be_bytes([data[4], data[5], data[6], data[7]]),
+        checksum: u32::from_be_bytes([data[8], data[9], data[10], data[11]]),
+        chunks,
     })
 }
 
@@ -698,6 +747,23 @@ mod tests {
 
         assert_eq!(icmpv6.echo_identifier(), Some(0x5678));
         assert_eq!(icmpv6.echo_sequence(), Some(0x9abc));
+    }
+
+    #[test]
+    fn parses_sctp_common_header_and_init_chunk() {
+        let sctp = [
+            0x13, 0x88, 0x13, 0x89, 0x11, 0x22, 0x33, 0x44, 0xaa, 0xbb, 0xcc, 0xdd, 0x01,
+            0x00, 0x00, 0x04,
+        ];
+        let frame = build_ethernet_ipv4_l4_frame(132, &sctp);
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+        let sctp = parsed.sctp.as_ref().expect("sctp");
+
+        assert_eq!(sctp.source_port, 5000);
+        assert_eq!(sctp.destination_port, 5001);
+        assert_eq!(sctp.verification_tag, 0x1122_3344);
+        assert_eq!(sctp.chunks.len(), 1);
+        assert_eq!(sctp.chunks[0].chunk_type, 1);
     }
 
     #[test]
