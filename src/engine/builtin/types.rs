@@ -18,6 +18,7 @@ pub enum ParseWarningCode {
     UnsupportedEthertype(u16),
     Ipv4Truncated,
     Ipv4Fragmented,
+    IpipInner,
     GreInner,
     PppoeNoPayload,
     VxlanInner,
@@ -26,6 +27,7 @@ pub enum ParseWarningCode {
     EspInner,
     MplsInner,
     MplsLabelDepthLimit,
+    TunnelDepthLimit,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,9 +57,11 @@ pub enum ParseWarningSubcode {
     Ipv6Truncated,
     Ipv6ExtensionDepthLimit,
     Ipv6NonInitialFragment,
+    IpipInner,
     PppoeNoPayload,
     MplsInner,
     MplsLabelDepthLimit,
+    TunnelDepthLimit,
     GreInner,
     VxlanInner,
     GeneveInner,
@@ -74,9 +78,11 @@ impl ParseWarningSubcode {
             Self::Ipv6Truncated => "ipv6-truncated",
             Self::Ipv6ExtensionDepthLimit => "ipv6-ext-depth-limit",
             Self::Ipv6NonInitialFragment => "ipv6-non-initial-fragment",
+            Self::IpipInner => "ipip-inner",
             Self::PppoeNoPayload => "pppoe-no-payload",
             Self::MplsInner => "mpls-inner",
             Self::MplsLabelDepthLimit => "mpls-label-depth-limit",
+            Self::TunnelDepthLimit => "tunnel-depth-limit",
             Self::GreInner => "gre-inner",
             Self::VxlanInner => "vxlan-inner",
             Self::GeneveInner => "geneve-inner",
@@ -230,6 +236,7 @@ impl ParseMode {
 pub struct ParseConfig {
     pub max_ipv6_extension_headers: usize,
     pub max_mpls_labels: usize,
+    pub max_tunnel_depth: usize,
     pub mode: ParseMode,
 }
 
@@ -238,6 +245,7 @@ impl Default for ParseConfig {
         Self {
             max_ipv6_extension_headers: 8,
             max_mpls_labels: 8,
+            max_tunnel_depth: 4,
             mode: ParseMode::Permissive,
         }
     }
@@ -301,6 +309,7 @@ pub struct ParsedPacket {
     pub dns: Option<DnsMessage>,
     pub udp_hints: Vec<UdpAppHint>,
     pub warnings: Vec<ParseWarning>,
+    pub inner: Option<Box<ParsedPacket>>,
 }
 
 impl ParsedPacket {
