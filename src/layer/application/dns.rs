@@ -2,8 +2,7 @@ use std::convert::TryInto;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::str;
 
-use crate::layer::{LayerError, ProtocolProcessor};
-use crate::packet::Packet;
+use crate::layer::LayerError;
 
 /// Represents the DNS header (first 12 bytes of a DNS message).
 #[derive(Debug)]
@@ -97,8 +96,7 @@ pub struct DnsMessage {
 
 /// Parses a DNS message directly from a byte slice.
 ///
-/// This is the core parser used by both the legacy `ProtocolProcessor` implementation
-/// and the newer engine path.
+/// This is the core parser used by the engine path.
 pub fn parse_dns_message(packet: &[u8]) -> Result<DnsMessage, LayerError> {
     if packet.len() < 12 {
         return Err(LayerError::InvalidLength);
@@ -534,61 +532,14 @@ fn read_u32(packet: &[u8], pos: &mut usize, end: usize) -> Option<u32> {
     Some(value)
 }
 
-/// The DNS processor implements the ProtocolProcessor trait to parse DNS messages.
-///
-/// Refer to the [Wikipedia article on DNS](https://en.wikipedia.org/wiki/Domain_Name_System)
-/// for more on the packet format.
-pub struct DnsProcessor;
-
-impl ProtocolProcessor<DnsMessage> for DnsProcessor {
-    fn parse(&self, packet: &mut Packet) -> Result<DnsMessage, LayerError> {
-        parse_dns_message(&packet.packet)
-    }
-
-    fn can_parse(&self, packet: &Packet) -> bool {
-        // DNS packets must be at least 12 bytes (header size)
-        if packet.packet.len() < 12 {
-            return false;
-        }
-
-        // Check QR bit and OPCODE (bits 7-11 of flags)
-        // For a typical query/response: flags[0] should be 0x00 or 0x80
-        let flags = packet.packet[2];
-        (flags & 0x78) == 0 // OPCODE should be 0 for standard query/response
-    }
-
-    fn is_valid(&self, packet: &Packet) -> bool {
-        if packet.packet.len() < 12 {
-            return false;
-        }
-
-        // Get the counts from the header
-        let questions = u16::from_be_bytes([packet.packet[4], packet.packet[5]]) as usize;
-        let answers = u16::from_be_bytes([packet.packet[6], packet.packet[7]]) as usize;
-        let authorities = u16::from_be_bytes([packet.packet[8], packet.packet[9]]) as usize;
-        let additionals = u16::from_be_bytes([packet.packet[10], packet.packet[11]]) as usize;
-
-        // Verify that at least one section exists
-        if questions + answers + authorities + additionals == 0 {
-            return false;
-        }
-
-        // Verify that the packet is long enough to potentially contain
-        // the number of records specified (rough estimate: at least 5 bytes per entry)
-        let minimum_length = 12 + (questions + answers + authorities + additionals) * 5;
-        packet.packet.len() >= minimum_length
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::iter::repeat_n;
 
     use super::*;
-    use crate::packet::Packet;
 
     /// Helper function to create a valid DNS query packet
-    fn create_test_dns_query() -> Packet {
+    fn create_test_dns_query() -> Vec<u8> {
         let packet = vec![
             0x12, 0x34, // Transaction ID
             0x01, 0x00, // Flags (standard query)
@@ -604,11 +555,11 @@ mod tests {
             0x00, 0x01, // Type: A
             0x00, 0x01, // Class: IN
         ];
-        Packet::new(packet)
+        packet
     }
 
     /// Helper function to create a valid DNS response packet
-    fn create_test_dns_response() -> Packet {
+    fn create_test_dns_response() -> Vec<u8> {
         let packet = vec![
             0x12, 0x34, // Transaction ID
             0x81, 0x80, // Flags (standard response)
@@ -628,7 +579,7 @@ mod tests {
             0x00, 0x04, // Data length: 4
             0xc0, 0xa8, 0x01, 0x01, // IP: 192.168.1.1
         ];
-        Packet::new(packet)
+        packet
     }
 
     fn append_name(packet: &mut Vec<u8>, name: &str) {
@@ -709,81 +660,9 @@ mod tests {
     }
 
     #[test]
-    fn test_can_parse_valid_query() {
-        let packet = create_test_dns_query();
-        let processor = DnsProcessor;
-        assert!(processor.can_parse(&packet));
-    }
-
-    #[test]
-    fn test_can_parse_valid_response() {
-        let packet = create_test_dns_response();
-        let processor = DnsProcessor;
-        assert!(processor.can_parse(&packet));
-    }
-
-    #[test]
-    fn test_can_parse_invalid_length() {
-        let packet = Packet::new(vec![0; 11]); // Too short for DNS header
-        let processor = DnsProcessor;
-        assert!(!processor.can_parse(&packet));
-    }
-
-    #[test]
-    fn test_can_parse_invalid_opcode() {
-        let mut packet = create_test_dns_query();
-        // Set invalid opcode in flags
-        packet.packet[2] = 0x78; // Set bits 3-6 to invalid opcode
-        let processor = DnsProcessor;
-        assert!(!processor.can_parse(&packet));
-    }
-
-    #[test]
-    fn test_is_valid_good_query() {
-        let packet = create_test_dns_query();
-        let processor = DnsProcessor;
-        assert!(processor.is_valid(&packet));
-    }
-
-    #[test]
-    fn test_is_valid_minimal_query() {
-        let packet = Packet::new(vec![
-            0x12, 0x34, // Transaction ID
-            0x01, 0x00, // Flags (standard query)
-            0x00, 0x01, // Questions: 1
-            0x00, 0x00, // Answer RRs: 0
-            0x00, 0x00, // Authority RRs: 0
-            0x00, 0x00, // Additional RRs: 0
-            0x00, // Root name
-            0x00, 0x01, // Type: A
-            0x00, 0x01, // Class: IN
-        ]);
-        let processor = DnsProcessor;
-        assert!(processor.is_valid(&packet));
-    }
-
-    #[test]
-    fn test_is_valid_good_response() {
-        let packet = create_test_dns_response();
-        let processor = DnsProcessor;
-        assert!(processor.is_valid(&packet));
-    }
-
-    #[test]
-    fn test_is_valid_invalid_counts() {
-        let mut packet = create_test_dns_query();
-        // Set questions count to 0
-        packet.packet[4] = 0;
-        packet.packet[5] = 0;
-        let processor = DnsProcessor;
-        assert!(!processor.is_valid(&packet));
-    }
-
-    #[test]
     fn test_parse_valid_query() {
-        let mut packet = create_test_dns_query();
-        let processor = DnsProcessor;
-        let result = processor.parse(&mut packet);
+        let packet = create_test_dns_query();
+        let result = parse_dns_message(&packet);
         assert!(result.is_ok());
 
         if let Ok(dns_msg) = result {
@@ -835,9 +714,8 @@ mod tests {
 
     #[test]
     fn test_parse_valid_response() {
-        let mut packet = create_test_dns_response();
-        let processor = DnsProcessor;
-        let result = processor.parse(&mut packet);
+        let packet = create_test_dns_response();
+        let result = parse_dns_message(&packet);
         assert!(result.is_ok());
 
         if let Ok(dns_msg) = result {
@@ -916,7 +794,7 @@ mod tests {
 
     #[test]
     fn test_parse_truncated_record_rdata() {
-        let mut packet = create_test_dns_response().packet;
+        let mut packet = create_test_dns_response();
         let rdlength = packet.len() - 6;
         packet[rdlength..rdlength + 2].copy_from_slice(&5_u16.to_be_bytes());
 
@@ -929,9 +807,8 @@ mod tests {
     #[test]
     fn test_parse_truncated_packet() {
         let mut packet = create_test_dns_query();
-        packet.packet.truncate(20); // Truncate in the middle of question section
-        let processor = DnsProcessor;
-        let result = processor.parse(&mut packet);
+        packet.truncate(20); // Truncate in the middle of question section
+        let result = parse_dns_message(&packet);
         assert!(result.is_err());
         assert!(matches!(result, Err(LayerError::InvalidLength)));
     }
@@ -950,18 +827,16 @@ mod tests {
     fn test_parse_invalid_name() {
         let mut packet = create_test_dns_query();
         // Set an invalid label length
-        packet.packet[12] = 64; // Too long for a single label
-        let processor = DnsProcessor;
-        let result = processor.parse(&mut packet);
+        packet[12] = 64; // Too long for a single label
+        let result = parse_dns_message(&packet);
         assert!(result.is_err());
         assert!(matches!(result, Err(LayerError::MalformedPacket)));
     }
 
     #[test]
     fn test_parse_compressed_name() {
-        let mut packet = create_test_dns_response();
-        let processor = DnsProcessor;
-        let result = processor.parse(&mut packet);
+        let packet = create_test_dns_response();
+        let result = parse_dns_message(&packet);
         assert!(result.is_ok());
         // Verify that name compression was handled correctly
         if let Ok(dns_msg) = result {
