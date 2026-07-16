@@ -9,7 +9,7 @@ use crate::layer::application::quic::QuicLongHeader;
 use crate::layer::application::tls::TlsClientHello;
 use crate::layer::datalink::arp::ArpPacket;
 use crate::layer::network::icmp::IcmpHeader;
-use crate::layer::network::icmpv6::Icmpv6Header;
+use crate::layer::network::icmpv6::{Icmpv6Header, NdpMessage};
 use crate::layer::network::ipv4::Ipv4Header;
 use crate::layer::network::ipv6::Ipv6Header;
 use crate::layer::transport::tcp::TcpHeader;
@@ -343,6 +343,7 @@ pub struct ParsedPacket {
     pub transport: Option<TransportSegment>,
     pub icmp: Option<IcmpHeader>,
     pub icmpv6: Option<Icmpv6Header>,
+    pub ndp: Option<NdpMessage>,
     pub igmp: Option<IgmpInfo>,
     pub sctp: Option<SctpInfo>,
     pub tcp_options: Option<TcpOptionsParsed>,
