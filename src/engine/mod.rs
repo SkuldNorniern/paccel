@@ -5,6 +5,7 @@ pub mod cursor;
 pub mod decoder;
 pub mod error;
 pub mod pcap;
+pub mod reassembly;
 pub mod registry;
 pub mod tree;
 
@@ -22,5 +23,6 @@ pub use pcap::{
     iter_capture_frames, iter_pcap_frames, iter_pcapng_frames, parse_capture_frames,
     parse_pcap_frames, CaptureFrameIter, PcapFrame, PcapFrameIter, PcapNgFrameIter, TsResolution,
 };
+pub use reassembly::{IpFragmentReassembler, TcpStreamReassembler};
 pub use registry::{Dissector, DissectorRegistry, ProbeResult};
 pub use tree::{DecodeEvent, DecodeTree};
