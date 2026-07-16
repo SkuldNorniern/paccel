@@ -1,0 +1,35 @@
+[package]
+name = "paccel-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.paccel]
+path = ".."
+
+[[bin]]
+name = "fuzz_parse_packet"
+path = "fuzz_targets/fuzz_parse_packet.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_parse_capture"
+path = "fuzz_targets/fuzz_parse_capture.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_parse_dns"
+path = "fuzz_targets/fuzz_parse_dns.rs"
+test = false
+doc = false
+bench = false
