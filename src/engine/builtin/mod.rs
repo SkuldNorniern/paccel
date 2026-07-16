@@ -88,11 +88,21 @@ impl BuiltinPacketParser {
                 let ipv6 = parse_ipv6_header(l3_bytes)?;
 
                 let payload_len = ipv6.payload_length as usize;
-                let l4_end = 40 + payload_len;
-                if l4_end > l3_bytes.len() {
-                    return Err(LayerError::InvalidLength);
+                let declared_l4_end = 40 + payload_len;
+                if declared_l4_end > l3_bytes.len() {
+                    if config.mode == ParseMode::Strict {
+                        return Err(LayerError::InvalidLength);
+                    }
+                    parsed.warnings.push(ParseWarning {
+                        code: ParseWarningCode::Ipv6Truncated,
+                        protocol: ParseWarningProtocol::Network,
+                        subcode: ParseWarningSubcode::Ipv6Truncated,
+                        offset: l3_offset,
+                        message: "IPv6 payload length exceeds capture; L4 may be truncated",
+                    });
                 }
 
+                let l4_end = declared_l4_end.min(l3_bytes.len());
                 let ipv6_payload = &l3_bytes[..l4_end];
                 let state = resolve_ipv6_transport(
                     ipv6_payload,
@@ -259,8 +269,24 @@ fn apply_transport_parse(parsed: &mut ParsedPacket, transport_parse: transport::
 mod tests {
     use super::{
         BuiltinPacketParser, ParseConfig, ParseMode, ParseWarningCode, ParseWarningProtocol,
-        ParseWarningSubcode,
+        ParseWarningSubcode, TransportSegment,
     };
+
+    fn truncated_ipv4_udp_frame() -> Vec<u8> {
+        vec![
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0x08, 0x00, 0x45, 0x00, 0x00, 0x28, 0x00, 0x01,
+            0x40, 0x00, 64, 17, 0, 0, 192, 168, 1, 1, 192, 168, 1, 2, 0x04, 0xd2, 0x00, 0x35,
+            0x00, 0x14, 0x00, 0x00,
+        ]
+    }
+
+    fn truncated_ipv6_udp_frame() -> Vec<u8> {
+        vec![
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0x86, 0xdd, 0x60, 0x00, 0x00, 0x00, 0x00, 0x14,
+            17, 64, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 2, 0x04, 0xd2, 0x00, 0x35, 0x00, 0x14, 0x00, 0x00,
+        ]
+    }
 
     #[test]
     fn mpls_label_limit_in_config_emits_depth_warning() {
@@ -319,6 +345,58 @@ mod tests {
             },
         )
         .expect_err("strict mode should reject truncated IPv4");
+
+        assert!(matches!(err, crate::layer::LayerError::InvalidLength));
+    }
+
+    #[test]
+    fn lenient_mode_parses_truncated_ipv4_udp() {
+        let parsed = BuiltinPacketParser::parse(&truncated_ipv4_udp_frame())
+            .expect("lenient mode should parse truncated IPv4 UDP");
+
+        assert!(parsed
+            .warnings
+            .iter()
+            .any(|warning| warning.code == ParseWarningCode::Ipv4Truncated));
+        assert!(matches!(parsed.transport, Some(TransportSegment::Udp(_))));
+    }
+
+    #[test]
+    fn strict_mode_rejects_truncated_ipv4_udp() {
+        let err = BuiltinPacketParser::parse_with_config(
+            &truncated_ipv4_udp_frame(),
+            ParseConfig {
+                mode: ParseMode::Strict,
+                ..ParseConfig::default()
+            },
+        )
+        .expect_err("strict mode should reject truncated IPv4 UDP");
+
+        assert!(matches!(err, crate::layer::LayerError::InvalidLength));
+    }
+
+    #[test]
+    fn lenient_mode_parses_truncated_ipv6_udp() {
+        let parsed = BuiltinPacketParser::parse(&truncated_ipv6_udp_frame())
+            .expect("lenient mode should parse truncated IPv6 UDP");
+
+        assert!(parsed
+            .warnings
+            .iter()
+            .any(|warning| warning.code == ParseWarningCode::Ipv6Truncated));
+        assert!(matches!(parsed.transport, Some(TransportSegment::Udp(_))));
+    }
+
+    #[test]
+    fn strict_mode_rejects_truncated_ipv6_udp() {
+        let err = BuiltinPacketParser::parse_with_config(
+            &truncated_ipv6_udp_frame(),
+            ParseConfig {
+                mode: ParseMode::Strict,
+                ..ParseConfig::default()
+            },
+        )
+        .expect_err("strict mode should reject truncated IPv6 UDP");
 
         assert!(matches!(err, crate::layer::LayerError::InvalidLength));
     }

@@ -154,7 +154,8 @@ pub(super) fn parse_transport(protocol: u8, l4_bytes: &[u8]) -> Result<Transport
 
 fn parse_udp_transport(l4_bytes: &[u8]) -> Result<TransportParse, LayerError> {
     let udp = parse_udp_header(l4_bytes)?;
-    let app = &l4_bytes[UDP_HEADER_LEN..udp.length as usize];
+    let udp_end = (udp.length as usize).min(l4_bytes.len());
+    let app = &l4_bytes[UDP_HEADER_LEN..udp_end];
     let mut hints = Vec::new();
     let mut dns = None;
 
@@ -464,10 +465,6 @@ fn parse_udp_header(l4_bytes: &[u8]) -> Result<UdpHeader, LayerError> {
     if length < 8 {
         return Err(LayerError::InvalidHeader);
     }
-    if l4_bytes.len() < length as usize {
-        return Err(LayerError::InvalidLength);
-    }
-
     Ok(UdpHeader {
         source_port,
         destination_port,
