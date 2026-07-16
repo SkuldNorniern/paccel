@@ -5,6 +5,9 @@ edition = "2024"
 
 [dependencies]
 
+[dev-dependencies]
+proptest = "1"
+
 [lints.rust]
 unsafe_code = "forbid"
 
