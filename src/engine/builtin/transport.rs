@@ -4,6 +4,7 @@ use crate::engine::constants::ip_proto;
 use crate::layer::application::dhcp::{parse_dhcp_message, DhcpMessage};
 use crate::layer::application::dns::{parse_dns_message, DnsMessage};
 use crate::layer::application::ntp::{parse_ntp_message, NtpMessage};
+use crate::layer::application::tls::{parse_tls_client_hello, TlsClientHello};
 use crate::layer::network::icmp::IcmpHeader;
 use crate::layer::network::icmpv6::Icmpv6Header;
 use crate::layer::transport::tcp::{TcpFlags, TcpHeader};
@@ -43,6 +44,7 @@ pub(super) struct TransportParse {
     pub dns: Option<DnsMessage>,
     pub dhcp: Option<DhcpMessage>,
     pub ntp: Option<NtpMessage>,
+    pub tls: Option<TlsClientHello>,
     pub hints: Vec<UdpAppHint>,
 }
 
@@ -109,12 +111,19 @@ pub(super) fn parse_transport(protocol: u8, l4_bytes: &[u8]) -> Result<Transport
     match protocol {
         ip_proto::TCP => {
             let tcp = parse_tcp_header(l4_bytes)?;
+            let header_len = usize::from(tcp.data_offset) * 4;
             let tcp_options = tcp
                 .options
                 .as_deref()
                 .map(parse_tcp_options)
                 .unwrap_or_default();
-            Ok(TransportParse::with_tcp(tcp, tcp_options))
+            let payload = &l4_bytes[header_len..];
+            let tls = (payload.len() >= 5 && payload[0] == 22)
+                .then(|| parse_tls_client_hello(payload).ok())
+                .flatten();
+            let mut parsed = TransportParse::with_tcp(tcp, tcp_options);
+            parsed.tls = tls;
+            Ok(parsed)
         }
         ip_proto::UDP => parse_udp_transport(l4_bytes),
         ip_proto::ICMP => {
@@ -668,6 +677,77 @@ mod tests {
         frame
     }
 
+    fn build_ethernet_ipv4_tcp_frame(src_port: u16, dst_port: u16, tcp_payload: &[u8]) -> Vec<u8> {
+        let mut tcp = Vec::with_capacity(20 + tcp_payload.len());
+        tcp.extend_from_slice(&src_port.to_be_bytes());
+        tcp.extend_from_slice(&dst_port.to_be_bytes());
+        tcp.extend_from_slice(&1u32.to_be_bytes());
+        tcp.extend_from_slice(&0u32.to_be_bytes());
+        tcp.extend_from_slice(&[0x50, 0x18]);
+        tcp.extend_from_slice(&0x4000u16.to_be_bytes());
+        tcp.extend_from_slice(&[0, 0, 0, 0]);
+        tcp.extend_from_slice(tcp_payload);
+        build_ethernet_ipv4_l4_frame(6, &tcp)
+    }
+
+    fn tls_client_hello() -> Vec<u8> {
+        let mut extensions = Vec::new();
+
+        let server_name = b"example.com";
+        let server_name_list_len = 3 + server_name.len();
+        extensions.extend_from_slice(&0u16.to_be_bytes());
+        extensions.extend_from_slice(&(2 + server_name_list_len as u16).to_be_bytes());
+        extensions.extend_from_slice(&(server_name_list_len as u16).to_be_bytes());
+        extensions.push(0);
+        extensions.extend_from_slice(&(server_name.len() as u16).to_be_bytes());
+        extensions.extend_from_slice(server_name);
+
+        let alpn_protocols: [&[u8]; 2] = [b"h2", b"http/1.1"];
+        let alpn_list_len = alpn_protocols
+            .iter()
+            .map(|protocol| 1 + protocol.len())
+            .sum::<usize>();
+        extensions.extend_from_slice(&16u16.to_be_bytes());
+        extensions.extend_from_slice(&(2 + alpn_list_len as u16).to_be_bytes());
+        extensions.extend_from_slice(&(alpn_list_len as u16).to_be_bytes());
+        for protocol in alpn_protocols {
+            extensions.push(protocol.len() as u8);
+            extensions.extend_from_slice(protocol);
+        }
+
+        extensions.extend_from_slice(&43u16.to_be_bytes());
+        extensions.extend_from_slice(&5u16.to_be_bytes());
+        extensions.push(4);
+        extensions.extend_from_slice(&0x0304u16.to_be_bytes());
+        extensions.extend_from_slice(&0x0303u16.to_be_bytes());
+
+        let mut hello = Vec::new();
+        hello.extend_from_slice(&0x0303u16.to_be_bytes());
+        hello.extend_from_slice(&[0x42; 32]);
+        hello.push(0);
+        hello.extend_from_slice(&4u16.to_be_bytes());
+        hello.extend_from_slice(&0x1301u16.to_be_bytes());
+        hello.extend_from_slice(&0x1302u16.to_be_bytes());
+        hello.push(1);
+        hello.push(0);
+        hello.extend_from_slice(&(extensions.len() as u16).to_be_bytes());
+        hello.extend_from_slice(&extensions);
+
+        let handshake_len = hello.len();
+        let mut record = Vec::new();
+        record.push(22);
+        record.extend_from_slice(&0x0301u16.to_be_bytes());
+        record.extend_from_slice(&(4 + handshake_len as u16).to_be_bytes());
+        record.push(1);
+        record.extend_from_slice(&[
+            ((handshake_len >> 16) & 0xff) as u8,
+            ((handshake_len >> 8) & 0xff) as u8,
+            (handshake_len & 0xff) as u8,
+        ]);
+        record.extend_from_slice(&hello);
+        record
+    }
+
     fn build_ethernet_ipv4_l4_frame(protocol: u8, l4_payload: &[u8]) -> Vec<u8> {
         let ip_total_len = (20 + l4_payload.len()) as u16;
         let mut frame = Vec::with_capacity(14 + ip_total_len as usize);
@@ -727,6 +807,18 @@ mod tests {
         assert!(parsed.ethernet.is_some());
         assert!(parsed.ipv4.is_some());
         assert!(matches!(parsed.transport, Some(TransportSegment::Tcp(_))));
+    }
+
+    #[test]
+    fn parses_tls_client_hello_from_tcp_payload() {
+        let frame = build_ethernet_ipv4_tcp_frame(49152, 8443, &tls_client_hello());
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+        let tls = parsed.tls.as_ref().expect("TLS ClientHello");
+
+        assert_eq!(tls.server_name.as_deref(), Some("example.com"));
+        assert!(tls.alpn.iter().any(|protocol| protocol == "h2"));
+        assert!(tls.supported_versions.contains(&0x0304));
+        assert!(!tls.cipher_suites.is_empty());
     }
 
     #[test]
