@@ -121,6 +121,7 @@ fn parse_domain_name(packet: &[u8], mut pos: usize) -> Result<(String, usize), L
     let mut pointer_end: Option<usize> = None;
     let mut iterations = 0;
     let max_iterations = packet.len();
+    let mut encoded_len = 0;
 
     loop {
         if iterations > max_iterations {
@@ -133,6 +134,10 @@ fn parse_domain_name(packet: &[u8], mut pos: usize) -> Result<(String, usize), L
         let len = packet[pos];
         // A zero length indicates the end of the domain name.
         if len == 0 {
+            encoded_len += 1;
+            if encoded_len > 255 {
+                return Err(LayerError::MalformedPacket);
+            }
             pos += 1;
             break;
         }
@@ -169,6 +174,10 @@ fn parse_domain_name(packet: &[u8], mut pos: usize) -> Result<(String, usize), L
 
         // Regular label: read the length, then the label bytes.
         let label_len = len as usize;
+        encoded_len += label_len + 1;
+        if encoded_len > 255 {
+            return Err(LayerError::MalformedPacket);
+        }
         pos += 1;
         if pos + label_len > packet.len() {
             return Err(LayerError::InvalidLength);
@@ -178,8 +187,11 @@ fn parse_domain_name(packet: &[u8], mut pos: usize) -> Result<(String, usize), L
         // Convert label bytes to &str (DNS labels are ASCII).
         let label = str::from_utf8(label_bytes).map_err(|_| LayerError::MalformedPacket)?;
 
-        // Validate label characters (RFC 1035: letters, digits, and hyphens only)
-        if !label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        // Validate label characters (letters, digits, hyphens, and underscores only)
+        if !label
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
             return Err(LayerError::MalformedPacket);
         }
 
@@ -280,6 +292,8 @@ impl ProtocolProcessor<DnsMessage> for DnsProcessor {
 
 #[cfg(test)]
 mod tests {
+    use std::iter::repeat_n;
+
     use super::*;
     use crate::packet::Packet;
 
@@ -413,6 +427,43 @@ mod tests {
             assert_eq!(dns_msg.questions[0].qtype, 1); // A record
             assert_eq!(dns_msg.questions[0].qclass, 1); // IN class
         }
+    }
+
+    #[test]
+    fn test_parse_query_with_underscore_labels() {
+        let packet = vec![
+            0x12, 0x34, // Transaction ID
+            0x01, 0x00, // Flags (standard query)
+            0x00, 0x01, // Questions: 1
+            0x00, 0x00, // Answer RRs: 0
+            0x00, 0x00, // Authority RRs: 0
+            0x00, 0x00, // Additional RRs: 0
+            0x06, b'_', b'd', b'n', b's', b's', b'd', // First label: "_dnssd"
+            0x04, b'_', b'u', b'd', b'p', // Second label: "_udp"
+            0x05, b'l', b'o', b'c', b'a', b'l', // Third label: "local"
+            0x00, // End of name
+            0x00, 0x0c, // Type: PTR
+            0x00, 0x01, // Class: IN
+        ];
+
+        let result = parse_dns_message(&packet);
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().questions[0].qname, "_dnssd._udp.local");
+    }
+
+    #[test]
+    fn test_parse_name_exceeding_encoded_length_limit() {
+        let mut packet = Vec::new();
+        for label in [b'a', b'b', b'c', b'd'] {
+            packet.push(63);
+            packet.extend(repeat_n(label, 63));
+        }
+        packet.push(0);
+
+        let result = parse_domain_name(&packet, 0);
+
+        assert!(matches!(result, Err(LayerError::MalformedPacket)));
     }
 
     #[test]
