@@ -33,3 +33,10 @@ path = "fuzz_targets/fuzz_parse_dns.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_parse_linktype"
+path = "fuzz_targets/fuzz_parse_linktype.rs"
+test = false
+doc = false
+bench = false
