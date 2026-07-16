@@ -6,7 +6,9 @@ mod types;
 use crate::engine::constants::ethertype;
 use crate::layer::LayerError;
 
-use self::link::{parse_arp_packet, parse_link, parse_mpls_stack, parse_pppoe_minimal};
+use self::link::{
+    parse_arp_packet, parse_link_with_linktype, parse_mpls_stack, parse_pppoe_minimal,
+};
 use self::network::{parse_ipv4_header, parse_ipv6_header, resolve_ipv6_transport};
 use self::transport::parse_transport;
 
@@ -25,7 +27,19 @@ impl BuiltinPacketParser {
     }
 
     pub fn parse_with_config(raw: &[u8], config: ParseConfig) -> Result<ParsedPacket, LayerError> {
-        let (eth, l3_offset) = parse_link(raw)?;
+        Self::parse_with_config_and_linktype(raw, config, None)
+    }
+
+    pub fn parse_with_linktype(raw: &[u8], linktype: u16) -> Result<ParsedPacket, LayerError> {
+        Self::parse_with_config_and_linktype(raw, ParseConfig::default(), Some(linktype))
+    }
+
+    pub fn parse_with_config_and_linktype(
+        raw: &[u8],
+        config: ParseConfig,
+        linktype: Option<u16>,
+    ) -> Result<ParsedPacket, LayerError> {
+        let (eth, l3_offset) = parse_link_with_linktype(raw, linktype)?;
         let mut parsed = ParsedPacket {
             ethernet: Some(eth.clone()),
             ..ParsedPacket::default()

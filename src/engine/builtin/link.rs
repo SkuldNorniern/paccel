@@ -143,6 +143,36 @@ pub(super) fn parse_link(raw: &[u8]) -> Result<(EthernetFrame, usize), LayerErro
     parse_ethernet(raw)
 }
 
+pub(super) fn parse_link_with_linktype(
+    raw: &[u8],
+    linktype: Option<u16>,
+) -> Result<(EthernetFrame, usize), LayerError> {
+    match linktype {
+        Some(1) => parse_ethernet(raw),
+        Some(113) => parse_sll(raw),
+        Some(276) => parse_sll2(raw),
+        Some(0 | 108) => {
+            let family = raw.get(..4).ok_or(LayerError::InvalidLength)?;
+            let protocol = match (family[0], family[3]) {
+                (2, _) | (_, 2) => ethertype::IPV4,
+                (24 | 28 | 30, _) | (_, 24 | 28 | 30) => ethertype::IPV6,
+                _ => return Err(LayerError::InvalidHeader),
+            };
+            Ok(synthetic_link_frame(protocol, 4))
+        }
+        Some(101) => {
+            let protocol = match raw.first().map(|byte| byte >> 4) {
+                Some(4) => ethertype::IPV4,
+                Some(6) => ethertype::IPV6,
+                Some(_) => return Err(LayerError::InvalidHeader),
+                None => return Err(LayerError::InvalidLength),
+            };
+            Ok(synthetic_link_frame(protocol, 0))
+        }
+        Some(_) | None => parse_link(raw),
+    }
+}
+
 pub(super) fn parse_ethernet(raw: &[u8]) -> Result<(EthernetFrame, usize), LayerError> {
     if raw.len() < ETH_HEADER_LEN {
         return Err(LayerError::InvalidLength);
@@ -300,13 +330,17 @@ fn parse_mpls_label_entry(entry: u32) -> MplsLabel {
 mod tests {
     use crate::engine::builtin::{BuiltinPacketParser, ParseWarningCode, TransportSegment};
 
-    #[test]
-    fn ethernet_preferred_over_sll_when_ethertype_at_12_13() {
-        let frame = vec![
+    fn ethernet_ipv4_udp_frame() -> Vec<u8> {
+        vec![
             0x00, 0x00, 0x00, 0x00, 0x00, 0x06, 6, 7, 8, 9, 10, 11, 0x08, 0x00, 0x45, 0x00, 0x00,
             0x1c, 0x00, 0x01, 0x40, 0x00, 64, 17, 0, 0, 10, 0, 0, 1, 10, 0, 0, 2, 0x04, 0xd2, 0x00,
             0x35, 0x00, 0x08, 0x00, 0x00,
-        ];
+        ]
+    }
+
+    #[test]
+    fn ethernet_preferred_over_sll_when_ethertype_at_12_13() {
+        let frame = ethernet_ipv4_udp_frame();
         let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
         assert!(parsed.ethernet.is_some());
         assert_eq!(parsed.ethernet.as_ref().unwrap().ethertype, 0x0800);
@@ -314,6 +348,47 @@ mod tests {
             parsed.ethernet.as_ref().unwrap().source,
             [6, 7, 8, 9, 10, 11]
         );
+        assert!(parsed.ipv4.is_some());
+        assert!(matches!(parsed.transport, Some(TransportSegment::Udp(_))));
+    }
+
+    #[test]
+    fn parses_null_ipv4_udp() {
+        let mut frame = vec![2, 0, 0, 0];
+        frame.extend_from_slice(&ethernet_ipv4_udp_frame()[14..]);
+
+        let parsed =
+            BuiltinPacketParser::parse_with_linktype(&frame, 0).expect("NULL frame should parse");
+        assert!(parsed.ipv4.is_some());
+        assert!(matches!(parsed.transport, Some(TransportSegment::Udp(_))));
+    }
+
+    #[test]
+    fn parses_raw_ipv4_udp() {
+        let frame = ethernet_ipv4_udp_frame();
+        let parsed = BuiltinPacketParser::parse_with_linktype(&frame[14..], 101)
+            .expect("RAW frame should parse");
+
+        assert!(parsed.ipv4.is_some());
+        assert!(matches!(parsed.transport, Some(TransportSegment::Udp(_))));
+    }
+
+    #[test]
+    fn linktype_ethernet_parses_ethernet() {
+        let frame = ethernet_ipv4_udp_frame();
+        let parsed = BuiltinPacketParser::parse_with_linktype(&frame, 1)
+            .expect("Ethernet frame should parse");
+
+        assert!(parsed.ipv4.is_some());
+        assert!(matches!(parsed.transport, Some(TransportSegment::Udp(_))));
+    }
+
+    #[test]
+    fn unknown_linktype_falls_back_to_sniffing() {
+        let frame = ethernet_ipv4_udp_frame();
+        let parsed = BuiltinPacketParser::parse_with_linktype(&frame, 999)
+            .expect("Ethernet frame should parse via sniffing");
+
         assert!(parsed.ipv4.is_some());
         assert!(matches!(parsed.transport, Some(TransportSegment::Udp(_))));
     }
