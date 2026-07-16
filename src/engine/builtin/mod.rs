@@ -507,6 +507,7 @@ fn apply_transport_parse(parsed: &mut ParsedPacket, transport_parse: transport::
     parsed.dns = transport_parse.dns;
     parsed.dhcp = transport_parse.dhcp;
     parsed.ntp = transport_parse.ntp;
+    parsed.tls = transport_parse.tls;
     parsed.udp_hints = transport_parse.hints;
 }
 
