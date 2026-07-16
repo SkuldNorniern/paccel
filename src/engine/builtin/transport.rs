@@ -14,8 +14,8 @@ use crate::layer::transport::tcp::{TcpFlags, TcpHeader};
 use crate::layer::transport::udp::UdpHeader;
 
 use super::types::{
-    AhInfo, EspInfo, GeneveInfo, GreInfo, IgmpInfo, SctpChunk, SctpInfo, TcpOptionsParsed,
-    TransportSegment, UdpAppHint, VxlanInfo, WireGuardInfo, WireGuardMessageType,
+    AhInfo, EspInfo, GeneveInfo, GreInfo, IgmpInfo, L2tpInfo, SctpChunk, SctpInfo,
+    TcpOptionsParsed, TransportSegment, UdpAppHint, VxlanInfo, WireGuardInfo, WireGuardMessageType,
 };
 
 const UDP_HEADER_LEN: usize = 8;
@@ -24,6 +24,7 @@ const UDP_PORT_MDNS: u16 = 5353;
 const UDP_PORT_DHCP_SERVER: u16 = 67;
 const UDP_PORT_DHCP_CLIENT: u16 = 68;
 const UDP_PORT_NTP: u16 = 123;
+const UDP_PORT_L2TP: u16 = 1701;
 const UDP_PORT_VXLAN: u16 = 4789;
 const UDP_PORT_GENEVE: u16 = 6081;
 const UDP_PORT_WIREGUARD: u16 = 51820;
@@ -41,6 +42,7 @@ pub(super) struct TransportParse {
     pub gre: Option<GreInfo>,
     pub vxlan: Option<VxlanInfo>,
     pub geneve: Option<GeneveInfo>,
+    pub l2tp: Option<L2tpInfo>,
     pub ah: Option<AhInfo>,
     pub esp: Option<EspInfo>,
     pub wireguard: Option<WireGuardInfo>,
@@ -184,9 +186,11 @@ fn parse_udp_transport(l4_bytes: &[u8]) -> Result<TransportParse, LayerError> {
 
     let vxlan = maybe_parse_vxlan(&udp, app);
     let geneve = maybe_parse_geneve(&udp, app);
+    let l2tp = maybe_parse_l2tp(&udp, app, &mut hints);
     let quic = (wireguard.is_none()
         && vxlan.is_none()
         && geneve.is_none()
+        && l2tp.is_none()
         && app.len() >= 7
         && app[0] & 0x80 != 0)
         .then(|| parse_quic_long_header(app).ok())
@@ -196,6 +200,7 @@ fn parse_udp_transport(l4_bytes: &[u8]) -> Result<TransportParse, LayerError> {
         transport: Some(TransportSegment::Udp(udp)),
         vxlan,
         geneve,
+        l2tp,
         wireguard,
         dns,
         dhcp,
@@ -272,6 +277,19 @@ fn maybe_parse_geneve(udp: &UdpHeader, payload: &[u8]) -> Option<GeneveInfo> {
         return None;
     }
     parse_geneve_minimal(payload).ok()
+}
+
+fn maybe_parse_l2tp(
+    udp: &UdpHeader,
+    payload: &[u8],
+    hints: &mut Vec<UdpAppHint>,
+) -> Option<L2tpInfo> {
+    if !is_udp_port_match(udp, UDP_PORT_L2TP) || payload.len() < 6 {
+        return None;
+    }
+    let info = parse_l2tp_minimal(payload);
+    push_hint_unique(hints, UdpAppHint::L2tp);
+    Some(info)
 }
 
 fn maybe_classify_wireguard_udp(
@@ -527,6 +545,34 @@ fn parse_geneve_minimal(data: &[u8]) -> Result<GeneveInfo, LayerError> {
         vni,
         header_len,
     })
+}
+
+fn parse_l2tp_minimal(data: &[u8]) -> L2tpInfo {
+    let flags = data
+        .get(..2)
+        .and_then(|bytes| <[u8; 2]>::try_from(bytes).ok())
+        .map(u16::from_be_bytes)
+        .unwrap_or_default();
+    let mut offset = 2usize;
+    if flags & 0x4000 != 0 {
+        offset += 2;
+    }
+    let tunnel_id = data
+        .get(offset..offset.saturating_add(2))
+        .and_then(|bytes| <[u8; 2]>::try_from(bytes).ok())
+        .map(u16::from_be_bytes);
+    offset += 2;
+    let session_id = data
+        .get(offset..offset.saturating_add(2))
+        .and_then(|bytes| <[u8; 2]>::try_from(bytes).ok())
+        .map(u16::from_be_bytes);
+
+    L2tpInfo {
+        flags,
+        version: flags.to_be_bytes()[1] & 0x0f,
+        tunnel_id,
+        session_id,
+    }
 }
 
 fn parse_tcp_header(l4_bytes: &[u8]) -> Result<TcpHeader, LayerError> {
@@ -1036,6 +1082,22 @@ mod tests {
         assert_eq!(ntp.mode, 3);
         assert_eq!(ntp.reference_ts, 0x0102_0304_0506_0708);
         assert_eq!(ntp.transmit_ts, 0x1112_1314_1516_1718);
+    }
+
+    #[test]
+    fn parses_l2tp_over_udp() {
+        let l2tp = [
+            0x42, 0x02, 0x00, 0x0c, 0x12, 0x34, 0x56, 0x78, 0x00, 0x01, 0x00, 0x02,
+        ];
+        let frame = build_ethernet_ipv4_udp_frame(49152, 1701, &l2tp);
+
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+        let l2tp = parsed.l2tp.as_ref().expect("L2TP metadata");
+        assert_eq!(l2tp.flags, 0x4202);
+        assert_eq!(l2tp.version, 2);
+        assert_eq!(l2tp.tunnel_id, Some(0x1234));
+        assert_eq!(l2tp.session_id, Some(0x5678));
+        assert!(parsed.udp_hints.contains(&UdpAppHint::L2tp));
     }
 
     #[test]

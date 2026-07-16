@@ -14,10 +14,11 @@ use self::network::{parse_ipv4_header, parse_ipv6_header, resolve_ipv6_transport
 use self::transport::parse_transport;
 
 pub use self::types::{
-    AhInfo, EspInfo, EthernetFrame, GeneveInfo, GreInfo, IgmpInfo, LldpInfo, LldpTlv, MplsInfo,
-    MplsLabel, ParseConfig, ParseMode, ParseWarning, ParseWarningCode, ParseWarningProtocol,
-    ParseWarningSubcode, ParsedPacket, PppoeInfo, SctpChunk, SctpInfo, StpBpdu, TcpOptionsParsed,
-    TransportSegment, UdpAppHint, VxlanInfo, WireGuardInfo, WireGuardMessageType,
+    AhInfo, EspInfo, EthernetFrame, GeneveInfo, GreInfo, IgmpInfo, L2tpInfo, LldpInfo, LldpTlv,
+    MplsInfo, MplsLabel, ParseConfig, ParseMode, ParseWarning, ParseWarningCode,
+    ParseWarningProtocol, ParseWarningSubcode, ParsedPacket, PppoeInfo, SctpChunk, SctpInfo,
+    StpBpdu, TcpOptionsParsed, TransportSegment, UdpAppHint, VxlanInfo, WireGuardInfo,
+    WireGuardMessageType,
 };
 
 pub struct BuiltinPacketParser;
@@ -291,7 +292,7 @@ impl BuiltinPacketParser {
                 parsed.ipv6 = Some(ipv6);
                 Ok(parsed)
             }
-            ethertype::PPPOE_DISCOVERY | ethertype::PPPOE_SESSION => {
+            ethertype::PPPOE_DISCOVERY => {
                 let pppoe = parse_pppoe_minimal(l3_bytes)?;
                 parsed.pppoe = Some(pppoe);
                 parsed.warnings.push(ParseWarning {
@@ -301,6 +302,12 @@ impl BuiltinPacketParser {
                     offset: l3_offset,
                     message: "PPPoE header only; payload not decoded",
                 });
+                Ok(parsed)
+            }
+            ethertype::PPPOE_SESSION => {
+                let pppoe = parse_pppoe_minimal(l3_bytes)?;
+                parsed.pppoe = Some(pppoe);
+                decode_pppoe_session(&mut parsed, l3_bytes, config, depth, l3_offset)?;
                 Ok(parsed)
             }
             ethertype::MPLS_UNICAST | ethertype::MPLS_MULTICAST => {
@@ -380,6 +387,110 @@ impl BuiltinPacketParser {
             }
         }
     }
+}
+
+fn decode_pppoe_session(
+    parsed: &mut ParsedPacket,
+    data: &[u8],
+    config: ParseConfig,
+    depth: usize,
+    offset: usize,
+) -> Result<(), LayerError> {
+    const PPPOE_HEADER_LEN: usize = 6;
+
+    let declared_end = PPPOE_HEADER_LEN.saturating_add(
+        parsed
+            .pppoe
+            .as_ref()
+            .map_or(0, |pppoe| usize::from(pppoe.length)),
+    );
+    let payload_end = declared_end.min(data.len());
+    let Some(first) = data
+        .get(PPPOE_HEADER_LEN)
+        .copied()
+        .filter(|_| payload_end > 6)
+    else {
+        if config.mode == ParseMode::Strict {
+            return Err(LayerError::InvalidLength);
+        }
+        push_inner_warning(
+            parsed,
+            ParseWarningCode::PppoeNoPayload,
+            ParseWarningSubcode::PppoeNoPayload,
+            offset + PPPOE_HEADER_LEN,
+            "PPPoE session has no complete PPP protocol field",
+        );
+        return Ok(());
+    };
+
+    let (protocol, protocol_len) = if first & 1 != 0 {
+        (u16::from(first), 1)
+    } else {
+        let Some(second) = data
+            .get(PPPOE_HEADER_LEN + 1)
+            .copied()
+            .filter(|_| payload_end > 7)
+        else {
+            if config.mode == ParseMode::Strict {
+                return Err(LayerError::InvalidLength);
+            }
+            push_inner_warning(
+                parsed,
+                ParseWarningCode::PppoeNoPayload,
+                ParseWarningSubcode::PppoeNoPayload,
+                offset + PPPOE_HEADER_LEN,
+                "PPPoE session has a truncated PPP protocol field",
+            );
+            return Ok(());
+        };
+        (u16::from_be_bytes([first, second]), 2)
+    };
+
+    let inner_offset = PPPOE_HEADER_LEN + protocol_len;
+    let inner_ethertype = match protocol {
+        0x0021 => Some(ethertype::IPV4),
+        0x0057 => Some(ethertype::IPV6),
+        _ => None,
+    };
+    let Some(inner_ethertype) = inner_ethertype else {
+        push_inner_warning(
+            parsed,
+            ParseWarningCode::PppoeNoPayload,
+            ParseWarningSubcode::PppoeNoPayload,
+            offset + PPPOE_HEADER_LEN,
+            "PPPoE PPP control or unsupported protocol; payload not decoded",
+        );
+        return Ok(());
+    };
+
+    let inner = data
+        .get(inner_offset..payload_end)
+        .filter(|bytes| !bytes.is_empty());
+    let depth_limited = inner.is_some() && depth >= config.max_tunnel_depth;
+    let result = inner.and_then(|bytes| {
+        if depth_limited {
+            None
+        } else {
+            Some(BuiltinPacketParser::parse_ethertype(
+                bytes,
+                inner_ethertype,
+                config,
+                depth + 1,
+                offset + inner_offset,
+                ParsedPacket::default(),
+            ))
+        }
+    });
+    recurse_or_warn(
+        parsed,
+        result,
+        depth_limited,
+        ParseWarningCode::PppoeNoPayload,
+        ParseWarningSubcode::PppoeNoPayload,
+        offset + inner_offset,
+        "PPPoE PPP payload; nested decode failed",
+    );
+    Ok(())
 }
 
 fn recurse_transport_tunnel(
@@ -564,6 +675,7 @@ fn apply_transport_parse(parsed: &mut ParsedPacket, transport_parse: transport::
     parsed.gre = transport_parse.gre;
     parsed.vxlan = transport_parse.vxlan;
     parsed.geneve = transport_parse.geneve;
+    parsed.l2tp = transport_parse.l2tp;
     parsed.ah = transport_parse.ah;
     parsed.esp = transport_parse.esp;
     parsed.wireguard = transport_parse.wireguard;

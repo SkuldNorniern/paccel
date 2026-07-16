@@ -8,29 +8,27 @@ The goal is to become a strong parsing alternative for Fluere workloads (not a f
 
 - parser engine scaffolding is in place (`engine/*`)
 - packet model is split into owned + view modules (`packet/*`)
-- built-in parsing path exists for:
-  - Ethernet II, SLL/SLL2 at parse entry
-  - VLAN/QinQ
-  - ARP
-  - IPv4 (truncation and fragment warnings)
-  - IPv6 + basic extension header walk
-  - TCP (with options: MSS, window scale), UDP
-  - ICMP (1), ICMPv6 (58), IGMP (2); minimal headers
-  - GRE (protocol 47); minimal header, protocol type
-  - MPLS (ethertypes 0x8847/0x8848); minimal label stack metadata
-  - GENEVE (UDP 6081); minimal header metadata
-  - AH (protocol 51) and ESP (protocol 50); minimal SPI/sequence metadata
-  - WireGuard over UDP (default ports 51820/51821); message-type classification (init/response/cookie/data)
-  - PPPoE (ethertypes 0x8863/0x8864); minimal header
-  - DNS over UDP/53 and mDNS over UDP/5353 (heuristic-gated)
-  - UDP app hints for DHCP/NTP/mDNS/DNS
+- built-in parsing, capture iteration, opt-in reassembly, and stream tracking are available
 - low-level borrowed packet wrappers exist for manual parsing flows:
   - `packet::EthernetPacket`, `packet::SllPacket`, `packet::Sll2Packet`, `packet::Ipv4Packet`, `packet::Ipv6Packet`, `packet::TcpPacket`, `packet::UdpPacket`, `packet::ArpPacket`, `packet::DnsPacket`, `packet::IcmpPacket`, `packet::Icmpv6Packet`, `packet::DhcpPacket`, `packet::GrePacket`, `packet::VxlanPacket`, `packet::VlanTagView`
 
+## Supported protocols
+
+| Layer / capability | Support |
+|---|---|
+| Link | Ethernet II; VLAN 802.1Q; QinQ 802.1ad; Linux SLL/SLL2; 802.11 with radiotap; ARP; PPPoE with PPP-in-PPPoE; MPLS; LLDP; STP |
+| Network | IPv4 with options; IPv6 with extension headers; ICMP with echo; ICMPv6 with NDP; IGMP |
+| Transport | TCP with options; UDP; SCTP; GRE; AH; ESP; L2TP |
+| Tunnel (recursive inner decode) | GRE; VXLAN; GENEVE; MPLS; IP-in-IP |
+| Application | DNS with full records and EDNS; DHCP; NTP; TLS ClientHello with SNI/ALPN; HTTP/1.x; QUIC long headers; WireGuard classification |
+| Capture formats | pcap and pcapng (linktype-aware: Ethernet, SLL, SLL2, NULL, RAW, and 802.11) |
+| Reassembly | IPv4/IPv6 fragments; TCP streams (opt-in) |
+| Streaming | Multi-segment HTTP/TLS through `SessionTracker` |
+
+The parser never panics on malformed input; it is fuzz-, property-, and differential-tested.
+
 ## What it is not yet
 
-- no fragment reassembly engine yet
-- no TCP stream reassembly yet
 - tshark corpus scaffolding exists; parity automation is in place, but tshark-based differential coverage is still being expanded
 - baseline pcap-vs-scapy parity test exists, but coverage is still small
 - still uses intermediate allocations in parts of hot path
@@ -93,7 +91,7 @@ Flow/state tracking should be composed on the integration side (for example insi
 
 ## Explicit core non-goals (current scope)
 
-- No built-in flow table, reassembly engine, or stream tracker in core parser.
+- No built-in flow table in the stateless core parser; reassembly and stream tracking are opt-in components.
 - No raw datalink/transport send/receive runtime in core parser.
 - No macro-heavy mutable packet construction API in core crate.
 
