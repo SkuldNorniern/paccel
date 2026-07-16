@@ -348,8 +348,48 @@ fn parse_gre_minimal(data: &[u8]) -> Result<GreInfo, LayerError> {
     if data.len() < 4 {
         return Err(LayerError::InvalidLength);
     }
+    let checksum_present = data[0] & 0x80 != 0;
+    let key_present = data[0] & 0x20 != 0;
+    let sequence_present = data[0] & 0x10 != 0;
+    let header_len = 4
+        + usize::from(checksum_present) * 4
+        + usize::from(key_present) * 4
+        + usize::from(sequence_present) * 4;
+    if data.len() < header_len {
+        return Err(LayerError::InvalidLength);
+    }
     let protocol_type = u16::from_be_bytes([data[2], data[3]]);
-    Ok(GreInfo { protocol_type })
+    let mut offset = 4;
+    if checksum_present {
+        offset += 4;
+    }
+    let key = key_present.then(|| {
+        let value = u32::from_be_bytes([
+            data[offset],
+            data[offset + 1],
+            data[offset + 2],
+            data[offset + 3],
+        ]);
+        offset += 4;
+        value
+    });
+    let sequence = sequence_present.then(|| {
+        u32::from_be_bytes([
+            data[offset],
+            data[offset + 1],
+            data[offset + 2],
+            data[offset + 3],
+        ])
+    });
+    Ok(GreInfo {
+        protocol_type,
+        checksum_present,
+        key_present,
+        sequence_present,
+        key,
+        sequence,
+        header_len,
+    })
 }
 
 fn parse_ah_minimal(data: &[u8]) -> Result<AhInfo, LayerError> {
@@ -387,12 +427,19 @@ fn parse_geneve_minimal(data: &[u8]) -> Result<GeneveInfo, LayerError> {
         return Err(LayerError::InvalidLength);
     }
     let version = (data[0] >> 6) & 0x03;
+    let opt_len = data[0] & 0x3f;
+    let header_len = 8 + usize::from(opt_len) * 4;
+    if data.len() < header_len {
+        return Err(LayerError::InvalidLength);
+    }
     let protocol_type = u16::from_be_bytes([data[2], data[3]]);
     let vni = u32::from(data[4]) << 16 | u32::from(data[5]) << 8 | u32::from(data[6]);
     Ok(GeneveInfo {
         version,
+        opt_len,
         protocol_type,
         vni,
+        header_len,
     })
 }
 
@@ -705,6 +752,28 @@ mod tests {
     }
 
     #[test]
+    fn gre_key_and_sequence_extend_header() {
+        let gre_header = [
+            0x30, 0x00, 0x08, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+        ];
+        let frame = build_ethernet_ipv4_l4_frame(47, &gre_header);
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+        let gre = parsed.gre.as_ref().expect("gre");
+        assert!(!gre.checksum_present);
+        assert!(gre.key_present);
+        assert!(gre.sequence_present);
+        assert_eq!(gre.key, Some(0x0102_0304));
+        assert_eq!(gre.sequence, Some(0x0506_0708));
+        assert_eq!(gre.header_len, 12);
+    }
+
+    #[test]
+    fn gre_truncated_checksum_header_errors() {
+        let frame = build_ethernet_ipv4_l4_frame(47, &[0x80, 0x00, 0x08, 0x00]);
+        assert!(BuiltinPacketParser::parse(&frame).is_err());
+    }
+
+    #[test]
     fn tcp_options_mss_and_window_scale_parsed() {
         let frame = vec![
             0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0x08, 0x00, 0x45, 0x00, 0x00, 0x34, 0x00, 0x01,
@@ -745,6 +814,26 @@ mod tests {
             .warnings
             .iter()
             .any(|w| matches!(w.code, ParseWarningCode::GeneveInner)));
+    }
+
+    #[test]
+    fn geneve_options_extend_header() {
+        let geneve_header: [u8; 12] = [
+            0x01, 0x00, 0x65, 0x58, 0x00, 0x00, 101, 0, 0x01, 0x02, 0x03, 0x04,
+        ];
+        let frame = build_ethernet_ipv4_udp_frame(6081, 6081, &geneve_header);
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+        let geneve = parsed.geneve.as_ref().expect("geneve");
+        assert_eq!(geneve.opt_len, 1);
+        assert_eq!(geneve.header_len, 12);
+    }
+
+    #[test]
+    fn geneve_truncated_options_are_not_parsed() {
+        let geneve_header: [u8; 8] = [0x01, 0x00, 0x65, 0x58, 0x00, 0x00, 101, 0];
+        let frame = build_ethernet_ipv4_udp_frame(6081, 6081, &geneve_header);
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+        assert!(parsed.geneve.is_none());
     }
 
     #[test]
