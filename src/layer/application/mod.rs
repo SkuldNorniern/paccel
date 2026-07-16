@@ -1,4 +1,6 @@
+pub mod dhcp;
 pub mod dns;
+pub mod ntp;
 #[allow(dead_code)]
 mod openvpn;
 #[allow(dead_code)]
