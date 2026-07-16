@@ -7,6 +7,7 @@ pub mod ethertype {
     pub const MPLS_MULTICAST: u16 = 0x8848;
     pub const PPPOE_DISCOVERY: u16 = 0x8863;
     pub const PPPOE_SESSION: u16 = 0x8864;
+    pub const TRANSPARENT_ETHERNET_BRIDGING: u16 = 0x6558;
     pub const QINQ_8021AD: u16 = 0x88A8;
     pub const LLDP: u16 = 0x88CC;
     pub const PTP_1588: u16 = 0x88F7;
@@ -15,8 +16,10 @@ pub mod ethertype {
 pub mod ip_proto {
     pub const ICMP: u8 = 1;
     pub const IGMP: u8 = 2;
+    pub const IPV4_ENCAP: u8 = 4;
     pub const TCP: u8 = 6;
     pub const UDP: u8 = 17;
+    pub const IPV6_ENCAP: u8 = 41;
     pub const GRE: u8 = 47;
     pub const ESP: u8 = 50;
     pub const AH: u8 = 51;
@@ -50,8 +53,10 @@ pub fn ip_protocol_name(value: u8) -> &'static str {
     match value {
         ip_proto::ICMP => "icmp",
         ip_proto::IGMP => "igmp",
+        ip_proto::IPV4_ENCAP => "ipv4",
         ip_proto::TCP => "tcp",
         ip_proto::UDP => "udp",
+        ip_proto::IPV6_ENCAP => "ipv6",
         ip_proto::GRE => "gre",
         ip_proto::ESP => "esp",
         ip_proto::AH => "ah",

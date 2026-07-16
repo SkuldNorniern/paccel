@@ -3,7 +3,7 @@ mod network;
 mod transport;
 mod types;
 
-use crate::engine::constants::ethertype;
+use crate::engine::constants::{ethertype, ip_proto};
 use crate::layer::LayerError;
 
 use self::link::{
@@ -27,7 +27,7 @@ impl BuiltinPacketParser {
     }
 
     pub fn parse_with_config(raw: &[u8], config: ParseConfig) -> Result<ParsedPacket, LayerError> {
-        Self::parse_with_config_and_linktype(raw, config, None)
+        Self::parse_l2(raw, config, 0)
     }
 
     pub fn parse_with_linktype(raw: &[u8], linktype: u16) -> Result<ParsedPacket, LayerError> {
@@ -39,8 +39,25 @@ impl BuiltinPacketParser {
         config: ParseConfig,
         linktype: Option<u16>,
     ) -> Result<ParsedPacket, LayerError> {
+        Self::parse_l2_with_linktype(raw, config, 0, linktype)
+    }
+
+    fn parse_l2(
+        raw: &[u8],
+        config: ParseConfig,
+        depth: usize,
+    ) -> Result<ParsedPacket, LayerError> {
+        Self::parse_l2_with_linktype(raw, config, depth, None)
+    }
+
+    fn parse_l2_with_linktype(
+        raw: &[u8],
+        config: ParseConfig,
+        depth: usize,
+        linktype: Option<u16>,
+    ) -> Result<ParsedPacket, LayerError> {
         let (eth, l3_offset) = parse_link_with_linktype(raw, linktype)?;
-        let mut parsed = ParsedPacket {
+        let parsed = ParsedPacket {
             ethernet: Some(eth.clone()),
             ..ParsedPacket::default()
         };
@@ -49,9 +66,42 @@ impl BuiltinPacketParser {
             return Err(LayerError::InvalidLength);
         }
 
-        let l3_bytes = &raw[l3_offset..];
+        Self::parse_ethertype(
+            &raw[l3_offset..],
+            eth.ethertype,
+            config,
+            depth,
+            l3_offset,
+            parsed,
+        )
+    }
 
-        match eth.ethertype {
+    fn parse_l3(
+        l3_bytes: &[u8],
+        ethertype: u16,
+        config: ParseConfig,
+        depth: usize,
+    ) -> Result<ParsedPacket, LayerError> {
+        Self::parse_ethertype(
+            l3_bytes,
+            ethertype,
+            config,
+            depth,
+            0,
+            ParsedPacket::default(),
+        )
+    }
+
+    #[allow(clippy::cognitive_complexity)]
+    fn parse_ethertype(
+        l3_bytes: &[u8],
+        ethertype: u16,
+        config: ParseConfig,
+        depth: usize,
+        l3_offset: usize,
+        mut parsed: ParsedPacket,
+    ) -> Result<ParsedPacket, LayerError> {
+        match ethertype {
             ethertype::ARP => {
                 let arp = parse_arp_packet(l3_bytes)?;
                 parsed.arp = Some(arp);
@@ -62,7 +112,7 @@ impl BuiltinPacketParser {
 
                 let ip_header_len = (ipv4.ihl as usize) * 4;
                 let total_len = ipv4.total_length as usize;
-                if total_len < ip_header_len {
+                if total_len < ip_header_len || ip_header_len > l3_bytes.len() {
                     return Err(LayerError::InvalidLength);
                 }
 
@@ -94,7 +144,14 @@ impl BuiltinPacketParser {
                 let l4_bytes = &l3_bytes[ip_header_len..l4_end];
                 let transport_parse = parse_transport(ipv4.protocol, l4_bytes)?;
                 apply_transport_parse(&mut parsed, transport_parse);
-                push_inner_payload_warnings(&mut parsed, l3_offset + ip_header_len);
+                recurse_transport_tunnel(
+                    &mut parsed,
+                    ipv4.protocol,
+                    l4_bytes,
+                    config,
+                    depth,
+                    l3_offset + ip_header_len,
+                );
                 parsed.ipv4 = Some(ipv4);
                 Ok(parsed)
             }
@@ -153,7 +210,14 @@ impl BuiltinPacketParser {
                     let l4_bytes = &ipv6_payload[state.l4_offset..];
                     let transport_parse = parse_transport(state.next_header, l4_bytes)?;
                     apply_transport_parse(&mut parsed, transport_parse);
-                    push_inner_payload_warnings(&mut parsed, l3_offset + state.l4_offset);
+                    recurse_transport_tunnel(
+                        &mut parsed,
+                        state.next_header,
+                        l4_bytes,
+                        config,
+                        depth,
+                        l3_offset + state.l4_offset,
+                    );
                 }
 
                 parsed.ipv6 = Some(ipv6);
@@ -185,13 +249,45 @@ impl BuiltinPacketParser {
                     });
                 }
                 if mpls_payload_offset < l3_bytes.len() {
-                    parsed.warnings.push(ParseWarning {
-                        code: ParseWarningCode::MplsInner,
-                        protocol: ParseWarningProtocol::Tunnel,
-                        subcode: ParseWarningSubcode::MplsInner,
-                        offset: l3_offset + mpls_payload_offset,
-                        message: "MPLS inner payload; no nested decode yet",
-                    });
+                    let inner_bytes = &l3_bytes[mpls_payload_offset..];
+                    let inner_ethertype = match inner_bytes.first().map(|byte| byte >> 4) {
+                        Some(4) => Some(ethertype::IPV4),
+                        Some(6) => Some(ethertype::IPV6),
+                        _ => None,
+                    };
+                    if !depth_limit_hit {
+                        let tunnel_depth_limited = inner_ethertype.is_some()
+                            && depth >= config.max_tunnel_depth;
+                        let result = inner_ethertype.and_then(|inner_ethertype| {
+                            if tunnel_depth_limited {
+                                None
+                            } else {
+                                Some(Self::parse_l3(
+                                    inner_bytes,
+                                    inner_ethertype,
+                                    config,
+                                    depth + 1,
+                                ))
+                            }
+                        });
+                        recurse_or_warn(
+                            &mut parsed,
+                            result,
+                            tunnel_depth_limited,
+                            ParseWarningCode::MplsInner,
+                            ParseWarningSubcode::MplsInner,
+                            l3_offset + mpls_payload_offset,
+                            "MPLS inner payload; nested decode failed",
+                        );
+                    } else {
+                        push_inner_warning(
+                            &mut parsed,
+                            ParseWarningCode::MplsInner,
+                            ParseWarningSubcode::MplsInner,
+                            l3_offset + mpls_payload_offset,
+                            "MPLS inner payload; nested decode skipped",
+                        );
+                    }
                 }
                 Ok(parsed)
             }
@@ -214,34 +310,110 @@ impl BuiltinPacketParser {
     }
 }
 
-fn push_inner_payload_warnings(parsed: &mut ParsedPacket, offset: usize) {
-    if parsed.gre.is_some() {
-        parsed.warnings.push(ParseWarning {
-            code: ParseWarningCode::GreInner,
-            protocol: ParseWarningProtocol::Tunnel,
-            subcode: ParseWarningSubcode::GreInner,
+fn recurse_transport_tunnel(
+    parsed: &mut ParsedPacket,
+    protocol: u8,
+    l4_bytes: &[u8],
+    config: ParseConfig,
+    depth: usize,
+    offset: usize,
+) {
+    let candidate = if let Some(gre) = parsed.gre {
+        let inner = l4_bytes.get(gre.header_len..);
+        Some((
+            inner,
+            gre.protocol_type,
+            gre.protocol_type == ethertype::TRANSPARENT_ETHERNET_BRIDGING,
+            ParseWarningCode::GreInner,
+            ParseWarningSubcode::GreInner,
+            offset + gre.header_len,
+            "GRE inner payload; nested decode failed",
+        ))
+    } else if parsed.vxlan.is_some() {
+        let udp_end = udp_payload_end(parsed, l4_bytes.len());
+        Some((
+            udp_end.and_then(|end| l4_bytes.get(16..end)),
+            0,
+            true,
+            ParseWarningCode::VxlanInner,
+            ParseWarningSubcode::VxlanInner,
+            offset + 16,
+            "VXLAN inner payload; nested decode failed",
+        ))
+    } else if let Some(geneve) = parsed.geneve {
+        let inner_offset = 8 + geneve.header_len;
+        let udp_end = udp_payload_end(parsed, l4_bytes.len());
+        Some((
+            udp_end.and_then(|end| l4_bytes.get(inner_offset..end)),
+            geneve.protocol_type,
+            geneve.protocol_type == ethertype::TRANSPARENT_ETHERNET_BRIDGING,
+            ParseWarningCode::GeneveInner,
+            ParseWarningSubcode::GeneveInner,
+            offset + inner_offset,
+            "GENEVE inner payload; nested decode failed",
+        ))
+    } else if protocol == ip_proto::IPV4_ENCAP {
+        Some((
+            Some(l4_bytes),
+            ethertype::IPV4,
+            false,
+            ParseWarningCode::IpipInner,
+            ParseWarningSubcode::IpipInner,
             offset,
-            message: "GRE inner payload; no nested decode yet",
-        });
-    }
-    if parsed.vxlan.is_some() {
-        parsed.warnings.push(ParseWarning {
-            code: ParseWarningCode::VxlanInner,
-            protocol: ParseWarningProtocol::Tunnel,
-            subcode: ParseWarningSubcode::VxlanInner,
+            "IP-in-IP inner payload; nested decode failed",
+        ))
+    } else if protocol == ip_proto::IPV6_ENCAP {
+        Some((
+            Some(l4_bytes),
+            ethertype::IPV6,
+            false,
+            ParseWarningCode::IpipInner,
+            ParseWarningSubcode::IpipInner,
             offset,
-            message: "VXLAN inner payload; no nested decode yet",
-        });
-    }
-    if parsed.geneve.is_some() {
-        parsed.warnings.push(ParseWarning {
-            code: ParseWarningCode::GeneveInner,
-            protocol: ParseWarningProtocol::Tunnel,
-            subcode: ParseWarningSubcode::GeneveInner,
+            "IP-in-IP inner payload; nested decode failed",
+        ))
+    } else if protocol == ip_proto::MPLS_IN_IP {
+        Some((
+            Some(l4_bytes),
+            ethertype::MPLS_UNICAST,
+            false,
+            ParseWarningCode::MplsInner,
+            ParseWarningSubcode::MplsInner,
             offset,
-            message: "GENEVE inner payload; no nested decode yet",
+            "MPLS-in-IP inner payload; nested decode failed",
+        ))
+    } else {
+        None
+    };
+
+    if let Some((inner, inner_ethertype, is_l2, code, subcode, inner_offset, message)) = candidate {
+        let has_payload = inner.is_some_and(|bytes| !bytes.is_empty());
+        let depth_limited = has_payload && depth >= config.max_tunnel_depth;
+        let result = inner.filter(|bytes| !bytes.is_empty()).and_then(|bytes| {
+            if depth_limited {
+                None
+            } else if is_l2 {
+                Some(BuiltinPacketParser::parse_l2(bytes, config, depth + 1))
+            } else {
+                Some(BuiltinPacketParser::parse_l3(
+                    bytes,
+                    inner_ethertype,
+                    config,
+                    depth + 1,
+                ))
+            }
         });
+        recurse_or_warn(
+            parsed,
+            result,
+            depth_limited,
+            code,
+            subcode,
+            inner_offset,
+            message,
+        );
     }
+
     if parsed.ah.is_some() {
         parsed.warnings.push(ParseWarning {
             code: ParseWarningCode::AhInner,
@@ -260,6 +432,53 @@ fn push_inner_payload_warnings(parsed: &mut ParsedPacket, offset: usize) {
             message: "ESP payload present; no nested decode yet",
         });
     }
+}
+
+fn udp_payload_end(parsed: &ParsedPacket, captured_len: usize) -> Option<usize> {
+    match parsed.transport.as_ref()? {
+        TransportSegment::Udp(udp) => Some((udp.length as usize).min(captured_len)),
+        TransportSegment::Tcp(_) => None,
+    }
+}
+
+fn recurse_or_warn(
+    parsed: &mut ParsedPacket,
+    result: Option<Result<ParsedPacket, LayerError>>,
+    depth_limited: bool,
+    code: ParseWarningCode,
+    subcode: ParseWarningSubcode,
+    offset: usize,
+    message: &'static str,
+) {
+    if depth_limited {
+        parsed.warnings.push(ParseWarning {
+            code: ParseWarningCode::TunnelDepthLimit,
+            protocol: ParseWarningProtocol::Tunnel,
+            subcode: ParseWarningSubcode::TunnelDepthLimit,
+            offset,
+            message: "tunnel depth limit reached; skipping inner payload decode",
+        });
+    } else if let Some(Ok(inner)) = result {
+        parsed.inner = Some(Box::new(inner));
+    } else {
+        push_inner_warning(parsed, code, subcode, offset, message);
+    }
+}
+
+fn push_inner_warning(
+    parsed: &mut ParsedPacket,
+    code: ParseWarningCode,
+    subcode: ParseWarningSubcode,
+    offset: usize,
+    message: &'static str,
+) {
+    parsed.warnings.push(ParseWarning {
+        code,
+        protocol: ParseWarningProtocol::Tunnel,
+        subcode,
+        offset,
+        message,
+    });
 }
 
 fn apply_transport_parse(parsed: &mut ParsedPacket, transport_parse: transport::TransportParse) {

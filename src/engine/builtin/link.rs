@@ -463,10 +463,10 @@ mod tests {
     }
 
     #[test]
-    fn parses_mpls_label_and_emits_inner_warning() {
+    fn parses_mpls_label_and_inner_ipv4() {
         let frame = vec![
             0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0x88, 0x47, 0x00, 0x01, 0x01, 0x40, 0x45, 0x00,
-            0x00, 0x14, 0x00, 0x01, 0x00, 0x00, 64, 1, 0, 0, 10, 0, 0, 1, 10, 0, 0, 2,
+            0x00, 0x14, 0x00, 0x01, 0x00, 0x00, 64, 0, 0, 0, 10, 0, 0, 1, 10, 0, 0, 2,
         ];
         let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
         assert!(parsed.mpls.is_some());
@@ -474,10 +474,7 @@ mod tests {
         assert_eq!(mpls.labels.len(), 1);
         assert_eq!(mpls.labels[0].label, 16);
         assert!(mpls.labels[0].bottom_of_stack);
-        assert!(parsed
-            .warnings
-            .iter()
-            .any(|w| matches!(w.code, ParseWarningCode::MplsInner)));
+        assert!(parsed.inner.as_ref().is_some_and(|inner| inner.ipv4.is_some()));
     }
 
     #[test]

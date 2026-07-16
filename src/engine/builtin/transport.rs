@@ -579,7 +579,8 @@ fn push_hint_unique(hints: &mut Vec<UdpAppHint>, hint: UdpAppHint) {
 #[allow(clippy::cast_possible_truncation)]
 mod tests {
     use crate::engine::builtin::{
-        BuiltinPacketParser, ParseWarningCode, TransportSegment, UdpAppHint, WireGuardMessageType,
+        BuiltinPacketParser, ParseConfig, ParseWarningCode, TransportSegment, UdpAppHint,
+        WireGuardMessageType,
     };
 
     fn build_ethernet_ipv4_udp_frame(src_port: u16, dst_port: u16, udp_payload: &[u8]) -> Vec<u8> {
@@ -762,15 +763,16 @@ mod tests {
     #[test]
     fn parses_ipv4_gre() {
         let frame = vec![
-            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0x08, 0x00, 0x45, 0x00, 0x00, 0x28, 0x00, 0x01,
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0x08, 0x00, 0x45, 0x00, 0x00, 0x2c, 0x00, 0x01,
             0x40, 0x00, 64, 47, 0, 0, 10, 0, 0, 1, 10, 0, 0, 2, 0x00, 0x00, 0x08, 0x00, 0x45, 0x00,
-            0x00, 0x14, 0x00, 0x01, 0x00, 0x00, 64, 1, 0, 0, 192, 168, 1, 1, 192, 168, 1, 2,
+            0x00, 0x14, 0x00, 0x01, 0x00, 0x00, 64, 0, 0, 0, 192, 168, 1, 1, 192, 168, 1, 2,
         ];
         let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
         assert!(parsed.ipv4.is_some());
         assert!(parsed.gre.is_some());
         assert_eq!(parsed.gre.as_ref().unwrap().protocol_type, 0x0800);
-        assert!(parsed
+        assert!(parsed.inner.as_ref().is_some_and(|inner| inner.ipv4.is_some()));
+        assert!(!parsed
             .warnings
             .iter()
             .any(|w| matches!(w.code, ParseWarningCode::GreInner)));
@@ -840,6 +842,53 @@ mod tests {
             .warnings
             .iter()
             .any(|w| matches!(w.code, ParseWarningCode::VxlanInner)));
+    }
+
+    #[test]
+    fn vxlan_decodes_inner_ethernet_ipv4_udp() {
+        let inner = build_ethernet_ipv4_udp_frame(1234, 4321, &[]);
+        let mut payload = vec![0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 100, 0];
+        payload.extend_from_slice(&inner);
+        let frame = build_ethernet_ipv4_udp_frame(4789, 4789, &payload);
+
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+        assert!(parsed.vxlan.is_some());
+        let inner = parsed.inner.as_ref().expect("inner packet");
+        assert!(inner.ethernet.is_some());
+        assert!(inner.ipv4.is_some());
+        assert!(matches!(inner.transport, Some(TransportSegment::Udp(_))));
+    }
+
+    #[test]
+    fn ipv4_in_ipv4_decodes_inner_packet() {
+        let inner_frame = build_ethernet_ipv4_l4_frame(1, &[8, 0, 0, 0, 0, 1, 0, 1]);
+        let frame = build_ethernet_ipv4_l4_frame(4, &inner_frame[14..]);
+
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+        assert!(parsed.ipv4.is_some());
+        assert!(parsed.inner.as_ref().is_some_and(|inner| inner.ipv4.is_some()));
+    }
+
+    #[test]
+    fn zero_tunnel_depth_disables_recursion() {
+        let inner_frame = build_ethernet_ipv4_l4_frame(1, &[8, 0, 0, 0, 0, 1, 0, 1]);
+        let mut gre = vec![0x00, 0x00, 0x08, 0x00];
+        gre.extend_from_slice(&inner_frame[14..]);
+        let frame = build_ethernet_ipv4_l4_frame(47, &gre);
+
+        let parsed = BuiltinPacketParser::parse_with_config(
+            &frame,
+            ParseConfig {
+                max_tunnel_depth: 0,
+                ..ParseConfig::default()
+            },
+        )
+        .expect("parse should succeed");
+        assert!(parsed.inner.is_none());
+        assert!(parsed
+            .warnings
+            .iter()
+            .any(|w| matches!(w.code, ParseWarningCode::TunnelDepthLimit)));
     }
 
     #[test]
