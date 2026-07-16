@@ -3,7 +3,9 @@ use std::net::Ipv4Addr;
 use crate::engine::constants::ip_proto;
 use crate::layer::application::dhcp::{parse_dhcp_message, DhcpMessage};
 use crate::layer::application::dns::{parse_dns_message, DnsMessage};
+use crate::layer::application::http::{parse_http, HttpMessage};
 use crate::layer::application::ntp::{parse_ntp_message, NtpMessage};
+use crate::layer::application::quic::{parse_quic_long_header, QuicLongHeader};
 use crate::layer::application::tls::{parse_tls_client_hello, TlsClientHello};
 use crate::layer::network::icmp::IcmpHeader;
 use crate::layer::network::icmpv6::Icmpv6Header;
@@ -45,6 +47,8 @@ pub(super) struct TransportParse {
     pub dhcp: Option<DhcpMessage>,
     pub ntp: Option<NtpMessage>,
     pub tls: Option<TlsClientHello>,
+    pub http: Option<HttpMessage>,
+    pub quic: Option<QuicLongHeader>,
     pub hints: Vec<UdpAppHint>,
 }
 
@@ -123,6 +127,9 @@ pub(super) fn parse_transport(protocol: u8, l4_bytes: &[u8]) -> Result<Transport
                 .flatten();
             let mut parsed = TransportParse::with_tcp(tcp, tcp_options);
             parsed.tls = tls;
+            if parsed.tls.is_none() {
+                parsed.http = parse_http(payload).ok();
+            }
             Ok(parsed)
         }
         ip_proto::UDP => parse_udp_transport(l4_bytes),
@@ -175,6 +182,13 @@ fn parse_udp_transport(l4_bytes: &[u8]) -> Result<TransportParse, LayerError> {
 
     let vxlan = maybe_parse_vxlan(&udp, app);
     let geneve = maybe_parse_geneve(&udp, app);
+    let quic = (wireguard.is_none()
+        && vxlan.is_none()
+        && geneve.is_none()
+        && app.len() >= 7
+        && app[0] & 0x80 != 0)
+        .then(|| parse_quic_long_header(app).ok())
+        .flatten();
 
     Ok(TransportParse {
         transport: Some(TransportSegment::Udp(udp)),
@@ -184,6 +198,7 @@ fn parse_udp_transport(l4_bytes: &[u8]) -> Result<TransportParse, LayerError> {
         dns,
         dhcp,
         ntp,
+        quic,
         hints,
         ..TransportParse::default()
     })
@@ -647,6 +662,7 @@ mod tests {
         BuiltinPacketParser, ParseConfig, ParseWarningCode, TransportSegment, UdpAppHint,
         WireGuardMessageType,
     };
+    use crate::layer::application::http::HttpMessage;
 
     fn build_ethernet_ipv4_udp_frame(src_port: u16, dst_port: u16, udp_payload: &[u8]) -> Vec<u8> {
         let udp_len = (8 + udp_payload.len()) as u16;
@@ -819,6 +835,69 @@ mod tests {
         assert!(tls.alpn.iter().any(|protocol| protocol == "h2"));
         assert!(tls.supported_versions.contains(&0x0304));
         assert!(!tls.cipher_suites.is_empty());
+    }
+
+    #[test]
+    fn parses_http_request_from_tcp_payload() {
+        let payload = b"GET /index.html HTTP/1.1\r\nHost: example.com\r\n\r\n";
+        let frame = build_ethernet_ipv4_tcp_frame(49152, 80, payload);
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+
+        let (method, target, host) = parsed
+            .http
+            .as_ref()
+            .and_then(|message| match message {
+                HttpMessage::Request {
+                    method,
+                    target,
+                    host,
+                    ..
+                } => Some((method, target, host)),
+                HttpMessage::Response { .. } => None,
+            })
+            .expect("HTTP request");
+        assert_eq!(method, "GET");
+        assert_eq!(target, "/index.html");
+        assert_eq!(host.as_deref(), Some("example.com"));
+    }
+
+    #[test]
+    fn parses_http_response_from_tcp_payload() {
+        let payload = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
+        let frame = build_ethernet_ipv4_tcp_frame(80, 49152, payload);
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+
+        let status = parsed
+            .http
+            .as_ref()
+            .and_then(|message| match message {
+                HttpMessage::Response { status, .. } => Some(*status),
+                HttpMessage::Request { .. } => None,
+            })
+            .expect("HTTP response");
+        assert_eq!(status, 200);
+    }
+
+    #[test]
+    fn rejects_non_http_tcp_payload() {
+        let frame = build_ethernet_ipv4_tcp_frame(49152, 80, &[0xde, 0xad, 0xbe, 0xef]);
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+        assert!(parsed.http.is_none());
+    }
+
+    #[test]
+    fn parses_quic_initial_from_udp_payload() {
+        let payload = [
+            0xc0, 0x00, 0x00, 0x00, 0x01, 0x04, 0x11, 0x22, 0x33, 0x44, 0x00,
+        ];
+        let frame = build_ethernet_ipv4_udp_frame(49152, 443, &payload);
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+        let quic = parsed.quic.as_ref().expect("QUIC long header");
+
+        assert!(quic.is_initial);
+        assert_eq!(quic.version, 1);
+        assert_eq!(quic.dcid, [0x11, 0x22, 0x33, 0x44]);
+        assert!(quic.scid.is_empty());
     }
 
     #[test]

@@ -3,7 +3,9 @@ use std::net::Ipv4Addr;
 use crate::engine::constants::ethertype_name;
 use crate::layer::application::dhcp::DhcpMessage;
 use crate::layer::application::dns::DnsMessage;
+use crate::layer::application::http::HttpMessage;
 use crate::layer::application::ntp::NtpMessage;
+use crate::layer::application::quic::QuicLongHeader;
 use crate::layer::application::tls::TlsClientHello;
 use crate::layer::datalink::arp::ArpPacket;
 use crate::layer::network::icmp::IcmpHeader;
@@ -358,6 +360,8 @@ pub struct ParsedPacket {
     pub dhcp: Option<DhcpMessage>,
     pub ntp: Option<NtpMessage>,
     pub tls: Option<TlsClientHello>,
+    pub http: Option<HttpMessage>,
+    pub quic: Option<QuicLongHeader>,
     pub udp_hints: Vec<UdpAppHint>,
     pub warnings: Vec<ParseWarning>,
     pub inner: Option<Box<ParsedPacket>>,
