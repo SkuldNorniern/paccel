@@ -381,7 +381,8 @@ fn parse_pcapng_interface_desc(
             return Err(LayerError::InvalidLength);
         }
 
-        if code == PCAPNG_OPT_IF_TSRESOL && len >= 1
+        if code == PCAPNG_OPT_IF_TSRESOL
+            && len >= 1
             && let Some(value) = parse_tsresol(input[value_start])
         {
             ts_ticks_per_second = value;
@@ -462,9 +463,9 @@ fn parse_pcapng_simple_packet<'a>(
     Ok(PcapFrame {
         timestamp_sec: 0,
         timestamp_subsec: 0,
-        ts_resolution: interfaces
-            .first()
-            .map_or(TsResolution::Micro, |i| resolution_from_ticks(i.ts_ticks_per_second)),
+        ts_resolution: interfaces.first().map_or(TsResolution::Micro, |i| {
+            resolution_from_ticks(i.ts_ticks_per_second)
+        }),
         linktype: interfaces.first().map_or(1, |i| i.linktype),
         data: &input[data_start..data_start + cap_len],
     })
@@ -504,10 +505,8 @@ fn split_timestamp(raw: u64, ticks_per_second: u64) -> (u32, u32) {
         return (0, 0);
     }
 
-    let sec = u32::try_from((raw / ticks_per_second).min(u64::from(u32::MAX)))
-        .unwrap_or(u32::MAX);
-    let sub = u32::try_from((raw % ticks_per_second).min(u64::from(u32::MAX)))
-        .unwrap_or(u32::MAX);
+    let sec = u32::try_from((raw / ticks_per_second).min(u64::from(u32::MAX))).unwrap_or(u32::MAX);
+    let sub = u32::try_from((raw % ticks_per_second).min(u64::from(u32::MAX))).unwrap_or(u32::MAX);
     (sec, sub)
 }
 
@@ -572,7 +571,7 @@ fn read_u32(input: &[u8], offset: usize, little_endian: bool) -> Result<u32, Lay
 #[allow(clippy::absolute_paths, clippy::cast_possible_truncation)]
 mod tests {
     use super::{
-        iter_capture_frames, iter_pcap_frames, iter_pcapng_frames, parse_pcap_frames, TsResolution,
+        TsResolution, iter_capture_frames, iter_pcap_frames, iter_pcapng_frames, parse_pcap_frames,
     };
 
     #[test]

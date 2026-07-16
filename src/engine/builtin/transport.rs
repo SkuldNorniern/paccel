@@ -1,17 +1,17 @@
 use std::net::Ipv4Addr;
 
 use crate::engine::constants::ip_proto;
-use crate::layer::application::dhcp::{parse_dhcp_message, DhcpMessage};
-use crate::layer::application::dns::{parse_dns_message, DnsMessage};
-use crate::layer::application::http::{parse_http, HttpMessage};
-use crate::layer::application::ntp::{parse_ntp_message, NtpMessage};
-use crate::layer::application::quic::{parse_quic_long_header, QuicLongHeader};
-use crate::layer::application::tls::{parse_tls_client_hello, TlsClientHello};
+use crate::layer::LayerError;
+use crate::layer::application::dhcp::{DhcpMessage, parse_dhcp_message};
+use crate::layer::application::dns::{DnsMessage, parse_dns_message};
+use crate::layer::application::http::{HttpMessage, parse_http};
+use crate::layer::application::ntp::{NtpMessage, parse_ntp_message};
+use crate::layer::application::quic::{QuicLongHeader, parse_quic_long_header};
+use crate::layer::application::tls::{TlsClientHello, parse_tls_client_hello};
 use crate::layer::network::icmp::IcmpHeader;
 use crate::layer::network::icmpv6::Icmpv6Header;
 use crate::layer::transport::tcp::{TcpFlags, TcpHeader};
 use crate::layer::transport::udp::UdpHeader;
-use crate::layer::LayerError;
 
 use super::types::{
     AhInfo, EspInfo, GeneveInfo, GreInfo, IgmpInfo, SctpChunk, SctpInfo, TcpOptionsParsed,
@@ -923,8 +923,8 @@ mod tests {
     #[test]
     fn parses_sctp_common_header_and_init_chunk() {
         let sctp = [
-            0x13, 0x88, 0x13, 0x89, 0x11, 0x22, 0x33, 0x44, 0xaa, 0xbb, 0xcc, 0xdd, 0x01,
-            0x00, 0x00, 0x04,
+            0x13, 0x88, 0x13, 0x89, 0x11, 0x22, 0x33, 0x44, 0xaa, 0xbb, 0xcc, 0xdd, 0x01, 0x00,
+            0x00, 0x04,
         ];
         let frame = build_ethernet_ipv4_l4_frame(132, &sctp);
         let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
@@ -1025,11 +1025,18 @@ mod tests {
         assert!(parsed.ipv4.is_some());
         assert!(parsed.gre.is_some());
         assert_eq!(parsed.gre.as_ref().unwrap().protocol_type, 0x0800);
-        assert!(parsed.inner.as_ref().is_some_and(|inner| inner.ipv4.is_some()));
-        assert!(!parsed
-            .warnings
-            .iter()
-            .any(|w| matches!(w.code, ParseWarningCode::GreInner)));
+        assert!(
+            parsed
+                .inner
+                .as_ref()
+                .is_some_and(|inner| inner.ipv4.is_some())
+        );
+        assert!(
+            !parsed
+                .warnings
+                .iter()
+                .any(|w| matches!(w.code, ParseWarningCode::GreInner))
+        );
     }
 
     #[test]
@@ -1042,10 +1049,12 @@ mod tests {
         let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
         assert!(parsed.gre.is_some());
         assert_eq!(parsed.gre.as_ref().unwrap().protocol_type, 0x0800);
-        assert!(parsed
-            .warnings
-            .iter()
-            .any(|w| matches!(w.code, ParseWarningCode::GreInner)));
+        assert!(
+            parsed
+                .warnings
+                .iter()
+                .any(|w| matches!(w.code, ParseWarningCode::GreInner))
+        );
     }
 
     #[test]
@@ -1092,10 +1101,12 @@ mod tests {
         let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
         assert!(parsed.vxlan.is_some());
         assert_eq!(parsed.vxlan.as_ref().unwrap().vni, 100);
-        assert!(parsed
-            .warnings
-            .iter()
-            .any(|w| matches!(w.code, ParseWarningCode::VxlanInner)));
+        assert!(
+            parsed
+                .warnings
+                .iter()
+                .any(|w| matches!(w.code, ParseWarningCode::VxlanInner))
+        );
     }
 
     #[test]
@@ -1120,7 +1131,12 @@ mod tests {
 
         let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
         assert!(parsed.ipv4.is_some());
-        assert!(parsed.inner.as_ref().is_some_and(|inner| inner.ipv4.is_some()));
+        assert!(
+            parsed
+                .inner
+                .as_ref()
+                .is_some_and(|inner| inner.ipv4.is_some())
+        );
     }
 
     #[test]
@@ -1139,10 +1155,12 @@ mod tests {
         )
         .expect("parse should succeed");
         assert!(parsed.inner.is_none());
-        assert!(parsed
-            .warnings
-            .iter()
-            .any(|w| matches!(w.code, ParseWarningCode::TunnelDepthLimit)));
+        assert!(
+            parsed
+                .warnings
+                .iter()
+                .any(|w| matches!(w.code, ParseWarningCode::TunnelDepthLimit))
+        );
     }
 
     #[test]
@@ -1154,10 +1172,12 @@ mod tests {
         assert_eq!(parsed.geneve.as_ref().unwrap().version, 0);
         assert_eq!(parsed.geneve.as_ref().unwrap().protocol_type, 0x6558);
         assert_eq!(parsed.geneve.as_ref().unwrap().vni, 101);
-        assert!(parsed
-            .warnings
-            .iter()
-            .any(|w| matches!(w.code, ParseWarningCode::GeneveInner)));
+        assert!(
+            parsed
+                .warnings
+                .iter()
+                .any(|w| matches!(w.code, ParseWarningCode::GeneveInner))
+        );
     }
 
     #[test]
@@ -1248,10 +1268,12 @@ mod tests {
         assert_eq!(parsed.ah.as_ref().unwrap().next_header, 58);
         assert_eq!(parsed.ah.as_ref().unwrap().spi, 0x1122_3344);
         assert_eq!(parsed.ah.as_ref().unwrap().sequence, 9);
-        assert!(parsed
-            .warnings
-            .iter()
-            .any(|w| matches!(w.code, ParseWarningCode::AhInner)));
+        assert!(
+            parsed
+                .warnings
+                .iter()
+                .any(|w| matches!(w.code, ParseWarningCode::AhInner))
+        );
     }
 
     #[test]
@@ -1262,10 +1284,12 @@ mod tests {
         assert!(parsed.esp.is_some());
         assert_eq!(parsed.esp.as_ref().unwrap().spi, 0xaabb_ccdd);
         assert_eq!(parsed.esp.as_ref().unwrap().sequence, 2);
-        assert!(parsed
-            .warnings
-            .iter()
-            .any(|w| matches!(w.code, ParseWarningCode::EspInner)));
+        assert!(
+            parsed
+                .warnings
+                .iter()
+                .any(|w| matches!(w.code, ParseWarningCode::EspInner))
+        );
     }
 
     #[test]

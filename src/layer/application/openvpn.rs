@@ -25,8 +25,8 @@ impl ProtocolProcessor<OpenVpnHeader> for OpenVpnProcessor {
         // Extract fields from the packet.
         let flags = packet.packet[0];
         let version = packet.packet[1];
-        
+
         // TODO: Add further validation based on OpenVPN specifications.
         Ok(OpenVpnHeader { flags, version })
     }
-} 
+}

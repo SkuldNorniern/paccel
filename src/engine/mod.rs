@@ -20,8 +20,8 @@ pub use context::{DecodeConfig, DecodeContext, DecodeMode};
 pub use decoder::{DecodeReport, Decoder};
 pub use error::{DecodeError, DecodeWarning};
 pub use pcap::{
-    iter_capture_frames, iter_pcap_frames, iter_pcapng_frames, parse_capture_frames,
-    parse_pcap_frames, CaptureFrameIter, PcapFrame, PcapFrameIter, PcapNgFrameIter, TsResolution,
+    CaptureFrameIter, PcapFrame, PcapFrameIter, PcapNgFrameIter, TsResolution, iter_capture_frames,
+    iter_pcap_frames, iter_pcapng_frames, parse_capture_frames, parse_pcap_frames,
 };
 pub use reassembly::{IpFragmentReassembler, TcpStreamReassembler};
 pub use registry::{Dissector, DissectorRegistry, ProbeResult};

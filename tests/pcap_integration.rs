@@ -3,8 +3,8 @@
 use std::net::Ipv4Addr;
 
 use paccel::engine::{
-    parse_capture_frames, parse_pcap_frames, iter_capture_frames,
-    BuiltinPacketParser, TransportSegment, UdpAppHint,
+    BuiltinPacketParser, TransportSegment, UdpAppHint, iter_capture_frames, parse_capture_frames,
+    parse_pcap_frames,
 };
 
 // ── DNS query ──────────────────────────────────────────────────────────────
@@ -28,8 +28,14 @@ fn dns_query_frame_parses_ethernet_ipv4_udp_dns() {
     assert!(parsed.ethernet.is_some(), "ethernet should be present");
 
     let ipv4 = parsed.ipv4.as_ref().expect("ipv4 should be present");
-    assert_eq!(ipv4.source, "192.168.1.1".parse::<Ipv4Addr>().expect("valid ip"));
-    assert_eq!(ipv4.destination, "8.8.8.8".parse::<Ipv4Addr>().expect("valid ip"));
+    assert_eq!(
+        ipv4.source,
+        "192.168.1.1".parse::<Ipv4Addr>().expect("valid ip")
+    );
+    assert_eq!(
+        ipv4.destination,
+        "8.8.8.8".parse::<Ipv4Addr>().expect("valid ip")
+    );
     assert_eq!(ipv4.protocol, 17); // UDP
 
     let udp = match parsed.transport.as_ref().expect("transport") {
@@ -62,8 +68,14 @@ fn dns_response_frame_parses_correctly() {
     let parsed = BuiltinPacketParser::parse(frames[0].data).expect("frame should parse");
 
     let ipv4 = parsed.ipv4.as_ref().expect("ipv4");
-    assert_eq!(ipv4.source, "8.8.8.8".parse::<Ipv4Addr>().expect("valid ip"));
-    assert_eq!(ipv4.destination, "192.168.1.1".parse::<Ipv4Addr>().expect("valid ip"));
+    assert_eq!(
+        ipv4.source,
+        "8.8.8.8".parse::<Ipv4Addr>().expect("valid ip")
+    );
+    assert_eq!(
+        ipv4.destination,
+        "192.168.1.1".parse::<Ipv4Addr>().expect("valid ip")
+    );
 
     let udp = match parsed.transport.as_ref().expect("transport") {
         TransportSegment::Udp(u) => u,
@@ -91,8 +103,14 @@ fn tcp_syn_pcap_parses_correctly() {
     let parsed = BuiltinPacketParser::parse(frames[0].data).expect("frame should parse");
 
     let ipv4 = parsed.ipv4.as_ref().expect("ipv4");
-    assert_eq!(ipv4.source, "10.0.0.1".parse::<Ipv4Addr>().expect("valid ip"));
-    assert_eq!(ipv4.destination, "10.0.0.2".parse::<Ipv4Addr>().expect("valid ip"));
+    assert_eq!(
+        ipv4.source,
+        "10.0.0.1".parse::<Ipv4Addr>().expect("valid ip")
+    );
+    assert_eq!(
+        ipv4.destination,
+        "10.0.0.2".parse::<Ipv4Addr>().expect("valid ip")
+    );
     assert_eq!(ipv4.protocol, 6); // TCP
 
     let tcp = match parsed.transport.as_ref().expect("transport") {
@@ -192,8 +210,10 @@ fn dns_query_pcapng_frame_matches_pcap_frame() {
     let pcap_frames = parse_pcap_frames(pcap_bytes).expect("pcap should parse");
     let pcapng_frames = parse_capture_frames(pcapng_bytes).expect("pcapng should parse");
 
-    assert_eq!(pcap_frames[0].data, pcapng_frames[0].data,
-        "pcap and pcapng should contain identical frame bytes");
+    assert_eq!(
+        pcap_frames[0].data, pcapng_frames[0].data,
+        "pcap and pcapng should contain identical frame bytes"
+    );
 }
 
 #[test]

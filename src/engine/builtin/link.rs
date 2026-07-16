@@ -2,8 +2,8 @@ use std::net::Ipv4Addr;
 
 use crate::engine::constants::ethertype;
 use crate::engine::cursor::Cursor;
-use crate::layer::datalink::arp::{ArpOperation, ArpPacket};
 use crate::layer::LayerError;
+use crate::layer::datalink::arp::{ArpOperation, ArpPacket};
 
 use super::types::{EthernetFrame, MplsInfo, MplsLabel, PppoeInfo};
 
@@ -463,10 +463,12 @@ mod tests {
         assert_eq!(parsed.pppoe.as_ref().unwrap().code, 0x09);
         assert_eq!(parsed.pppoe.as_ref().unwrap().session_id, 0);
         assert_eq!(parsed.pppoe.as_ref().unwrap().length, 4);
-        assert!(parsed
-            .warnings
-            .iter()
-            .any(|w| matches!(w.code, ParseWarningCode::PppoeNoPayload)));
+        assert!(
+            parsed
+                .warnings
+                .iter()
+                .any(|w| matches!(w.code, ParseWarningCode::PppoeNoPayload))
+        );
     }
 
     #[test]
@@ -480,10 +482,12 @@ mod tests {
         assert_eq!(parsed.pppoe.as_ref().unwrap().code, 0x01);
         assert_eq!(parsed.pppoe.as_ref().unwrap().session_id, 1);
         assert_eq!(parsed.pppoe.as_ref().unwrap().length, 12);
-        assert!(parsed
-            .warnings
-            .iter()
-            .any(|w| matches!(w.code, ParseWarningCode::PppoeNoPayload)));
+        assert!(
+            parsed
+                .warnings
+                .iter()
+                .any(|w| matches!(w.code, ParseWarningCode::PppoeNoPayload))
+        );
     }
 
     #[test]
@@ -498,7 +502,12 @@ mod tests {
         assert_eq!(mpls.labels.len(), 1);
         assert_eq!(mpls.labels[0].label, 16);
         assert!(mpls.labels[0].bottom_of_stack);
-        assert!(parsed.inner.as_ref().is_some_and(|inner| inner.ipv4.is_some()));
+        assert!(
+            parsed
+                .inner
+                .as_ref()
+                .is_some_and(|inner| inner.ipv4.is_some())
+        );
     }
 
     #[test]

@@ -26,7 +26,7 @@ impl ProtocolProcessor<WireGuardMessage> for WireGuardProcessor {
             .try_into()
             .map_err(|_| LayerError::MalformedPacket)?;
         let message_type = u32::from_le_bytes(msg_type_bytes);
-        
+
         // Dispatch based on the message type.
         // For instance, assume '1' indicates a Handshake Initiation message.
         match message_type {
@@ -41,8 +41,10 @@ impl ProtocolProcessor<WireGuardMessage> for WireGuardProcessor {
             }
             other => {
                 // Unrecognized WireGuard message.
-                Err(LayerError::UnsupportedProtocol(u8::try_from(other).unwrap_or(u8::MAX)))
+                Err(LayerError::UnsupportedProtocol(
+                    u8::try_from(other).unwrap_or(u8::MAX),
+                ))
             }
         }
     }
-} 
+}

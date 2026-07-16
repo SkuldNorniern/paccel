@@ -13,8 +13,8 @@ use self::network::{parse_ipv4_header, parse_ipv6_header, resolve_ipv6_transport
 use self::transport::parse_transport;
 
 pub use self::types::{
-    AhInfo, EspInfo, EthernetFrame, GeneveInfo, GreInfo, IgmpInfo, MplsInfo, MplsLabel,
-    LldpInfo, LldpTlv, ParseConfig, ParseMode, ParseWarning, ParseWarningCode, ParseWarningProtocol,
+    AhInfo, EspInfo, EthernetFrame, GeneveInfo, GreInfo, IgmpInfo, LldpInfo, LldpTlv, MplsInfo,
+    MplsLabel, ParseConfig, ParseMode, ParseWarning, ParseWarningCode, ParseWarningProtocol,
     ParseWarningSubcode, ParsedPacket, PppoeInfo, SctpChunk, SctpInfo, StpBpdu, TcpOptionsParsed,
     TransportSegment, UdpAppHint, VxlanInfo, WireGuardInfo, WireGuardMessageType,
 };
@@ -42,11 +42,7 @@ impl BuiltinPacketParser {
         Self::parse_l2_with_linktype(raw, config, 0, linktype)
     }
 
-    fn parse_l2(
-        raw: &[u8],
-        config: ParseConfig,
-        depth: usize,
-    ) -> Result<ParsedPacket, LayerError> {
+    fn parse_l2(raw: &[u8], config: ParseConfig, depth: usize) -> Result<ParsedPacket, LayerError> {
         Self::parse_l2_with_linktype(raw, config, depth, None)
     }
 
@@ -262,8 +258,8 @@ impl BuiltinPacketParser {
                         _ => None,
                     };
                     if !depth_limit_hit {
-                        let tunnel_depth_limited = inner_ethertype.is_some()
-                            && depth >= config.max_tunnel_depth;
+                        let tunnel_depth_limited =
+                            inner_ethertype.is_some() && depth >= config.max_tunnel_depth;
                         let result = inner_ethertype.and_then(|inner_ethertype| {
                             if tunnel_depth_limited {
                                 None
@@ -583,8 +579,8 @@ mod tests {
     fn truncated_ipv4_udp_frame() -> Vec<u8> {
         vec![
             0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0x08, 0x00, 0x45, 0x00, 0x00, 0x28, 0x00, 0x01,
-            0x40, 0x00, 64, 17, 0, 0, 192, 168, 1, 1, 192, 168, 1, 2, 0x04, 0xd2, 0x00, 0x35,
-            0x00, 0x14, 0x00, 0x00,
+            0x40, 0x00, 64, 17, 0, 0, 192, 168, 1, 1, 192, 168, 1, 2, 0x04, 0xd2, 0x00, 0x35, 0x00,
+            0x14, 0x00, 0x00,
         ]
     }
 
@@ -615,10 +611,12 @@ mod tests {
 
         let mpls = parsed.mpls.as_ref().expect("mpls parsed");
         assert_eq!(mpls.labels.len(), 1);
-        assert!(parsed
-            .warnings
-            .iter()
-            .any(|w| matches!(w.code, ParseWarningCode::MplsLabelDepthLimit)));
+        assert!(
+            parsed
+                .warnings
+                .iter()
+                .any(|w| matches!(w.code, ParseWarningCode::MplsLabelDepthLimit))
+        );
     }
 
     #[test]
@@ -662,10 +660,12 @@ mod tests {
         let parsed = BuiltinPacketParser::parse(&truncated_ipv4_udp_frame())
             .expect("lenient mode should parse truncated IPv4 UDP");
 
-        assert!(parsed
-            .warnings
-            .iter()
-            .any(|warning| warning.code == ParseWarningCode::Ipv4Truncated));
+        assert!(
+            parsed
+                .warnings
+                .iter()
+                .any(|warning| warning.code == ParseWarningCode::Ipv4Truncated)
+        );
         assert!(matches!(parsed.transport, Some(TransportSegment::Udp(_))));
     }
 
@@ -688,10 +688,12 @@ mod tests {
         let parsed = BuiltinPacketParser::parse(&truncated_ipv6_udp_frame())
             .expect("lenient mode should parse truncated IPv6 UDP");
 
-        assert!(parsed
-            .warnings
-            .iter()
-            .any(|warning| warning.code == ParseWarningCode::Ipv6Truncated));
+        assert!(
+            parsed
+                .warnings
+                .iter()
+                .any(|warning| warning.code == ParseWarningCode::Ipv6Truncated)
+        );
         assert!(matches!(parsed.transport, Some(TransportSegment::Udp(_))));
     }
 
@@ -732,7 +734,10 @@ mod tests {
         let lldp = parsed.lldp.as_ref().expect("lldp");
 
         assert_eq!(lldp.ttl, Some(120));
-        assert_eq!(lldp.chassis_id.as_deref(), Some(&[0x00, 0x11, 0x22, 0x33, 0x44, 0x55][..]));
+        assert_eq!(
+            lldp.chassis_id.as_deref(),
+            Some(&[0x00, 0x11, 0x22, 0x33, 0x44, 0x55][..])
+        );
         assert_eq!(lldp.port_id.as_deref(), Some(&b"eth0"[..]));
         assert_eq!(lldp.tlvs.len(), 3);
         assert!(parsed.warnings.is_empty());
@@ -746,9 +751,9 @@ mod tests {
         frame.extend_from_slice(&38u16.to_be_bytes());
         frame.extend_from_slice(&[0x42, 0x42, 0x03]);
         frame.extend_from_slice(&[
-            0x00, 0x00, 0x00, 0x00, 0x01, 0x80, 0x00, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55,
-            0x00, 0x00, 0x00, 0x04, 0x80, 0x00, 0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x80,
-            0x01, 0x00, 0x00, 0x14, 0x00, 0x02, 0x00, 0x0f, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x01, 0x80, 0x00, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x00,
+            0x00, 0x00, 0x04, 0x80, 0x00, 0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x80, 0x01, 0x00,
+            0x00, 0x14, 0x00, 0x02, 0x00, 0x0f, 0x00,
         ]);
 
         let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
@@ -758,6 +763,9 @@ mod tests {
         assert_eq!(stp.bpdu_type, 0);
         assert_eq!(stp.root_path_cost, 4);
         assert_eq!(parsed.ethernet.as_ref().expect("ethernet").ethertype, 0);
-        assert_eq!(parsed.ethernet.as_ref().expect("ethernet").payload_offset, 17);
+        assert_eq!(
+            parsed.ethernet.as_ref().expect("ethernet").payload_offset,
+            17
+        );
     }
 }
