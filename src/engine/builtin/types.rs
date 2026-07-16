@@ -14,6 +14,7 @@ use crate::layer::transport::udp::UdpHeader;
 pub enum ParseWarningCode {
     Ipv6NonInitialFragment,
     Ipv6ExtensionDepthLimit,
+    Ipv6Truncated,
     UnsupportedEthertype(u16),
     Ipv4Truncated,
     Ipv4Fragmented,
@@ -51,6 +52,7 @@ pub enum ParseWarningSubcode {
     UnsupportedEthertype,
     Ipv4Truncated,
     Ipv4Fragmented,
+    Ipv6Truncated,
     Ipv6ExtensionDepthLimit,
     Ipv6NonInitialFragment,
     PppoeNoPayload,
@@ -69,6 +71,7 @@ impl ParseWarningSubcode {
             Self::UnsupportedEthertype => "unsupported-ethertype",
             Self::Ipv4Truncated => "ipv4-truncated",
             Self::Ipv4Fragmented => "ipv4-fragmented",
+            Self::Ipv6Truncated => "ipv6-truncated",
             Self::Ipv6ExtensionDepthLimit => "ipv6-ext-depth-limit",
             Self::Ipv6NonInitialFragment => "ipv6-non-initial-fragment",
             Self::PppoeNoPayload => "pppoe-no-payload",
