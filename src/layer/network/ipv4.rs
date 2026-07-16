@@ -186,9 +186,13 @@ impl ProtocolProcessor<Ipv4Header> for Ipv4Processor {
             return false;
         }
 
-        // Verify header checksum
+        // Verify header checksum over the full header (IHL * 4 bytes, RFC 791)
+        let header_len = (ihl as usize) * 4;
+        if packet.packet.len() < header_len {
+            return false;
+        }
         let mut sum = 0u32;
-        for i in (0..20).step_by(2) {
+        for i in (0..header_len).step_by(2) {
             sum += u32::from(u16::from_be_bytes([packet.packet[i], packet.packet[i + 1]]));
         }
         while sum > 0xFFFF {
@@ -401,6 +405,55 @@ mod tests {
         header[10] = (checksum >> 8) as u8;
         header[11] = (checksum & 0xFF) as u8;
         header
+    }
+
+    /// Creates a valid IPv4 header with options (IHL = 6, 24 bytes).
+    fn create_valid_ipv4_header_with_options() -> Vec<u8> {
+        let mut header = vec![
+            0x46, // Version (4) and IHL (6)
+            0x00, // DSCP and ECN
+            0x00, 0x18, // Total Length = 24 bytes
+            0x12, 0x34, // Identification
+            0x40, 0x00, // Flags (010) and Fragment Offset
+            64,   // TTL
+            6,    // Protocol
+            0, 0, // Checksum placeholder
+            192, 168, 1, 1, // Source IP address
+            192, 168, 1, 2, // Destination IP address
+            0x01, 0x02, 0x03, 0x04, // Options
+        ];
+        let checksum = compute_ipv4_checksum(&header);
+        header[10] = (checksum >> 8) as u8;
+        header[11] = (checksum & 0xFF) as u8;
+        header
+    }
+
+    #[test]
+    fn test_ipv4_is_valid_checksum_covers_options() {
+        let header = create_valid_ipv4_header_with_options();
+        let packet = Packet {
+            packet: header,
+            payload: vec![],
+            network_offset: 0,
+        };
+        assert!(Ipv4Processor.is_valid(&packet));
+    }
+
+    #[test]
+    fn test_ipv4_is_valid_rejects_checksum_over_20_bytes_only() {
+        let mut header = create_valid_ipv4_header_with_options();
+        // Recompute the checksum over only the first 20 bytes (the old bug).
+        header[10] = 0;
+        header[11] = 0;
+        let checksum = compute_ipv4_checksum(&header[..20]);
+        header[10] = (checksum >> 8) as u8;
+        header[11] = (checksum & 0xFF) as u8;
+        let packet = Packet {
+            packet: header,
+            payload: vec![],
+            network_offset: 0,
+        };
+        assert!(!Ipv4Processor.is_valid(&packet));
     }
 
     #[test]
