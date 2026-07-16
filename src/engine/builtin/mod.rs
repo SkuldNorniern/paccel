@@ -491,6 +491,7 @@ fn apply_transport_parse(parsed: &mut ParsedPacket, transport_parse: transport::
     parsed.transport = transport_parse.transport;
     parsed.icmp = transport_parse.icmp;
     parsed.icmpv6 = transport_parse.icmpv6;
+    parsed.ndp = transport_parse.ndp;
     parsed.igmp = transport_parse.igmp;
     parsed.sctp = transport_parse.sctp;
     parsed.tcp_options = transport_parse.tcp_options;

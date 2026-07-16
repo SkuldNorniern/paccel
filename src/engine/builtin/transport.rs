@@ -9,7 +9,7 @@ use crate::layer::application::ntp::{NtpMessage, parse_ntp_message};
 use crate::layer::application::quic::{QuicLongHeader, parse_quic_long_header};
 use crate::layer::application::tls::{TlsClientHello, parse_tls_client_hello};
 use crate::layer::network::icmp::IcmpHeader;
-use crate::layer::network::icmpv6::Icmpv6Header;
+use crate::layer::network::icmpv6::{Icmpv6Header, NdpMessage, parse_ndp};
 use crate::layer::transport::tcp::{TcpFlags, TcpHeader};
 use crate::layer::transport::udp::UdpHeader;
 
@@ -34,6 +34,7 @@ pub(super) struct TransportParse {
     pub transport: Option<TransportSegment>,
     pub icmp: Option<IcmpHeader>,
     pub icmpv6: Option<Icmpv6Header>,
+    pub ndp: Option<NdpMessage>,
     pub igmp: Option<IgmpInfo>,
     pub sctp: Option<SctpInfo>,
     pub tcp_options: Option<TcpOptionsParsed>,
@@ -68,9 +69,10 @@ impl TransportParse {
         }
     }
 
-    fn with_icmpv6(icmpv6: Icmpv6Header) -> Self {
+    fn with_icmpv6(icmpv6: Icmpv6Header, ndp: Option<NdpMessage>) -> Self {
         Self {
             icmpv6: Some(icmpv6),
+            ndp,
             ..Self::default()
         }
     }
@@ -138,8 +140,8 @@ pub(super) fn parse_transport(protocol: u8, l4_bytes: &[u8]) -> Result<Transport
             Ok(TransportParse::with_icmp(icmp))
         }
         ip_proto::ICMPV6 => {
-            let icmpv6 = parse_icmpv6_minimal(l4_bytes)?;
-            Ok(TransportParse::with_icmpv6(icmpv6))
+            let (icmpv6, ndp) = parse_icmpv6_minimal(l4_bytes)?;
+            Ok(TransportParse::with_icmpv6(icmpv6, ndp))
         }
         ip_proto::IGMP => {
             let igmp = parse_igmp_minimal(l4_bytes)?;
@@ -317,16 +319,18 @@ fn parse_icmp_minimal(data: &[u8]) -> Result<IcmpHeader, LayerError> {
     })
 }
 
-fn parse_icmpv6_minimal(data: &[u8]) -> Result<Icmpv6Header, LayerError> {
+fn parse_icmpv6_minimal(data: &[u8]) -> Result<(Icmpv6Header, Option<NdpMessage>), LayerError> {
     if data.len() < 8 {
         return Err(LayerError::InvalidLength);
     }
-    Ok(Icmpv6Header {
+    let header = Icmpv6Header {
         icmp_type: data[0],
         icmp_code: data[1],
         checksum: u16::from_be_bytes([data[2], data[3]]),
         rest_of_header: [data[4], data[5], data[6], data[7]],
-    })
+    };
+    let ndp = parse_ndp(data[0], &data[4..]);
+    Ok((header, ndp))
 }
 
 fn parse_igmp_minimal(data: &[u8]) -> Result<IgmpInfo, LayerError> {
@@ -658,11 +662,14 @@ fn push_hint_unique(hints: &mut Vec<UdpAppHint>, hint: UdpAppHint) {
 #[cfg(test)]
 #[allow(clippy::cast_possible_truncation)]
 mod tests {
+    use std::net::Ipv6Addr;
+
     use crate::engine::builtin::{
         BuiltinPacketParser, ParseConfig, ParseWarningCode, TransportSegment, UdpAppHint,
         WireGuardMessageType,
     };
     use crate::layer::application::http::HttpMessage;
+    use crate::layer::network::icmpv6::NdpMessage;
 
     fn build_ethernet_ipv4_udp_frame(src_port: u16, dst_port: u16, udp_payload: &[u8]) -> Vec<u8> {
         let udp_len = (8 + udp_payload.len()) as u16;
@@ -918,6 +925,51 @@ mod tests {
 
         assert_eq!(icmpv6.echo_identifier(), Some(0x5678));
         assert_eq!(icmpv6.echo_sequence(), Some(0x9abc));
+    }
+
+    #[test]
+    fn parses_ndp_neighbor_solicitation_with_source_link_addr() {
+        let target = "2001:db8::1234"
+            .parse::<Ipv6Addr>()
+            .expect("valid target address");
+        let link_addr = [0x00, 0x11, 0x22, 0x33, 0x44, 0x55];
+        let mut message = vec![135, 0, 0, 0, 0, 0, 0, 0];
+        message.extend_from_slice(&target.octets());
+        message.extend_from_slice(&[1, 1]);
+        message.extend_from_slice(&link_addr);
+
+        let frame = build_ethernet_ipv6_l4_frame(58, &message);
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+        let ndp = parsed.ndp.as_ref().expect("neighbor solicitation");
+        assert!(matches!(ndp, NdpMessage::NeighborSolicitation { .. }));
+        if let NdpMessage::NeighborSolicitation {
+            target: parsed_target,
+            options,
+        } = ndp
+        {
+            assert_eq!(*parsed_target, target);
+            assert_eq!(options.len(), 1);
+            assert_eq!(options[0].source_link_addr(), Some(link_addr.as_slice()));
+        }
+    }
+
+    #[test]
+    fn parses_ndp_router_advertisement_with_mtu() {
+        let mut message = vec![134, 0, 0, 0, 64, 0x80];
+        message.extend_from_slice(&1800u16.to_be_bytes());
+        message.extend_from_slice(&30_000u32.to_be_bytes());
+        message.extend_from_slice(&1_000u32.to_be_bytes());
+        message.extend_from_slice(&[5, 1, 0, 0]);
+        message.extend_from_slice(&1500u32.to_be_bytes());
+
+        let frame = build_ethernet_ipv6_l4_frame(58, &message);
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+        let ndp = parsed.ndp.as_ref().expect("router advertisement");
+        assert!(matches!(ndp, NdpMessage::RouterAdvertisement { .. }));
+        if let NdpMessage::RouterAdvertisement { options, .. } = ndp {
+            assert_eq!(options.len(), 1);
+            assert_eq!(options[0].mtu(), Some(1500));
+        }
     }
 
     #[test]
