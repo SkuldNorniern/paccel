@@ -494,6 +494,8 @@ fn apply_transport_parse(parsed: &mut ParsedPacket, transport_parse: transport::
     parsed.esp = transport_parse.esp;
     parsed.wireguard = transport_parse.wireguard;
     parsed.dns = transport_parse.dns;
+    parsed.dhcp = transport_parse.dhcp;
+    parsed.ntp = transport_parse.ntp;
     parsed.udp_hints = transport_parse.hints;
 }
 

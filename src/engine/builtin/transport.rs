@@ -1,7 +1,9 @@
 use std::net::Ipv4Addr;
 
 use crate::engine::constants::ip_proto;
+use crate::layer::application::dhcp::{parse_dhcp_message, DhcpMessage};
 use crate::layer::application::dns::{parse_dns_message, DnsMessage};
+use crate::layer::application::ntp::{parse_ntp_message, NtpMessage};
 use crate::layer::network::icmp::IcmpHeader;
 use crate::layer::network::icmpv6::Icmpv6Header;
 use crate::layer::transport::tcp::{TcpFlags, TcpHeader};
@@ -38,6 +40,8 @@ pub(super) struct TransportParse {
     pub esp: Option<EspInfo>,
     pub wireguard: Option<WireGuardInfo>,
     pub dns: Option<DnsMessage>,
+    pub dhcp: Option<DhcpMessage>,
+    pub ntp: Option<NtpMessage>,
     pub hints: Vec<UdpAppHint>,
 }
 
@@ -46,25 +50,6 @@ impl TransportParse {
         Self {
             transport: Some(TransportSegment::Tcp(tcp)),
             tcp_options: Some(tcp_options),
-            ..Self::default()
-        }
-    }
-
-    fn with_udp(
-        udp: UdpHeader,
-        dns: Option<DnsMessage>,
-        hints: Vec<UdpAppHint>,
-        vxlan: Option<VxlanInfo>,
-        geneve: Option<GeneveInfo>,
-        wireguard: Option<WireGuardInfo>,
-    ) -> Self {
-        Self {
-            transport: Some(TransportSegment::Udp(udp)),
-            dns,
-            hints,
-            vxlan,
-            geneve,
-            wireguard,
             ..Self::default()
         }
     }
@@ -158,19 +143,29 @@ fn parse_udp_transport(l4_bytes: &[u8]) -> Result<TransportParse, LayerError> {
     let app = &l4_bytes[UDP_HEADER_LEN..udp_end];
     let mut hints = Vec::new();
     let mut dns = None;
+    let mut dhcp = None;
+    let mut ntp = None;
 
     maybe_probe_dns_udp(&udp, app, &mut hints, &mut dns);
     maybe_probe_mdns_udp(&udp, app, &mut hints, &mut dns);
-    maybe_probe_dhcp_udp(&udp, app, &mut hints);
-    maybe_probe_ntp_udp(&udp, app, &mut hints);
+    maybe_probe_dhcp_udp(&udp, app, &mut hints, &mut dhcp);
+    maybe_probe_ntp_udp(&udp, app, &mut hints, &mut ntp);
     let wireguard = maybe_classify_wireguard_udp(&udp, app, &mut hints);
 
     let vxlan = maybe_parse_vxlan(&udp, app);
     let geneve = maybe_parse_geneve(&udp, app);
 
-    Ok(TransportParse::with_udp(
-        udp, dns, hints, vxlan, geneve, wireguard,
-    ))
+    Ok(TransportParse {
+        transport: Some(TransportSegment::Udp(udp)),
+        vxlan,
+        geneve,
+        wireguard,
+        dns,
+        dhcp,
+        ntp,
+        hints,
+        ..TransportParse::default()
+    })
 }
 
 fn maybe_probe_dns_udp(
@@ -201,17 +196,29 @@ fn maybe_probe_mdns_udp(
     }
 }
 
-fn maybe_probe_dhcp_udp(udp: &UdpHeader, payload: &[u8], hints: &mut Vec<UdpAppHint>) {
+fn maybe_probe_dhcp_udp(
+    udp: &UdpHeader,
+    payload: &[u8],
+    hints: &mut Vec<UdpAppHint>,
+    dhcp: &mut Option<DhcpMessage>,
+) {
     let is_dhcp_port = is_udp_port_match(udp, UDP_PORT_DHCP_SERVER)
         || is_udp_port_match(udp, UDP_PORT_DHCP_CLIENT);
     if is_dhcp_port && likely_dhcp_message(payload) {
         push_hint_unique(hints, UdpAppHint::Dhcp);
+        *dhcp = parse_dhcp_message(payload).ok();
     }
 }
 
-fn maybe_probe_ntp_udp(udp: &UdpHeader, payload: &[u8], hints: &mut Vec<UdpAppHint>) {
+fn maybe_probe_ntp_udp(
+    udp: &UdpHeader,
+    payload: &[u8],
+    hints: &mut Vec<UdpAppHint>,
+    ntp: &mut Option<NtpMessage>,
+) {
     if is_udp_port_match(udp, UDP_PORT_NTP) && likely_ntp_message(payload) {
         push_hint_unique(hints, UdpAppHint::Ntp);
+        *ntp = parse_ntp_message(payload).ok();
     }
 }
 
@@ -712,24 +719,34 @@ mod tests {
     }
 
     #[test]
-    fn detects_dhcp_udp_probe() {
-        let mut payload = vec![0u8; 240];
+    fn parses_dhcp_discover() {
+        let mut payload = vec![0u8; 244];
         payload[0] = 1;
         payload[236..240].copy_from_slice(&[99, 130, 83, 99]);
+        payload[240..244].copy_from_slice(&[53, 1, 1, 255]);
 
         let frame = build_ethernet_ipv4_udp_frame(68, 67, &payload);
         let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
         assert!(parsed.udp_hints.contains(&UdpAppHint::Dhcp));
+        assert_eq!(parsed.dhcp.as_ref().expect("dhcp").message_type, Some(1));
     }
 
     #[test]
-    fn detects_ntp_udp_probe() {
+    fn parses_ntp_client() {
         let mut payload = vec![0u8; 48];
         payload[0] = 0x23;
+        payload[1] = 2;
+        payload[16..24].copy_from_slice(&0x0102_0304_0506_0708u64.to_be_bytes());
+        payload[40..48].copy_from_slice(&0x1112_1314_1516_1718u64.to_be_bytes());
 
         let frame = build_ethernet_ipv4_udp_frame(123, 123, &payload);
         let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
         assert!(parsed.udp_hints.contains(&UdpAppHint::Ntp));
+        let ntp = parsed.ntp.as_ref().expect("ntp");
+        assert_eq!(ntp.version, 4);
+        assert_eq!(ntp.mode, 3);
+        assert_eq!(ntp.reference_ts, 0x0102_0304_0506_0708);
+        assert_eq!(ntp.transmit_ts, 0x1112_1314_1516_1718);
     }
 
     #[test]

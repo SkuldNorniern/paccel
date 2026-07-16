@@ -1,7 +1,9 @@
 use std::net::Ipv4Addr;
 
 use crate::engine::constants::ethertype_name;
+use crate::layer::application::dhcp::DhcpMessage;
 use crate::layer::application::dns::DnsMessage;
+use crate::layer::application::ntp::NtpMessage;
 use crate::layer::datalink::arp::ArpPacket;
 use crate::layer::network::icmp::IcmpHeader;
 use crate::layer::network::icmpv6::Icmpv6Header;
@@ -307,6 +309,8 @@ pub struct ParsedPacket {
     pub wireguard: Option<WireGuardInfo>,
     pub mpls: Option<MplsInfo>,
     pub dns: Option<DnsMessage>,
+    pub dhcp: Option<DhcpMessage>,
+    pub ntp: Option<NtpMessage>,
     pub udp_hints: Vec<UdpAppHint>,
     pub warnings: Vec<ParseWarning>,
     pub inner: Option<Box<ParsedPacket>>,
