@@ -3,6 +3,7 @@
 //! Currently, we support ARP for IPv4 over Ethernet.
 
 pub mod arp;
+pub mod dot11;
 
 use arp::ArpProcessor;
 

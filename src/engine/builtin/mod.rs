@@ -5,6 +5,7 @@ mod types;
 
 use crate::engine::constants::{ethertype, ip_proto};
 use crate::layer::LayerError;
+use crate::layer::datalink::dot11::{parse_dot11, parse_radiotap};
 
 use self::link::{
     parse_arp_packet, parse_link_with_linktype, parse_mpls_stack, parse_pppoe_minimal,
@@ -52,6 +53,24 @@ impl BuiltinPacketParser {
         depth: usize,
         linktype: Option<u16>,
     ) -> Result<ParsedPacket, LayerError> {
+        match linktype {
+            Some(127) => {
+                let (radiotap, dot11_offset) = match parse_radiotap(raw) {
+                    Ok(value) => value,
+                    Err(LayerError::InvalidLength) if config.mode == ParseMode::Permissive => {
+                        return Ok(ParsedPacket::default());
+                    }
+                    Err(error) => return Err(error),
+                };
+                let mut parsed =
+                    Self::parse_dot11_l2(&raw[dot11_offset..], config, depth, dot11_offset)?;
+                parsed.radiotap = Some(radiotap);
+                return Ok(parsed);
+            }
+            Some(105) => return Self::parse_dot11_l2(raw, config, depth, 0),
+            _ => {}
+        }
+
         let (eth, l3_offset) = parse_link_with_linktype(raw, linktype)?;
         let parsed = ParsedPacket {
             ethernet: Some(eth.clone()),
@@ -76,6 +95,53 @@ impl BuiltinPacketParser {
             l3_offset,
             parsed,
         )
+    }
+
+    fn parse_dot11_l2(
+        raw: &[u8],
+        config: ParseConfig,
+        depth: usize,
+        frame_offset: usize,
+    ) -> Result<ParsedPacket, LayerError> {
+        let dot11 = match parse_dot11(raw) {
+            Ok(dot11) => dot11,
+            Err(LayerError::InvalidLength) if config.mode == ParseMode::Permissive => {
+                return Ok(ParsedPacket::default());
+            }
+            Err(error) => return Err(error),
+        };
+        let mut parsed = ParsedPacket {
+            dot11: Some(dot11),
+            ..ParsedPacket::default()
+        };
+
+        if dot11.frame_type != 2 {
+            return Ok(parsed);
+        }
+
+        let Some(snap) = raw.get(dot11.header_len..dot11.header_len.saturating_add(8)) else {
+            return Ok(parsed);
+        };
+        if snap[..6] != [0xaa, 0xaa, 0x03, 0x00, 0x00, 0x00] {
+            return Ok(parsed);
+        }
+
+        let ethertype = u16::from_be_bytes([snap[6], snap[7]]);
+        let l3_frame_offset = dot11.header_len + 8;
+        let Some(l3_bytes) = raw.get(l3_frame_offset..) else {
+            return Ok(parsed);
+        };
+        let l3_offset = frame_offset.saturating_add(l3_frame_offset);
+        match Self::parse_ethertype(l3_bytes, ethertype, config, depth, l3_offset, parsed) {
+            Err(LayerError::InvalidLength) if config.mode == ParseMode::Permissive => {
+                parsed = ParsedPacket {
+                    dot11: Some(dot11),
+                    ..ParsedPacket::default()
+                };
+                Ok(parsed)
+            }
+            result => result,
+        }
     }
 
     fn parse_l3(
@@ -591,6 +657,44 @@ mod tests {
             17, 64, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
             0, 0, 0, 0, 0, 2, 0x04, 0xd2, 0x00, 0x35, 0x00, 0x14, 0x00, 0x00,
         ]
+    }
+
+    #[test]
+    fn parses_bare_dot11_beacon() {
+        let frame = vec![
+            0x80, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00, 0x11, 0x22, 0x33,
+            0x44, 0x55, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x10, 0x00,
+        ];
+
+        let parsed = BuiltinPacketParser::parse_with_linktype(&frame, 105)
+            .expect("802.11 beacon should parse");
+        let dot11 = parsed.dot11.as_ref().expect("802.11 frame");
+
+        assert_eq!(dot11.frame_type, 0);
+        assert_eq!(dot11.frame_subtype, 8);
+        assert_eq!(dot11.addr1, [0xff; 6]);
+    }
+
+    #[test]
+    fn parses_radiotap_dot11_snap_ipv4_udp() {
+        let mut frame = vec![0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00];
+        frame.extend_from_slice(&[
+            0x08, 0x00, 0x00, 0x00, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99,
+            0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00, 0x11, 0x10, 0x00,
+        ]);
+        frame.extend_from_slice(&[0xaa, 0xaa, 0x03, 0x00, 0x00, 0x00, 0x08, 0x00]);
+        frame.extend_from_slice(&[
+            0x45, 0x00, 0x00, 0x1c, 0x00, 0x01, 0x00, 0x00, 64, 17, 0x00, 0x00, 192, 0, 2, 1, 198,
+            51, 100, 2, 0x04, 0xd2, 0x16, 0x2e, 0x00, 0x08, 0x00, 0x00,
+        ]);
+
+        let parsed = BuiltinPacketParser::parse_with_linktype(&frame, 127)
+            .expect("radiotap 802.11 IPv4/UDP should parse");
+
+        assert!(parsed.radiotap.is_some());
+        assert_eq!(parsed.dot11.as_ref().map(|frame| frame.frame_type), Some(2));
+        assert!(parsed.ipv4.is_some());
+        assert!(matches!(parsed.transport, Some(TransportSegment::Udp(_))));
     }
 
     #[test]

@@ -8,6 +8,7 @@ use crate::layer::application::ntp::NtpMessage;
 use crate::layer::application::quic::QuicLongHeader;
 use crate::layer::application::tls::TlsClientHello;
 use crate::layer::datalink::arp::ArpPacket;
+use crate::layer::datalink::dot11::{Dot11Frame, RadiotapHeader};
 use crate::layer::network::icmp::IcmpHeader;
 use crate::layer::network::icmpv6::{Icmpv6Header, NdpMessage};
 use crate::layer::network::ipv4::Ipv4Header;
@@ -337,6 +338,8 @@ pub enum TransportSegment {
 #[derive(Debug, Default)]
 pub struct ParsedPacket {
     pub ethernet: Option<EthernetFrame>,
+    pub radiotap: Option<RadiotapHeader>,
+    pub dot11: Option<Dot11Frame>,
     pub arp: Option<ArpPacket>,
     pub ipv4: Option<Ipv4Header>,
     pub ipv6: Option<Ipv6Header>,
