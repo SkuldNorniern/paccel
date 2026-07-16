@@ -104,6 +104,12 @@ pub struct TcpOptionsParsed {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GreInfo {
     pub protocol_type: u16,
+    pub checksum_present: bool,
+    pub key_present: bool,
+    pub sequence_present: bool,
+    pub key: Option<u32>,
+    pub sequence: Option<u32>,
+    pub header_len: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,8 +127,10 @@ pub struct VxlanInfo {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GeneveInfo {
     pub version: u8,
+    pub opt_len: u8,
     pub protocol_type: u16,
     pub vni: u32,
+    pub header_len: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
