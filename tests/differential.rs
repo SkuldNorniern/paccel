@@ -5,7 +5,7 @@
 
 use std::process::Command;
 
-use paccel::engine::{parse_capture_frames, BuiltinPacketParser, TransportSegment};
+use paccel::engine::{BuiltinPacketParser, TransportSegment, parse_capture_frames};
 
 const FIXTURES: &[&str] = &[
     "dns_udp_ipv4.pcap",
@@ -42,9 +42,30 @@ fn tshark_available() -> bool {
 fn tshark_rows(path: &str) -> Vec<TsharkRow> {
     let output = Command::new("tshark")
         .args([
-            "-r", path, "-T", "fields", "-e", "ip.src", "-e", "ip.dst", "-e", "ipv6.src", "-e",
-            "ipv6.dst", "-e", "tcp.srcport", "-e", "tcp.dstport", "-e", "udp.srcport", "-e",
-            "udp.dstport", "-e", "dns.qry.name", "-E", "occurrence=f",
+            "-r",
+            path,
+            "-T",
+            "fields",
+            "-e",
+            "ip.src",
+            "-e",
+            "ip.dst",
+            "-e",
+            "ipv6.src",
+            "-e",
+            "ipv6.dst",
+            "-e",
+            "tcp.srcport",
+            "-e",
+            "tcp.dstport",
+            "-e",
+            "udp.srcport",
+            "-e",
+            "udp.dstport",
+            "-e",
+            "dns.qry.name",
+            "-E",
+            "occurrence=f",
         ])
         .output()
         .expect("tshark should run");
@@ -93,7 +114,10 @@ fn paccel_agrees_with_tshark_on_fixtures() {
     }
 
     for name in FIXTURES {
-        let path = format!("{}/tests/pcaps/happy-path/{name}", env!("CARGO_MANIFEST_DIR"));
+        let path = format!(
+            "{}/tests/pcaps/happy-path/{name}",
+            env!("CARGO_MANIFEST_DIR")
+        );
         let bytes = std::fs::read(&path).expect("fixture should read");
         let frames = parse_capture_frames(&bytes).expect("capture should parse");
         let rows = tshark_rows(&path);
@@ -127,12 +151,36 @@ fn paccel_agrees_with_tshark_on_fixtures() {
 
             match &parsed.transport {
                 Some(TransportSegment::Tcp(tcp)) => {
-                    compare("tcp.srcport", name, idx, Some(tcp.source_port.to_string()), &row.tcp_sport);
-                    compare("tcp.dstport", name, idx, Some(tcp.destination_port.to_string()), &row.tcp_dport);
+                    compare(
+                        "tcp.srcport",
+                        name,
+                        idx,
+                        Some(tcp.source_port.to_string()),
+                        &row.tcp_sport,
+                    );
+                    compare(
+                        "tcp.dstport",
+                        name,
+                        idx,
+                        Some(tcp.destination_port.to_string()),
+                        &row.tcp_dport,
+                    );
                 }
                 Some(TransportSegment::Udp(udp)) => {
-                    compare("udp.srcport", name, idx, Some(udp.source_port.to_string()), &row.udp_sport);
-                    compare("udp.dstport", name, idx, Some(udp.destination_port.to_string()), &row.udp_dport);
+                    compare(
+                        "udp.srcport",
+                        name,
+                        idx,
+                        Some(udp.source_port.to_string()),
+                        &row.udp_sport,
+                    );
+                    compare(
+                        "udp.dstport",
+                        name,
+                        idx,
+                        Some(udp.destination_port.to_string()),
+                        &row.udp_dport,
+                    );
                 }
                 None => {}
             }

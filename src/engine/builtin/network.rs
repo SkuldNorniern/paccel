@@ -1,9 +1,9 @@
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 use crate::engine::constants::ip_proto;
+use crate::layer::LayerError;
 use crate::layer::network::ipv4::Ipv4Header;
 use crate::layer::network::ipv6::Ipv6Header;
-use crate::layer::LayerError;
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Ipv6TransportState {
@@ -84,12 +84,10 @@ pub(super) fn parse_ipv6_header(data: &[u8]) -> Result<Ipv6Header, LayerError> {
     let next_header = data[6];
     let hop_limit = data[7];
 
-    let source = Ipv6Addr::from(
-        <[u8; 16]>::try_from(&data[8..24]).map_err(|_| LayerError::InvalidHeader)?,
-    );
-    let destination = Ipv6Addr::from(
-        <[u8; 16]>::try_from(&data[24..40]).map_err(|_| LayerError::InvalidHeader)?,
-    );
+    let source =
+        Ipv6Addr::from(<[u8; 16]>::try_from(&data[8..24]).map_err(|_| LayerError::InvalidHeader)?);
+    let destination =
+        Ipv6Addr::from(<[u8; 16]>::try_from(&data[24..40]).map_err(|_| LayerError::InvalidHeader)?);
 
     Ok(Ipv6Header {
         version,
@@ -244,10 +242,12 @@ mod tests {
 
         let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
         assert!(parsed.ipv4.is_some());
-        assert!(parsed
-            .warnings
-            .iter()
-            .any(|w| matches!(w.code, ParseWarningCode::Ipv4Fragmented)));
+        assert!(
+            parsed
+                .warnings
+                .iter()
+                .any(|w| matches!(w.code, ParseWarningCode::Ipv4Fragmented))
+        );
     }
 
     #[test]
@@ -264,10 +264,12 @@ mod tests {
         let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
         assert!(parsed.ipv4.is_some());
         assert_eq!(parsed.ipv4.as_ref().unwrap().total_length, 100);
-        assert!(parsed
-            .warnings
-            .iter()
-            .any(|w| matches!(w.code, ParseWarningCode::Ipv4Truncated)));
+        assert!(
+            parsed
+                .warnings
+                .iter()
+                .any(|w| matches!(w.code, ParseWarningCode::Ipv4Truncated))
+        );
         assert!(matches!(parsed.transport, Some(TransportSegment::Tcp(_))));
     }
 
