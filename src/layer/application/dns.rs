@@ -272,8 +272,8 @@ impl ProtocolProcessor<DnsMessage> for DnsProcessor {
         }
 
         // Verify that the packet is long enough to potentially contain
-        // the number of records specified (rough estimate: at least 12 bytes per record)
-        let minimum_length = 12 + (questions + answers + authorities + additionals) * 12;
+        // the number of records specified (rough estimate: at least 5 bytes per entry)
+        let minimum_length = 12 + (questions + answers + authorities + additionals) * 5;
         packet.packet.len() >= minimum_length
     }
 }
@@ -360,6 +360,23 @@ mod tests {
     #[test]
     fn test_is_valid_good_query() {
         let packet = create_test_dns_query();
+        let processor = DnsProcessor;
+        assert!(processor.is_valid(&packet));
+    }
+
+    #[test]
+    fn test_is_valid_minimal_query() {
+        let packet = Packet::new(vec![
+            0x12, 0x34, // Transaction ID
+            0x01, 0x00, // Flags (standard query)
+            0x00, 0x01, // Questions: 1
+            0x00, 0x00, // Answer RRs: 0
+            0x00, 0x00, // Authority RRs: 0
+            0x00, 0x00, // Additional RRs: 0
+            0x00, // Root name
+            0x00, 0x01, // Type: A
+            0x00, 0x01, // Class: IN
+        ]);
         let processor = DnsProcessor;
         assert!(processor.is_valid(&packet));
     }
