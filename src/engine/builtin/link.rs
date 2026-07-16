@@ -491,6 +491,68 @@ mod tests {
     }
 
     #[test]
+    fn pppoe_session_decodes_two_byte_ppp_ipv4() {
+        let mut frame = vec![
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0x88, 0x64, 0x11, 0x00, 0x00, 0x01, 0x00, 0x16,
+            0x00, 0x21,
+        ];
+        frame.extend_from_slice(&[
+            0x45, 0x00, 0x00, 0x14, 0x00, 0x01, 0x00, 0x00, 64, 0, 0, 0, 10, 0, 0, 1, 10, 0, 0, 2,
+        ]);
+
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+        assert!(parsed.pppoe.is_some());
+        assert!(
+            parsed
+                .inner
+                .as_ref()
+                .is_some_and(|inner| inner.ipv4.is_some())
+        );
+        assert!(parsed.warnings.is_empty());
+    }
+
+    #[test]
+    fn pppoe_session_decodes_compressed_ppp_ipv6() {
+        let mut frame = vec![
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0x88, 0x64, 0x11, 0x00, 0x00, 0x01, 0x00, 0x29,
+            0x57,
+        ];
+        let mut ipv6 = [0u8; 40];
+        ipv6[0] = 0x60;
+        ipv6[6] = 59;
+        ipv6[7] = 64;
+        ipv6[23] = 1;
+        ipv6[39] = 2;
+        frame.extend_from_slice(&ipv6);
+
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+        assert!(
+            parsed
+                .inner
+                .as_ref()
+                .is_some_and(|inner| inner.ipv6.is_some())
+        );
+    }
+
+    #[test]
+    fn truncated_ppp_protocol_keeps_pppoe_in_permissive_mode() {
+        let frame = vec![
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0x88, 0x64, 0x11, 0x00, 0x00, 0x01, 0x00, 0x02,
+            0x00,
+        ];
+
+        let parsed = BuiltinPacketParser::parse(&frame).expect("permissive parse should succeed");
+        assert!(parsed.pppoe.is_some());
+        assert!(parsed.inner.is_none());
+        assert!(
+            parsed
+                .warnings
+                .iter()
+                .any(|warning| matches!(warning.code, ParseWarningCode::PppoeNoPayload))
+        );
+    }
+
+    #[test]
     fn parses_mpls_label_and_inner_ipv4() {
         let frame = vec![
             0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0x88, 0x47, 0x00, 0x01, 0x01, 0x40, 0x45, 0x00,

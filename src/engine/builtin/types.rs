@@ -188,6 +188,14 @@ pub struct GeneveInfo {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct L2tpInfo {
+    pub flags: u16,
+    pub version: u8,
+    pub tunnel_id: Option<u16>,
+    pub session_id: Option<u16>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AhInfo {
     pub next_header: u8,
     pub payload_len: u8,
@@ -305,6 +313,7 @@ pub enum UdpAppHint {
     Mdns,
     Dhcp,
     Ntp,
+    L2tp,
     WireGuard,
 }
 
@@ -315,6 +324,7 @@ impl UdpAppHint {
             Self::Mdns => "mdns",
             Self::Dhcp => "dhcp",
             Self::Ntp => "ntp",
+            Self::L2tp => "l2tp",
             Self::WireGuard => "wireguard",
         }
     }
@@ -354,6 +364,7 @@ pub struct ParsedPacket {
     pub pppoe: Option<PppoeInfo>,
     pub vxlan: Option<VxlanInfo>,
     pub geneve: Option<GeneveInfo>,
+    pub l2tp: Option<L2tpInfo>,
     pub ah: Option<AhInfo>,
     pub esp: Option<EspInfo>,
     pub wireguard: Option<WireGuardInfo>,
@@ -408,6 +419,7 @@ impl ParsedPacket {
             self.gre.as_ref().map(|_| "gre"),
             self.vxlan.as_ref().map(|_| "vxlan"),
             self.geneve.as_ref().map(|_| "geneve"),
+            self.l2tp.as_ref().map(|_| "l2tp"),
             self.mpls.as_ref().map(|_| "mpls"),
             self.pppoe.as_ref().map(|_| "pppoe"),
             self.ah.as_ref().map(|_| "ah"),
@@ -430,6 +442,7 @@ mod tests {
         assert_eq!(ParseMode::Permissive.as_str(), "permissive");
         assert_eq!(ParseWarningProtocol::Tunnel.as_str(), "tunnel");
         assert_eq!(ParseWarningSubcode::VxlanInner.as_str(), "vxlan-inner");
+        assert_eq!(UdpAppHint::L2tp.as_str(), "l2tp");
         assert_eq!(UdpAppHint::WireGuard.as_str(), "wireguard");
         assert_eq!(
             WireGuardMessageType::HandshakeInitiation.as_str(),
