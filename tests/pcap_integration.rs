@@ -15,6 +15,7 @@ fn dns_query_pcap_has_one_frame() {
     let frames = parse_pcap_frames(bytes).expect("pcap should parse");
     assert_eq!(frames.len(), 1);
     assert!(!frames[0].data.is_empty());
+    assert_eq!(frames[0].linktype, 1);
 }
 
 #[test]

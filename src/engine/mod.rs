@@ -20,7 +20,7 @@ pub use decoder::{DecodeReport, Decoder};
 pub use error::{DecodeError, DecodeWarning};
 pub use pcap::{
     iter_capture_frames, iter_pcap_frames, iter_pcapng_frames, parse_capture_frames,
-    parse_pcap_frames, CaptureFrameIter, PcapFrame, PcapFrameIter, PcapNgFrameIter,
+    parse_pcap_frames, CaptureFrameIter, PcapFrame, PcapFrameIter, PcapNgFrameIter, TsResolution,
 };
 pub use registry::{Dissector, DissectorRegistry, ProbeResult};
 pub use tree::{DecodeEvent, DecodeTree};
