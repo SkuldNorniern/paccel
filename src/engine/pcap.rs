@@ -11,12 +11,22 @@ const PCAPNG_OPT_IF_TSRESOL: u16 = 9;
 pub struct PcapFrame<'a> {
     pub timestamp_sec: u32,
     pub timestamp_subsec: u32,
+    pub ts_resolution: TsResolution,
+    pub linktype: u16,
     pub data: &'a [u8],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TsResolution {
+    Micro,
+    Nano,
 }
 
 pub struct PcapFrameIter<'a> {
     input: &'a [u8],
     little_endian: bool,
+    ts_resolution: TsResolution,
+    linktype: u16,
     offset: usize,
     finished: bool,
 }
@@ -37,6 +47,7 @@ pub enum CaptureFrameIter<'a> {
 #[derive(Debug, Clone, Copy)]
 struct InterfaceInfo {
     ts_ticks_per_second: u64,
+    linktype: u16,
 }
 
 enum CaptureFormat {
@@ -60,10 +71,12 @@ pub fn parse_capture_frames(input: &[u8]) -> Result<Vec<PcapFrame<'_>>, LayerErr
 }
 
 pub fn iter_pcap_frames(input: &[u8]) -> Result<PcapFrameIter<'_>, LayerError> {
-    let (little_endian, offset) = parse_global_header(input)?;
+    let (little_endian, ts_resolution, linktype, offset) = parse_global_header(input)?;
     Ok(PcapFrameIter {
         input,
         little_endian,
+        ts_resolution,
+        linktype,
         offset,
         finished: false,
     })
@@ -150,6 +163,8 @@ impl<'a> Iterator for PcapFrameIter<'a> {
         let frame = PcapFrame {
             timestamp_sec: ts_sec,
             timestamp_subsec: ts_subsec,
+            ts_resolution: self.ts_resolution,
+            linktype: self.linktype,
             data: &self.input[self.offset..self.offset + incl_len],
         };
         self.offset += incl_len;
@@ -251,6 +266,7 @@ impl<'a> Iterator for PcapNgFrameIter<'a> {
                         self.offset,
                         block_len,
                         little_endian,
+                        &self.interfaces,
                     );
                     self.offset += block_len;
                     return Some(frame);
@@ -263,17 +279,22 @@ impl<'a> Iterator for PcapNgFrameIter<'a> {
     }
 }
 
-fn parse_global_header(input: &[u8]) -> Result<(bool, usize), LayerError> {
+fn parse_global_header(input: &[u8]) -> Result<(bool, TsResolution, u16, usize), LayerError> {
     if input.len() < 24 {
         return Err(LayerError::InvalidLength);
     }
 
     let magic = [input[0], input[1], input[2], input[3]];
-    match magic {
-        [0xd4, 0xc3, 0xb2, 0xa1] | [0x4d, 0x3c, 0xb2, 0xa1] => Ok((true, 24)),
-        [0xa1, 0xb2, 0xc3, 0xd4] | [0xa1, 0xb2, 0x3c, 0x4d] => Ok((false, 24)),
-        _ => Err(LayerError::MalformedPacket),
-    }
+    let (little_endian, ts_resolution) = match magic {
+        [0xd4, 0xc3, 0xb2, 0xa1] => (true, TsResolution::Micro),
+        [0x4d, 0x3c, 0xb2, 0xa1] => (true, TsResolution::Nano),
+        [0xa1, 0xb2, 0xc3, 0xd4] => (false, TsResolution::Micro),
+        [0xa1, 0xb2, 0x3c, 0x4d] => (false, TsResolution::Nano),
+        _ => return Err(LayerError::MalformedPacket),
+    };
+    let linktype = u16::try_from(read_u32(input, 20, little_endian)? & 0xffff)
+        .map_err(|_| LayerError::MalformedPacket)?;
+    Ok((little_endian, ts_resolution, linktype, 24))
 }
 
 fn detect_capture_format(input: &[u8]) -> Result<CaptureFormat, LayerError> {
@@ -343,6 +364,7 @@ fn parse_pcapng_interface_desc(
 
     let options_start = offset + 16;
     let options_end = offset + block_len - 4;
+    let linktype = read_u16(input, offset + 8, little_endian)?;
     let mut ts_ticks_per_second = 1_000_000u64;
     let mut cursor = options_start;
 
@@ -373,6 +395,7 @@ fn parse_pcapng_interface_desc(
 
     interfaces.push(InterfaceInfo {
         ts_ticks_per_second,
+        linktype,
     });
     Ok(())
 }
@@ -402,15 +425,15 @@ fn parse_pcapng_enhanced_packet<'a>(
     }
 
     let raw_ts = (ts_high << 32) | ts_low;
-    let ticks = interfaces
-        .get(interface_id)
-        .map(|i| i.ts_ticks_per_second)
-        .unwrap_or(1_000_000);
+    let interface = interfaces.get(interface_id);
+    let ticks = interface.map_or(1_000_000, |i| i.ts_ticks_per_second);
     let (timestamp_sec, timestamp_subsec) = split_timestamp(raw_ts, ticks);
 
     Ok(PcapFrame {
         timestamp_sec,
         timestamp_subsec,
+        ts_resolution: resolution_from_ticks(ticks),
+        linktype: interface.map_or(1, |i| i.linktype),
         data: &input[data_start..data_start + cap_len],
     })
 }
@@ -420,6 +443,7 @@ fn parse_pcapng_simple_packet<'a>(
     offset: usize,
     block_len: usize,
     little_endian: bool,
+    interfaces: &[InterfaceInfo],
 ) -> Result<PcapFrame<'a>, LayerError> {
     if block_len < 16 {
         return Err(LayerError::InvalidLength);
@@ -438,8 +462,20 @@ fn parse_pcapng_simple_packet<'a>(
     Ok(PcapFrame {
         timestamp_sec: 0,
         timestamp_subsec: 0,
+        ts_resolution: interfaces
+            .first()
+            .map_or(TsResolution::Micro, |i| resolution_from_ticks(i.ts_ticks_per_second)),
+        linktype: interfaces.first().map_or(1, |i| i.linktype),
         data: &input[data_start..data_start + cap_len],
     })
+}
+
+fn resolution_from_ticks(ticks_per_second: u64) -> TsResolution {
+    if ticks_per_second == 1_000_000_000 {
+        TsResolution::Nano
+    } else {
+        TsResolution::Micro
+    }
 }
 
 fn validate_pcapng_block(
@@ -535,7 +571,9 @@ fn read_u32(input: &[u8], offset: usize, little_endian: bool) -> Result<u32, Lay
 #[cfg(test)]
 #[allow(clippy::absolute_paths, clippy::cast_possible_truncation)]
 mod tests {
-    use super::{iter_capture_frames, iter_pcap_frames, iter_pcapng_frames, parse_pcap_frames};
+    use super::{
+        iter_capture_frames, iter_pcap_frames, iter_pcapng_frames, parse_pcap_frames, TsResolution,
+    };
 
     #[test]
     fn iterates_single_frame_pcap() {
@@ -546,6 +584,7 @@ mod tests {
             .expect("one frame")
             .expect("first frame should parse");
         assert!(!first.data.is_empty());
+        assert_eq!(first.linktype, 1);
         assert!(iter.next().is_none());
     }
 
@@ -555,6 +594,26 @@ mod tests {
         let frames = parse_pcap_frames(bytes).expect("pcap should parse");
         assert_eq!(frames.len(), 1);
         assert!(!frames[0].data.is_empty());
+        assert_eq!(frames[0].linktype, 1);
+    }
+
+    #[test]
+    fn parses_nanosecond_magic_pcap() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&[0x4d, 0x3c, 0xb2, 0xa1]);
+        bytes.extend_from_slice(&2u16.to_le_bytes());
+        bytes.extend_from_slice(&4u16.to_le_bytes());
+        bytes.extend_from_slice(&0i32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&65535u32.to_le_bytes());
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&123u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+
+        let frames = parse_pcap_frames(&bytes).expect("pcap should parse");
+        assert_eq!(frames[0].ts_resolution, TsResolution::Nano);
     }
 
     #[test]
@@ -587,6 +646,7 @@ mod tests {
         let frames = parse_pcap_frames(&bytes).expect("pcapng should parse");
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, frame);
+        assert_eq!(frames[0].linktype, 1);
     }
 
     #[test]
