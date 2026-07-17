@@ -15,10 +15,10 @@ use self::transport::parse_transport;
 
 pub use self::types::{
     AhInfo, EspInfo, EthernetFrame, FlowKey, GeneveInfo, GreInfo, IgmpInfo, L2tpInfo, LldpInfo,
-    LldpTlv, MplsInfo, MplsLabel, ParseConfig, ParseMode, ParseWarning, ParseWarningCode,
-    ParseWarningProtocol, ParseWarningSubcode, ParsedPacket, PppoeInfo, SctpChunk, SctpInfo,
-    StopLayer, StpBpdu, TcpOptionsParsed, TransportSegment, UdpAppHint, VxlanInfo, WireGuardInfo,
-    WireGuardMessageType,
+    LldpTlv, MplsInfo, MplsLabel, OpenVpnInfo, OpenVpnOpcode, ParseConfig, ParseMode, ParseWarning,
+    ParseWarningCode, ParseWarningProtocol, ParseWarningSubcode, ParsedPacket, PppoeInfo,
+    SctpChunk, SctpInfo, StopLayer, StpBpdu, TcpOptionsParsed, TransportSegment, UdpAppHint,
+    VxlanInfo, WireGuardInfo, WireGuardMessageType,
 };
 
 pub struct BuiltinPacketParser;
@@ -689,6 +689,7 @@ fn apply_transport_parse(parsed: &mut ParsedPacket, transport_parse: transport::
     parsed.ah = transport_parse.ah;
     parsed.esp = transport_parse.esp;
     parsed.wireguard = transport_parse.wireguard;
+    parsed.openvpn = transport_parse.openvpn;
     parsed.dns = transport_parse.dns;
     parsed.dhcp = transport_parse.dhcp;
     parsed.ntp = transport_parse.ntp;

@@ -234,6 +234,64 @@ pub struct WireGuardInfo {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenVpnOpcode {
+    ControlHardResetClientV1,
+    ControlHardResetServerV1,
+    ControlSoftResetV1,
+    ControlV1,
+    AckV1,
+    DataV1,
+    ControlHardResetClientV2,
+    ControlHardResetServerV2,
+    DataV2,
+    ControlHardResetClientV3,
+    ControlWrappedKeyV1,
+}
+
+impl OpenVpnOpcode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ControlHardResetClientV1 => "control-hard-reset-client-v1",
+            Self::ControlHardResetServerV1 => "control-hard-reset-server-v1",
+            Self::ControlSoftResetV1 => "control-soft-reset-v1",
+            Self::ControlV1 => "control-v1",
+            Self::AckV1 => "ack-v1",
+            Self::DataV1 => "data-v1",
+            Self::ControlHardResetClientV2 => "control-hard-reset-client-v2",
+            Self::ControlHardResetServerV2 => "control-hard-reset-server-v2",
+            Self::DataV2 => "data-v2",
+            Self::ControlHardResetClientV3 => "control-hard-reset-client-v3",
+            Self::ControlWrappedKeyV1 => "control-wrapped-key-v1",
+        }
+    }
+
+    pub(crate) fn from_u8(value: u8) -> Option<Self> {
+        match value {
+            1 => Some(Self::ControlHardResetClientV1),
+            2 => Some(Self::ControlHardResetServerV1),
+            3 => Some(Self::ControlSoftResetV1),
+            4 => Some(Self::ControlV1),
+            5 => Some(Self::AckV1),
+            6 => Some(Self::DataV1),
+            7 => Some(Self::ControlHardResetClientV2),
+            8 => Some(Self::ControlHardResetServerV2),
+            9 => Some(Self::DataV2),
+            10 => Some(Self::ControlHardResetClientV3),
+            11 => Some(Self::ControlWrappedKeyV1),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OpenVpnInfo {
+    pub opcode: OpenVpnOpcode,
+    pub key_id: u8,
+    pub session_id: Option<u64>,
+    pub peer_id: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MplsLabel {
     pub label: u32,
     pub exp: u8,
@@ -324,6 +382,7 @@ pub enum UdpAppHint {
     Ntp,
     L2tp,
     WireGuard,
+    OpenVpn,
 }
 
 impl UdpAppHint {
@@ -335,6 +394,7 @@ impl UdpAppHint {
             Self::Ntp => "ntp",
             Self::L2tp => "l2tp",
             Self::WireGuard => "wireguard",
+            Self::OpenVpn => "openvpn",
         }
     }
 }
@@ -386,6 +446,7 @@ pub struct ParsedPacket {
     pub ah: Option<AhInfo>,
     pub esp: Option<EspInfo>,
     pub wireguard: Option<WireGuardInfo>,
+    pub openvpn: Option<OpenVpnInfo>,
     pub mpls: Option<MplsInfo>,
     pub lldp: Option<LldpInfo>,
     pub stp: Option<StpBpdu>,
@@ -489,6 +550,7 @@ impl ParsedPacket {
             self.ah.as_ref().map(|_| "ah"),
             self.esp.as_ref().map(|_| "esp"),
             self.wireguard.as_ref().map(|_| "wireguard"),
+            self.openvpn.as_ref().map(|_| "openvpn"),
         ]
         .into_iter()
         .flatten()
@@ -498,7 +560,8 @@ impl ParsedPacket {
 #[cfg(test)]
 mod tests {
     use super::{
-        ParseMode, ParseWarningProtocol, ParseWarningSubcode, UdpAppHint, WireGuardMessageType,
+        OpenVpnOpcode, ParseMode, ParseWarningProtocol, ParseWarningSubcode, UdpAppHint,
+        WireGuardMessageType,
     };
 
     #[test]
@@ -508,9 +571,11 @@ mod tests {
         assert_eq!(ParseWarningSubcode::VxlanInner.as_str(), "vxlan-inner");
         assert_eq!(UdpAppHint::L2tp.as_str(), "l2tp");
         assert_eq!(UdpAppHint::WireGuard.as_str(), "wireguard");
+        assert_eq!(UdpAppHint::OpenVpn.as_str(), "openvpn");
         assert_eq!(
             WireGuardMessageType::HandshakeInitiation.as_str(),
             "handshake-initiation"
         );
+        assert_eq!(OpenVpnOpcode::DataV2.as_str(), "data-v2");
     }
 }

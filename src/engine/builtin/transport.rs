@@ -14,9 +14,9 @@ use crate::layer::transport::tcp::{TcpFlags, TcpHeader};
 use crate::layer::transport::udp::UdpHeader;
 
 use super::types::{
-    AhInfo, EspInfo, GeneveInfo, GreInfo, IgmpInfo, L2tpInfo, ParseConfig, SctpChunk, SctpInfo,
-    StopLayer, TcpOptionsParsed, TransportSegment, UdpAppHint, VxlanInfo, WireGuardInfo,
-    WireGuardMessageType,
+    AhInfo, EspInfo, GeneveInfo, GreInfo, IgmpInfo, L2tpInfo, OpenVpnInfo, OpenVpnOpcode,
+    ParseConfig, SctpChunk, SctpInfo, StopLayer, TcpOptionsParsed, TransportSegment, UdpAppHint,
+    VxlanInfo, WireGuardInfo, WireGuardMessageType,
 };
 
 const UDP_HEADER_LEN: usize = 8;
@@ -28,6 +28,7 @@ const UDP_PORT_NTP: u16 = 123;
 const UDP_PORT_L2TP: u16 = 1701;
 const UDP_PORT_VXLAN: u16 = 4789;
 const UDP_PORT_GENEVE: u16 = 6081;
+const UDP_PORT_OPENVPN: u16 = 1194;
 const UDP_PORT_WIREGUARD: u16 = 51820;
 const UDP_PORT_WIREGUARD_ALT: u16 = 51821;
 
@@ -47,6 +48,7 @@ pub(super) struct TransportParse {
     pub ah: Option<AhInfo>,
     pub esp: Option<EspInfo>,
     pub wireguard: Option<WireGuardInfo>,
+    pub openvpn: Option<OpenVpnInfo>,
     pub dns: Option<DnsMessage>,
     pub dhcp: Option<DhcpMessage>,
     pub ntp: Option<NtpMessage>,
@@ -132,14 +134,19 @@ pub(super) fn parse_transport(
                     .map(parse_tcp_options)
                     .unwrap_or_default()
             });
+            let source_port = tcp.source_port;
+            let destination_port = tcp.destination_port;
             let mut parsed = TransportParse::with_tcp(tcp, tcp_options);
             if parse_application {
                 let payload = &l4_bytes[header_len..];
-                parsed.tls = (payload.len() >= 5 && payload[0] == 22)
-                    .then(|| parse_tls_client_hello(payload).ok())
-                    .flatten();
-                if parsed.tls.is_none() {
-                    parsed.http = parse_http(payload).ok();
+                parsed.openvpn = maybe_classify_openvpn_tcp(source_port, destination_port, payload);
+                if parsed.openvpn.is_none() {
+                    parsed.tls = (payload.len() >= 5 && payload[0] == 22)
+                        .then(|| parse_tls_client_hello(payload).ok())
+                        .flatten();
+                    if parsed.tls.is_none() {
+                        parsed.http = parse_http(payload).ok();
+                    }
                 }
             }
             Ok(parsed)
@@ -188,14 +195,17 @@ fn parse_udp_transport(l4_bytes: &[u8], config: ParseConfig) -> Result<Transport
     let mut ntp = None;
 
     let parse_application = config.stop_after == StopLayer::Application;
-    let wireguard = if parse_application {
+    let (wireguard, openvpn) = if parse_application {
         maybe_probe_dns_udp(&udp, app, &mut hints, &mut dns);
         maybe_probe_mdns_udp(&udp, app, &mut hints, &mut dns);
         maybe_probe_dhcp_udp(&udp, app, &mut hints, &mut dhcp);
         maybe_probe_ntp_udp(&udp, app, &mut hints, &mut ntp);
-        maybe_classify_wireguard_udp(&udp, app, &mut hints)
+        (
+            maybe_classify_wireguard_udp(&udp, app, &mut hints),
+            maybe_classify_openvpn_udp(&udp, app, &mut hints),
+        )
     } else {
-        None
+        (None, None)
     };
 
     let vxlan = maybe_parse_vxlan(&udp, app);
@@ -203,6 +213,7 @@ fn parse_udp_transport(l4_bytes: &[u8], config: ParseConfig) -> Result<Transport
     let l2tp = maybe_parse_l2tp(&udp, app, &mut hints);
     let quic = (parse_application
         && wireguard.is_none()
+        && openvpn.is_none()
         && vxlan.is_none()
         && geneve.is_none()
         && l2tp.is_none()
@@ -217,6 +228,7 @@ fn parse_udp_transport(l4_bytes: &[u8], config: ParseConfig) -> Result<Transport
         geneve,
         l2tp,
         wireguard,
+        openvpn,
         dns,
         dhcp,
         ntp,
@@ -334,6 +346,69 @@ fn classify_wireguard_message(payload: &[u8]) -> Option<WireGuardInfo> {
     };
 
     Some(WireGuardInfo { message_type })
+}
+
+fn maybe_classify_openvpn_udp(
+    udp: &UdpHeader,
+    payload: &[u8],
+    hints: &mut Vec<UdpAppHint>,
+) -> Option<OpenVpnInfo> {
+    if !is_udp_port_match(udp, UDP_PORT_OPENVPN) {
+        return None;
+    }
+
+    let info = parse_openvpn_header(payload)?;
+    push_hint_unique(hints, UdpAppHint::OpenVpn);
+    Some(info)
+}
+
+fn maybe_classify_openvpn_tcp(
+    source_port: u16,
+    destination_port: u16,
+    payload: &[u8],
+) -> Option<OpenVpnInfo> {
+    let is_openvpn_port = source_port == UDP_PORT_OPENVPN || destination_port == UDP_PORT_OPENVPN;
+    if !is_openvpn_port || payload.len() < 3 {
+        return None;
+    }
+
+    let packet_len = u16::from_be_bytes([payload[0], payload[1]]);
+    if packet_len == 0 {
+        return None;
+    }
+    parse_openvpn_header(&payload[2..])
+}
+
+/// Parses only the fixed OpenVPN wire header.
+///
+/// Control-channel bytes after the eight-byte session ID are opaque because
+/// fields such as the tls-auth HMAC have deployment-specific lengths that
+/// cannot be discovered reliably from packet bytes alone.
+fn parse_openvpn_header(payload: &[u8]) -> Option<OpenVpnInfo> {
+    let opcode_and_key_id = *payload.first()?;
+    let opcode = OpenVpnOpcode::from_u8(opcode_and_key_id >> 3)?;
+    let key_id = opcode_and_key_id & 0x07;
+
+    let (session_id, peer_id) = match opcode {
+        OpenVpnOpcode::DataV1 => (None, None),
+        OpenVpnOpcode::DataV2 => {
+            let peer_id_bytes = payload.get(1..4)?;
+            let peer_id =
+                u32::from_be_bytes([0, peer_id_bytes[0], peer_id_bytes[1], peer_id_bytes[2]]);
+            (None, Some(peer_id))
+        }
+        _ => {
+            let session_id_bytes: [u8; 8] = payload.get(1..9)?.try_into().ok()?;
+            (Some(u64::from_be_bytes(session_id_bytes)), None)
+        }
+    };
+
+    Some(OpenVpnInfo {
+        opcode,
+        key_id,
+        session_id,
+        peer_id,
+    })
 }
 
 fn is_udp_port_match(udp: &UdpHeader, port: u16) -> bool {
@@ -731,8 +806,8 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
     use crate::engine::builtin::{
-        BuiltinPacketParser, FlowKey, ParseConfig, ParseWarningCode, StopLayer, TransportSegment,
-        UdpAppHint, WireGuardMessageType,
+        BuiltinPacketParser, FlowKey, OpenVpnOpcode, ParseConfig, ParseWarningCode, StopLayer,
+        TransportSegment, UdpAppHint, WireGuardMessageType,
     };
     use crate::layer::application::http::HttpMessage;
     use crate::layer::network::icmpv6::NdpMessage;
@@ -1516,6 +1591,80 @@ mod tests {
         let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
         assert!(parsed.wireguard.is_none());
         assert!(!parsed.udp_hints.contains(&UdpAppHint::WireGuard));
+    }
+
+    #[test]
+    fn classifies_openvpn_udp_control_packet() {
+        let session_id = 0x8138_1462_1d67_462d_u64;
+        let mut payload = vec![0x38];
+        payload.extend_from_slice(&session_id.to_be_bytes());
+        payload.extend_from_slice(&[0xaa, 0xbb]);
+        let frame = build_ethernet_ipv4_udp_frame(49152, 1194, &payload);
+
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+        let openvpn = parsed.openvpn.as_ref().expect("openvpn should be present");
+        assert_eq!(openvpn.opcode, OpenVpnOpcode::ControlHardResetClientV2);
+        assert_eq!(openvpn.key_id, 0);
+        assert_eq!(openvpn.session_id, Some(session_id));
+        assert_eq!(openvpn.peer_id, None);
+        assert!(parsed.udp_hints.contains(&UdpAppHint::OpenVpn));
+    }
+
+    #[test]
+    fn classifies_openvpn_udp_data_v1_without_session_id() {
+        let payload = [0x30, 0xd7, 0xb2, 0x33];
+        let frame = build_ethernet_ipv4_udp_frame(1194, 49152, &payload);
+
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+        let openvpn = parsed.openvpn.as_ref().expect("openvpn should be present");
+        assert_eq!(openvpn.opcode, OpenVpnOpcode::DataV1);
+        assert_eq!(openvpn.session_id, None);
+        assert_eq!(openvpn.peer_id, None);
+    }
+
+    #[test]
+    fn classifies_openvpn_udp_data_v2_with_peer_id() {
+        let payload = [0x48, 0x12, 0x34, 0x56, 0xde, 0xad];
+        let frame = build_ethernet_ipv4_udp_frame(49152, 1194, &payload);
+
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+        let openvpn = parsed.openvpn.as_ref().expect("openvpn should be present");
+        assert_eq!(openvpn.opcode, OpenVpnOpcode::DataV2);
+        assert_eq!(openvpn.session_id, None);
+        assert_eq!(openvpn.peer_id, Some(0x12_3456));
+    }
+
+    #[test]
+    fn classifies_length_prefixed_openvpn_tcp_packet() {
+        let session_id = 0x8138_1462_1d67_462d_u64;
+        let mut payload = vec![0x00, 0x09, 0x38];
+        payload.extend_from_slice(&session_id.to_be_bytes());
+        let frame = build_ethernet_ipv4_tcp_frame(49152, 1194, &payload);
+
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+        let openvpn = parsed.openvpn.as_ref().expect("openvpn should be present");
+        assert_eq!(openvpn.opcode, OpenVpnOpcode::ControlHardResetClientV2);
+        assert_eq!(openvpn.session_id, Some(session_id));
+    }
+
+    #[test]
+    fn does_not_classify_openvpn_on_non_default_port() {
+        let payload = [0x38, 0x81, 0x38, 0x14, 0x62, 0x1d, 0x67, 0x46, 0x2d];
+        let frame = build_ethernet_ipv4_udp_frame(49152, 443, &payload);
+
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+        assert!(parsed.openvpn.is_none());
+        assert!(!parsed.udp_hints.contains(&UdpAppHint::OpenVpn));
+    }
+
+    #[test]
+    fn does_not_classify_invalid_openvpn_opcode() {
+        let payload = [0x78, 0x81, 0x38, 0x14, 0x62, 0x1d, 0x67, 0x46, 0x2d];
+        let frame = build_ethernet_ipv4_udp_frame(49152, 1194, &payload);
+
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+        assert!(parsed.openvpn.is_none());
+        assert!(!parsed.udp_hints.contains(&UdpAppHint::OpenVpn));
     }
 
     #[test]
