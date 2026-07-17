@@ -8,6 +8,8 @@ use crate::layer::application::dns::{DnsMessage, parse_dns_message};
 use crate::layer::application::http::{HttpMessage, parse_http};
 use crate::layer::application::ntp::{NtpMessage, parse_ntp_message};
 use crate::layer::application::quic::{QuicLongHeader, parse_quic_long_header};
+use crate::layer::application::rtp::{RtpHeader, parse_rtp};
+use crate::layer::application::sip::{SipMessage, parse_sip};
 use crate::layer::application::tftp::{TftpMessage, parse_tftp_message};
 use crate::layer::application::tls::{TlsClientHello, parse_tls_client_hello};
 use crate::layer::network::icmp::IcmpHeader;
@@ -34,6 +36,7 @@ const UDP_PORT_L2TP: u16 = 1701;
 const UDP_PORT_VXLAN: u16 = 4789;
 const UDP_PORT_GENEVE: u16 = 6081;
 const UDP_PORT_OPENVPN: u16 = 1194;
+const UDP_PORT_SIP: u16 = 5060;
 const UDP_PORT_WIREGUARD: u16 = 51820;
 const UDP_PORT_WIREGUARD_ALT: u16 = 51821;
 
@@ -61,6 +64,8 @@ pub(super) struct TransportParse {
     pub ntp: Option<NtpMessage>,
     pub tls: Option<TlsClientHello>,
     pub http: Option<HttpMessage>,
+    pub sip: Option<SipMessage>,
+    pub rtp: Option<RtpHeader>,
     pub quic: Option<QuicLongHeader>,
     pub hints: Vec<UdpAppHint>,
 }
@@ -153,6 +158,11 @@ pub(super) fn parse_transport(
                         .flatten();
                     if parsed.tls.is_none() {
                         parsed.http = parse_http(payload).ok();
+                        if parsed.http.is_none()
+                            && (source_port == UDP_PORT_SIP || destination_port == UDP_PORT_SIP)
+                        {
+                            parsed.sip = parse_sip(payload).ok();
+                        }
                     }
                 }
             }
@@ -202,6 +212,7 @@ fn parse_udp_transport(l4_bytes: &[u8], config: ParseConfig) -> Result<Transport
     let mut dhcp6 = None;
     let mut tftp = None;
     let mut ntp = None;
+    let mut sip = None;
 
     let parse_application = config.stop_after == StopLayer::Application;
     let (wireguard, openvpn) = if parse_application {
@@ -211,6 +222,7 @@ fn parse_udp_transport(l4_bytes: &[u8], config: ParseConfig) -> Result<Transport
         maybe_probe_dhcp6_udp(&udp, app, &mut hints, &mut dhcp6);
         maybe_probe_tftp_udp(&udp, app, &mut hints, &mut tftp);
         maybe_probe_ntp_udp(&udp, app, &mut hints, &mut ntp);
+        maybe_probe_sip_udp(&udp, app, &mut hints, &mut sip);
         (
             maybe_classify_wireguard_udp(&udp, app, &mut hints),
             maybe_classify_openvpn_udp(&udp, app, &mut hints),
@@ -232,6 +244,23 @@ fn parse_udp_transport(l4_bytes: &[u8], config: ParseConfig) -> Result<Transport
         && app[0] & 0x80 != 0)
         .then(|| parse_quic_long_header(app).ok())
         .flatten();
+    let already_classified = [
+        dns.is_some(),
+        dhcp.is_some(),
+        dhcp6.is_some(),
+        tftp.is_some(),
+        ntp.is_some(),
+        sip.is_some(),
+        wireguard.is_some(),
+        openvpn.is_some(),
+        vxlan.is_some(),
+        geneve.is_some(),
+        l2tp.is_some(),
+        quic.is_some(),
+    ]
+    .into_iter()
+    .any(|matched| matched);
+    let rtp = maybe_probe_rtp_udp(parse_application, app, &mut hints, already_classified);
 
     Ok(TransportParse {
         transport: Some(TransportSegment::Udp(udp)),
@@ -245,10 +274,41 @@ fn parse_udp_transport(l4_bytes: &[u8], config: ParseConfig) -> Result<Transport
         dhcp6,
         tftp,
         ntp,
+        sip,
+        rtp,
         quic,
         hints,
         ..TransportParse::default()
     })
+}
+
+fn maybe_probe_sip_udp(
+    udp: &UdpHeader,
+    payload: &[u8],
+    hints: &mut Vec<UdpAppHint>,
+    sip: &mut Option<SipMessage>,
+) {
+    if !is_udp_port_match(udp, UDP_PORT_SIP) {
+        return;
+    }
+    if let Ok(message) = parse_sip(payload) {
+        push_hint_unique(hints, UdpAppHint::Sip);
+        *sip = Some(message);
+    }
+}
+
+fn maybe_probe_rtp_udp(
+    parse_application: bool,
+    payload: &[u8],
+    hints: &mut Vec<UdpAppHint>,
+    already_classified: bool,
+) -> Option<RtpHeader> {
+    if !parse_application || already_classified {
+        return None;
+    }
+    let header = parse_rtp(payload).ok()?;
+    push_hint_unique(hints, UdpAppHint::Rtp);
+    Some(header)
 }
 
 fn maybe_probe_dns_udp(
@@ -861,8 +921,8 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
     use crate::engine::builtin::{
-        BuiltinPacketParser, FlowKey, OpenVpnOpcode, ParseConfig, ParseWarningCode, StopLayer,
-        TftpMessage, TransportSegment, UdpAppHint, WireGuardMessageType,
+        BuiltinPacketParser, FlowKey, OpenVpnOpcode, ParseConfig, ParseWarningCode, SipMessage,
+        StopLayer, TftpMessage, TransportSegment, UdpAppHint, WireGuardMessageType,
     };
     use crate::layer::application::http::HttpMessage;
     use crate::layer::network::icmpv6::NdpMessage;
@@ -1122,6 +1182,47 @@ mod tests {
         let frame = build_ethernet_ipv4_tcp_frame(49152, 80, &[0xde, 0xad, 0xbe, 0xef]);
         let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
         assert!(parsed.http.is_none());
+    }
+
+    #[test]
+    fn parses_sip_request_from_udp_payload() {
+        let payload = b"INVITE sip:test@10.0.2.15:5060 SIP/2.0\r\nCall-ID: udp-call\r\nContent-Length: 0\r\n\r\n";
+        let frame = build_ethernet_ipv4_udp_frame(5060, 5060, payload);
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+
+        assert!(matches!(
+            parsed.sip,
+            Some(SipMessage::Request { ref method, .. }) if method == "INVITE"
+        ));
+        assert!(parsed.udp_hints.contains(&UdpAppHint::Sip));
+    }
+
+    #[test]
+    fn parses_sip_response_from_tcp_payload() {
+        let payload = b"SIP/2.0 100 Trying\r\nCall-ID: tcp-call\r\nContent-Length: 0\r\n\r\n";
+        let frame = build_ethernet_ipv4_tcp_frame(5060, 49152, payload);
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+
+        assert!(matches!(
+            parsed.sip,
+            Some(SipMessage::Response { status: 100, .. })
+        ));
+        assert!(parsed.http.is_none());
+    }
+
+    #[test]
+    fn parses_rtp_as_last_resort_udp_payload() {
+        let payload = [
+            0x80, 0x80, 0x92, 0xdb, 0x00, 0x00, 0x00, 0xa0, 0x34, 0x3d, 0xa9, 0x9b, 0xaa,
+        ];
+        let frame = build_ethernet_ipv4_udp_frame(27_942, 6000, &payload);
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+        let rtp = parsed.rtp.as_ref().expect("RTP header");
+
+        assert_eq!(rtp.sequence_number, 37_595);
+        assert_eq!(rtp.timestamp, 160);
+        assert_eq!(rtp.ssrc, 0x343d_a99b);
+        assert!(parsed.udp_hints.contains(&UdpAppHint::Rtp));
     }
 
     #[test]

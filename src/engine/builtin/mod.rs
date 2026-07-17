@@ -6,6 +6,8 @@ mod types;
 use crate::engine::constants::{ethertype, ip_proto};
 use crate::layer::LayerError;
 pub use crate::layer::application::dhcp6::{Dhcp6Message, Dhcp6Option};
+pub use crate::layer::application::rtp::RtpHeader;
+pub use crate::layer::application::sip::SipMessage;
 pub use crate::layer::application::tftp::TftpMessage;
 use crate::layer::datalink::dot11::{parse_dot11, parse_radiotap};
 
@@ -699,6 +701,8 @@ fn apply_transport_parse(parsed: &mut ParsedPacket, transport_parse: transport::
     parsed.ntp = transport_parse.ntp;
     parsed.tls = transport_parse.tls;
     parsed.http = transport_parse.http;
+    parsed.sip = transport_parse.sip;
+    parsed.rtp = transport_parse.rtp;
     parsed.quic = transport_parse.quic;
     parsed.udp_hints = transport_parse.hints;
 }
