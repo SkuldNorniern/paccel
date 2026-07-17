@@ -1,4 +1,4 @@
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr};
 
 use crate::engine::constants::ethertype_name;
 use crate::layer::application::dhcp::DhcpMessage;
@@ -288,12 +288,20 @@ impl ParseMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopLayer {
+    Network,
+    Transport,
+    Application,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct ParseConfig {
     pub max_ipv6_extension_headers: usize,
     pub max_mpls_labels: usize,
     pub max_tunnel_depth: usize,
     pub mode: ParseMode,
+    pub stop_after: StopLayer,
 }
 
 impl Default for ParseConfig {
@@ -303,6 +311,7 @@ impl Default for ParseConfig {
             max_mpls_labels: 8,
             max_tunnel_depth: 4,
             mode: ParseMode::Permissive,
+            stop_after: StopLayer::Application,
         }
     }
 }
@@ -345,6 +354,15 @@ pub enum TransportSegment {
     Udp(UdpHeader),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FlowKey {
+    pub src_ip: IpAddr,
+    pub dst_ip: IpAddr,
+    pub src_port: u16,
+    pub dst_port: u16,
+    pub protocol: u8,
+}
+
 #[derive(Debug, Default)]
 pub struct ParsedPacket {
     pub ethernet: Option<EthernetFrame>,
@@ -383,6 +401,52 @@ pub struct ParsedPacket {
 }
 
 impl ParsedPacket {
+    pub fn flow_key(&self) -> Option<FlowKey> {
+        if let Some(inner) = self.inner.as_deref() {
+            return inner.flow_key();
+        }
+
+        let (src_ip, dst_ip, protocol) = if let Some(ipv4) = self.ipv4.as_ref() {
+            (
+                IpAddr::V4(ipv4.source),
+                IpAddr::V4(ipv4.destination),
+                ipv4.protocol,
+            )
+        } else if let Some(ipv6) = self.ipv6.as_ref() {
+            (
+                IpAddr::V6(ipv6.source),
+                IpAddr::V6(ipv6.destination),
+                ipv6.next_header,
+            )
+        } else {
+            return None;
+        };
+
+        let (src_port, dst_port) = match self.transport.as_ref() {
+            Some(TransportSegment::Tcp(tcp)) => (tcp.source_port, tcp.destination_port),
+            Some(TransportSegment::Udp(udp)) => (udp.source_port, udp.destination_port),
+            None => (0, 0),
+        };
+
+        Some(FlowKey {
+            src_ip,
+            dst_ip,
+            src_port,
+            dst_port,
+            protocol,
+        })
+    }
+
+    pub fn reverse_flow_key(&self) -> Option<FlowKey> {
+        self.flow_key().map(|key| FlowKey {
+            src_ip: key.dst_ip,
+            dst_ip: key.src_ip,
+            src_port: key.dst_port,
+            dst_port: key.src_port,
+            protocol: key.protocol,
+        })
+    }
+
     pub fn link_protocol_name(&self) -> Option<&'static str> {
         self.ethernet
             .as_ref()
