@@ -8,6 +8,7 @@ use crate::layer::application::dns::{DnsMessage, parse_dns_message};
 use crate::layer::application::http::{HttpMessage, parse_http};
 use crate::layer::application::ntp::{NtpMessage, parse_ntp_message};
 use crate::layer::application::quic::{QuicLongHeader, parse_quic_long_header};
+use crate::layer::application::tftp::{TftpMessage, parse_tftp_message};
 use crate::layer::application::tls::{TlsClientHello, parse_tls_client_hello};
 use crate::layer::network::icmp::IcmpHeader;
 use crate::layer::network::icmpv6::{Icmpv6Header, NdpMessage, parse_ndp};
@@ -27,6 +28,7 @@ const UDP_PORT_DHCP_SERVER: u16 = 67;
 const UDP_PORT_DHCP_CLIENT: u16 = 68;
 const UDP_PORT_DHCPV6_CLIENT: u16 = 546;
 const UDP_PORT_DHCPV6_SERVER: u16 = 547;
+const UDP_PORT_TFTP: u16 = 69;
 const UDP_PORT_NTP: u16 = 123;
 const UDP_PORT_L2TP: u16 = 1701;
 const UDP_PORT_VXLAN: u16 = 4789;
@@ -55,6 +57,7 @@ pub(super) struct TransportParse {
     pub dns: Option<DnsMessage>,
     pub dhcp: Option<DhcpMessage>,
     pub dhcp6: Option<Dhcp6Message>,
+    pub tftp: Option<TftpMessage>,
     pub ntp: Option<NtpMessage>,
     pub tls: Option<TlsClientHello>,
     pub http: Option<HttpMessage>,
@@ -197,6 +200,7 @@ fn parse_udp_transport(l4_bytes: &[u8], config: ParseConfig) -> Result<Transport
     let mut dns = None;
     let mut dhcp = None;
     let mut dhcp6 = None;
+    let mut tftp = None;
     let mut ntp = None;
 
     let parse_application = config.stop_after == StopLayer::Application;
@@ -205,6 +209,7 @@ fn parse_udp_transport(l4_bytes: &[u8], config: ParseConfig) -> Result<Transport
         maybe_probe_mdns_udp(&udp, app, &mut hints, &mut dns);
         maybe_probe_dhcp_udp(&udp, app, &mut hints, &mut dhcp);
         maybe_probe_dhcp6_udp(&udp, app, &mut hints, &mut dhcp6);
+        maybe_probe_tftp_udp(&udp, app, &mut hints, &mut tftp);
         maybe_probe_ntp_udp(&udp, app, &mut hints, &mut ntp);
         (
             maybe_classify_wireguard_udp(&udp, app, &mut hints),
@@ -238,6 +243,7 @@ fn parse_udp_transport(l4_bytes: &[u8], config: ParseConfig) -> Result<Transport
         dns,
         dhcp,
         dhcp6,
+        tftp,
         ntp,
         quic,
         hints,
@@ -298,6 +304,23 @@ fn maybe_probe_dhcp6_udp(
     if is_dhcp6_port && likely_dhcp6_message(payload) {
         push_hint_unique(hints, UdpAppHint::Dhcpv6);
         *dhcp6 = parse_dhcp6_message(payload).ok();
+    }
+}
+
+/// Probes only traffic whose source or destination is the well-known TFTP port.
+///
+/// TFTP switches to ephemeral ports after the initial request. This stateless
+/// parser deliberately does not classify those later transfer packets because
+/// their short opcode-and-counter shapes are too generic to sniff safely.
+fn maybe_probe_tftp_udp(
+    udp: &UdpHeader,
+    payload: &[u8],
+    hints: &mut Vec<UdpAppHint>,
+    tftp: &mut Option<TftpMessage>,
+) {
+    if is_udp_port_match(udp, UDP_PORT_TFTP) && likely_tftp_message(payload) {
+        push_hint_unique(hints, UdpAppHint::Tftp);
+        *tftp = parse_tftp_message(payload).ok();
     }
 }
 
@@ -807,6 +830,13 @@ fn likely_dhcp6_message(payload: &[u8]) -> bool {
     payload.len() >= 4 && (1..=13).contains(&payload[0])
 }
 
+fn likely_tftp_message(payload: &[u8]) -> bool {
+    let Some(opcode) = payload.get(..2) else {
+        return false;
+    };
+    (1..=6).contains(&u16::from_be_bytes([opcode[0], opcode[1]]))
+}
+
 fn likely_ntp_message(payload: &[u8]) -> bool {
     if payload.len() < 48 {
         return false;
@@ -832,7 +862,7 @@ mod tests {
 
     use crate::engine::builtin::{
         BuiltinPacketParser, FlowKey, OpenVpnOpcode, ParseConfig, ParseWarningCode, StopLayer,
-        TransportSegment, UdpAppHint, WireGuardMessageType,
+        TftpMessage, TransportSegment, UdpAppHint, WireGuardMessageType,
     };
     use crate::layer::application::http::HttpMessage;
     use crate::layer::network::icmpv6::NdpMessage;
@@ -1305,6 +1335,27 @@ mod tests {
         let dhcp6 = parsed.dhcp6.as_ref().expect("dhcpv6");
         assert_eq!(dhcp6.msg_type, 1);
         assert_eq!(dhcp6.transaction_id, 0x10_0874);
+    }
+
+    #[test]
+    fn parses_tftp_read_request_only_on_well_known_port() {
+        let payload = b"\0\x01rfc1350.txt\0octet\0";
+        let frame = build_ethernet_ipv4_udp_frame(49152, 69, payload);
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+
+        assert_eq!(
+            parsed.tftp,
+            Some(TftpMessage::ReadRequest {
+                filename: "rfc1350.txt".to_owned(),
+                mode: "octet".to_owned(),
+            })
+        );
+        assert!(parsed.udp_hints.contains(&UdpAppHint::Tftp));
+
+        let non_tftp_frame = build_ethernet_ipv4_udp_frame(49152, 1069, payload);
+        let non_tftp = BuiltinPacketParser::parse(&non_tftp_frame).expect("parse should succeed");
+        assert!(non_tftp.tftp.is_none());
+        assert!(!non_tftp.udp_hints.contains(&UdpAppHint::Tftp));
     }
 
     #[test]

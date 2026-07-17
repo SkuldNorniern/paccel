@@ -3,8 +3,8 @@
 use std::net::Ipv4Addr;
 
 use paccel::engine::{
-    BuiltinPacketParser, OpenVpnOpcode, TransportSegment, UdpAppHint, iter_capture_frames,
-    parse_capture_frames, parse_pcap_frames,
+    BuiltinPacketParser, OpenVpnOpcode, TftpMessage, TransportSegment, UdpAppHint,
+    iter_capture_frames, parse_capture_frames, parse_pcap_frames,
 };
 
 #[test]
@@ -53,6 +53,26 @@ fn dhcpv6_fixture_solicit_matches_tshark() {
     assert_eq!(dhcp6.msg_type, 1);
     assert_eq!(dhcp6.transaction_id, 0x10_0874);
     assert!(parsed.udp_hints.contains(&UdpAppHint::Dhcpv6));
+}
+
+#[test]
+fn tftp_rrq_fixture_first_frame_matches_tshark() {
+    let bytes = include_bytes!("pcaps/protocol-gaps/tftp_rrq.pcap");
+    let frame = iter_capture_frames(bytes)
+        .expect("pcap should parse")
+        .next()
+        .expect("capture should contain frame 1")
+        .expect("capture frame should parse");
+
+    let parsed = BuiltinPacketParser::parse(frame.data).expect("packet should parse");
+    assert_eq!(
+        parsed.tftp,
+        Some(TftpMessage::ReadRequest {
+            filename: "rfc1350.txt".to_owned(),
+            mode: "octet".to_owned(),
+        })
+    );
+    assert!(parsed.udp_hints.contains(&UdpAppHint::Tftp));
 }
 
 // ── DNS query ──────────────────────────────────────────────────────────────

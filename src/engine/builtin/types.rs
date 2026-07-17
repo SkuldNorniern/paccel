@@ -7,6 +7,7 @@ use crate::layer::application::dns::DnsMessage;
 use crate::layer::application::http::HttpMessage;
 use crate::layer::application::ntp::NtpMessage;
 use crate::layer::application::quic::QuicLongHeader;
+use crate::layer::application::tftp::TftpMessage;
 use crate::layer::application::tls::TlsClientHello;
 use crate::layer::datalink::arp::ArpPacket;
 use crate::layer::datalink::dot11::{Dot11Frame, RadiotapHeader};
@@ -381,6 +382,7 @@ pub enum UdpAppHint {
     Mdns,
     Dhcp,
     Dhcpv6,
+    Tftp,
     Ntp,
     L2tp,
     WireGuard,
@@ -394,6 +396,7 @@ impl UdpAppHint {
             Self::Mdns => "mdns",
             Self::Dhcp => "dhcp",
             Self::Dhcpv6 => "dhcpv6",
+            Self::Tftp => "tftp",
             Self::Ntp => "ntp",
             Self::L2tp => "l2tp",
             Self::WireGuard => "wireguard",
@@ -456,6 +459,7 @@ pub struct ParsedPacket {
     pub dns: Option<DnsMessage>,
     pub dhcp: Option<DhcpMessage>,
     pub dhcp6: Option<Dhcp6Message>,
+    pub tftp: Option<TftpMessage>,
     pub ntp: Option<NtpMessage>,
     pub tls: Option<TlsClientHello>,
     pub http: Option<HttpMessage>,
@@ -582,5 +586,10 @@ mod tests {
             "handshake-initiation"
         );
         assert_eq!(OpenVpnOpcode::DataV2.as_str(), "data-v2");
+    }
+
+    #[test]
+    fn tftp_hint_has_stable_name() {
+        assert_eq!(UdpAppHint::Tftp.as_str(), "tftp");
     }
 }
