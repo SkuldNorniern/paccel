@@ -4,6 +4,7 @@ use crate::engine::constants::ip_proto;
 use crate::layer::LayerError;
 use crate::layer::application::dhcp::{DhcpMessage, parse_dhcp_message};
 use crate::layer::application::dhcp6::{Dhcp6Message, parse_dhcp6_message};
+use crate::layer::application::dnp3::{Dnp3Message, parse_dnp3_message};
 use crate::layer::application::dns::{DnsMessage, parse_dns_message};
 use crate::layer::application::http::{HttpMessage, parse_http};
 use crate::layer::application::ntp::{NtpMessage, parse_ntp_message};
@@ -47,6 +48,7 @@ const UDP_PORT_OPENVPN: u16 = 1194;
 const UDP_PORT_SIP: u16 = 5060;
 const UDP_PORT_WIREGUARD: u16 = 51820;
 const UDP_PORT_WIREGUARD_ALT: u16 = 51821;
+const DNP3_PORT: u16 = 20_000;
 
 #[derive(Debug, Default)]
 pub(super) struct TransportParse {
@@ -65,6 +67,7 @@ pub(super) struct TransportParse {
     pub esp: Option<EspInfo>,
     pub wireguard: Option<WireGuardInfo>,
     pub openvpn: Option<OpenVpnInfo>,
+    pub dnp3: Option<Dnp3Message>,
     pub dns: Option<DnsMessage>,
     pub dhcp: Option<DhcpMessage>,
     pub dhcp6: Option<Dhcp6Message>,
@@ -161,17 +164,24 @@ pub(super) fn parse_transport(
             let mut parsed = TransportParse::with_tcp(tcp, tcp_options);
             if parse_application {
                 let payload = &l4_bytes[header_len..];
-                parsed.openvpn = maybe_classify_openvpn_tcp(source_port, destination_port, payload);
-                if parsed.openvpn.is_none() {
-                    parsed.tls = (payload.len() >= 5 && payload[0] == 22)
-                        .then(|| parse_tls_client_hello(payload).ok())
-                        .flatten();
-                    if parsed.tls.is_none() {
-                        parsed.http = parse_http(payload).ok();
-                        if parsed.http.is_none()
-                            && (source_port == UDP_PORT_SIP || destination_port == UDP_PORT_SIP)
-                        {
-                            parsed.sip = parse_sip(payload).ok();
+                parsed.dnp3 = ((source_port == DNP3_PORT || destination_port == DNP3_PORT)
+                    && payload.starts_with(&[0x05, 0x64]))
+                .then(|| parse_dnp3_message(payload).ok())
+                .flatten();
+                if parsed.dnp3.is_none() {
+                    parsed.openvpn =
+                        maybe_classify_openvpn_tcp(source_port, destination_port, payload);
+                    if parsed.openvpn.is_none() {
+                        parsed.tls = (payload.len() >= 5 && payload[0] == 22)
+                            .then(|| parse_tls_client_hello(payload).ok())
+                            .flatten();
+                        if parsed.tls.is_none() {
+                            parsed.http = parse_http(payload).ok();
+                            if parsed.http.is_none()
+                                && (source_port == UDP_PORT_SIP || destination_port == UDP_PORT_SIP)
+                            {
+                                parsed.sip = parse_sip(payload).ok();
+                            }
                         }
                     }
                 }
@@ -987,9 +997,9 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
     use crate::engine::builtin::{
-        BuiltinPacketParser, FlowKey, OpenVpnOpcode, ParseConfig, ParseWarningCode, SipMessage,
-        SnmpMessage, SnmpPduType, StopLayer, TftpMessage, TransportSegment, UdpAppHint,
-        WireGuardMessageType,
+        BuiltinPacketParser, Dnp3AppFunctionCode, Dnp3FunctionCode, FlowKey, OpenVpnOpcode,
+        ParseConfig, ParseWarningCode, SipMessage, SnmpMessage, SnmpPduType, StopLayer,
+        TftpMessage, TransportSegment, UdpAppHint, WireGuardMessageType,
     };
     use crate::layer::application::http::HttpMessage;
     use crate::layer::network::icmpv6::NdpMessage;
@@ -1201,6 +1211,38 @@ mod tests {
         assert!(tls.alpn.iter().any(|protocol| protocol == "h2"));
         assert!(tls.supported_versions.contains(&0x0304));
         assert!(!tls.cipher_suites.is_empty());
+    }
+
+    #[test]
+    fn parses_dnp3_on_tcp_port_20000() {
+        let payload = [
+            0x05, 0x64, 0x0b, 0xc4, 0x03, 0x00, 0x04, 0x00, 0xef, 0x7a, 0xc1, 0xc1, 0x01, 0x3c,
+            0x02, 0x06, 0xb5, 0x76,
+        ];
+        let frame = build_ethernet_ipv4_tcp_frame(49_152, 20_000, &payload);
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+        let dnp3 = parsed.dnp3.as_ref().expect("DNP3 should be present");
+
+        assert!(matches!(parsed.transport, Some(TransportSegment::Tcp(_))));
+        assert_eq!(dnp3.link_function, Dnp3FunctionCode::UnconfirmedUserData);
+        assert_eq!(dnp3.destination, 3);
+        assert_eq!(dnp3.source, 4);
+        assert_eq!(
+            dnp3.application.map(|application| application.function),
+            Some(Dnp3AppFunctionCode::Read)
+        );
+    }
+
+    #[test]
+    fn does_not_parse_dnp3_off_well_known_port() {
+        let payload = [
+            0x05, 0x64, 0x0b, 0xc4, 0x03, 0x00, 0x04, 0x00, 0xef, 0x7a, 0xc1, 0xc1, 0x01, 0x3c,
+            0x02, 0x06, 0xb5, 0x76,
+        ];
+        let frame = build_ethernet_ipv4_tcp_frame(49_152, 20_001, &payload);
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+
+        assert!(parsed.dnp3.is_none());
     }
 
     #[test]

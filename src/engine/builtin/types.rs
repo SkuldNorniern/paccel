@@ -3,6 +3,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use crate::engine::constants::ethertype_name;
 use crate::layer::application::dhcp::DhcpMessage;
 use crate::layer::application::dhcp6::Dhcp6Message;
+use crate::layer::application::dnp3::Dnp3Message;
 use crate::layer::application::dns::DnsMessage;
 use crate::layer::application::http::HttpMessage;
 use crate::layer::application::ntp::NtpMessage;
@@ -465,6 +466,7 @@ pub struct ParsedPacket {
     pub esp: Option<EspInfo>,
     pub wireguard: Option<WireGuardInfo>,
     pub openvpn: Option<OpenVpnInfo>,
+    pub dnp3: Option<Dnp3Message>,
     pub mpls: Option<MplsInfo>,
     pub lldp: Option<LldpInfo>,
     pub stp: Option<StpBpdu>,
