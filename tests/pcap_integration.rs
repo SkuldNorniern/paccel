@@ -3,9 +3,41 @@
 use std::net::Ipv4Addr;
 
 use paccel::engine::{
-    BuiltinPacketParser, TransportSegment, UdpAppHint, iter_capture_frames, parse_capture_frames,
-    parse_pcap_frames,
+    BuiltinPacketParser, OpenVpnOpcode, TransportSegment, UdpAppHint, iter_capture_frames,
+    parse_capture_frames, parse_pcap_frames,
 };
+
+#[test]
+fn openvpn_udp_fixture_first_five_frames_match_tshark() {
+    let bytes = include_bytes!("pcaps/protocol-gaps/openvpn_udp_tls-auth.pcapng");
+    let mut frames = iter_capture_frames(bytes).expect("pcapng should parse");
+    let expected = [
+        (
+            OpenVpnOpcode::ControlHardResetClientV2,
+            0x8138_1462_1d67_462d,
+        ),
+        (
+            OpenVpnOpcode::ControlHardResetServerV2,
+            0x5737_14a9_17f3_6048,
+        ),
+        (OpenVpnOpcode::AckV1, 0x8138_1462_1d67_462d),
+        (OpenVpnOpcode::ControlV1, 0x8138_1462_1d67_462d),
+        (OpenVpnOpcode::ControlV1, 0x8138_1462_1d67_462d),
+    ];
+
+    for (expected_opcode, expected_session_id) in expected {
+        let frame = frames
+            .next()
+            .expect("capture should contain five frames")
+            .expect("capture frame should parse");
+        let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
+            .expect("packet should parse");
+        let openvpn = parsed.openvpn.as_ref().expect("openvpn should be present");
+        assert_eq!(openvpn.opcode, expected_opcode);
+        assert_eq!(openvpn.session_id, Some(expected_session_id));
+        assert!(parsed.udp_hints.contains(&UdpAppHint::OpenVpn));
+    }
+}
 
 // ── DNS query ──────────────────────────────────────────────────────────────
 
