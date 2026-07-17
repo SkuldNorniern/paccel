@@ -6,6 +6,9 @@ mod types;
 use crate::engine::constants::{ethertype, ip_proto};
 use crate::layer::LayerError;
 pub use crate::layer::application::dhcp6::{Dhcp6Message, Dhcp6Option};
+pub use crate::layer::application::dnp3::{
+    Dnp3AppFunctionCode, Dnp3Application, Dnp3FunctionCode, Dnp3Message, Dnp3Transport,
+};
 pub use crate::layer::application::radius::{RadiusAttribute, RadiusMessage};
 pub use crate::layer::application::rtp::RtpHeader;
 pub use crate::layer::application::sip::SipMessage;
@@ -696,6 +699,7 @@ fn apply_transport_parse(parsed: &mut ParsedPacket, transport_parse: transport::
     parsed.esp = transport_parse.esp;
     parsed.wireguard = transport_parse.wireguard;
     parsed.openvpn = transport_parse.openvpn;
+    parsed.dnp3 = transport_parse.dnp3;
     parsed.dns = transport_parse.dns;
     parsed.dhcp = transport_parse.dhcp;
     parsed.dhcp6 = transport_parse.dhcp6;

@@ -3,9 +3,31 @@
 use std::net::Ipv4Addr;
 
 use paccel::engine::{
-    BuiltinPacketParser, OpenVpnOpcode, SipMessage, SnmpMessage, SnmpPduType, TftpMessage,
-    TransportSegment, UdpAppHint, iter_capture_frames, parse_capture_frames, parse_pcap_frames,
+    BuiltinPacketParser, Dnp3AppFunctionCode, Dnp3FunctionCode, OpenVpnOpcode, SipMessage,
+    SnmpMessage, SnmpPduType, TftpMessage, TransportSegment, UdpAppHint, iter_capture_frames,
+    parse_capture_frames, parse_pcap_frames,
 };
+
+#[test]
+fn dnp3_fixture_frame_four_matches_tshark() {
+    let bytes = include_bytes!("pcaps/protocol-gaps/dnp3_read.pcap");
+    let frame = iter_capture_frames(bytes)
+        .expect("pcap should parse")
+        .nth(3)
+        .expect("capture should contain frame 4")
+        .expect("capture frame should parse");
+    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
+        .expect("packet should parse");
+    let dnp3 = parsed.dnp3.as_ref().expect("DNP3 should be present");
+
+    assert_eq!(dnp3.link_function, Dnp3FunctionCode::UnconfirmedUserData);
+    assert_eq!(dnp3.destination, 3);
+    assert_eq!(dnp3.source, 4);
+    assert_eq!(
+        dnp3.application.map(|application| application.function),
+        Some(Dnp3AppFunctionCode::Read)
+    );
+}
 
 #[test]
 fn sip_fixture_frame_one_matches_tshark() {

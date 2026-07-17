@@ -11,12 +11,13 @@ pub mod session;
 pub mod tree;
 
 pub use builtin::{
-    AhInfo, BuiltinPacketParser, Dhcp6Message, Dhcp6Option, EspInfo, EthernetFrame, FlowKey,
-    GeneveInfo, GreInfo, IgmpInfo, L2tpInfo, MplsInfo, MplsLabel, OpenVpnInfo, OpenVpnOpcode,
-    ParseConfig, ParseMode, ParseWarning, ParseWarningCode, ParseWarningProtocol,
-    ParseWarningSubcode, ParsedPacket, PppoeInfo, RadiusAttribute, RadiusMessage, RtpHeader,
-    SipMessage, SnmpMessage, SnmpPduType, StopLayer, TcpOptionsParsed, TftpMessage,
-    TransportSegment, UdpAppHint, VxlanInfo, WireGuardInfo, WireGuardMessageType,
+    AhInfo, BuiltinPacketParser, Dhcp6Message, Dhcp6Option, Dnp3AppFunctionCode, Dnp3Application,
+    Dnp3FunctionCode, Dnp3Message, Dnp3Transport, EspInfo, EthernetFrame, FlowKey, GeneveInfo,
+    GreInfo, IgmpInfo, L2tpInfo, MplsInfo, MplsLabel, OpenVpnInfo, OpenVpnOpcode, ParseConfig,
+    ParseMode, ParseWarning, ParseWarningCode, ParseWarningProtocol, ParseWarningSubcode,
+    ParsedPacket, PppoeInfo, RadiusAttribute, RadiusMessage, RtpHeader, SipMessage, SnmpMessage,
+    SnmpPduType, StopLayer, TcpOptionsParsed, TftpMessage, TransportSegment, UdpAppHint, VxlanInfo,
+    WireGuardInfo, WireGuardMessageType,
 };
 pub use constants::{ethertype_name, ip_protocol_name};
 pub use context::{DecodeConfig, DecodeContext, DecodeMode};
