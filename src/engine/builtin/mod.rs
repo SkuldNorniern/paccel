@@ -14,10 +14,10 @@ use self::network::{parse_ipv4_header, parse_ipv6_header, resolve_ipv6_transport
 use self::transport::parse_transport;
 
 pub use self::types::{
-    AhInfo, EspInfo, EthernetFrame, GeneveInfo, GreInfo, IgmpInfo, L2tpInfo, LldpInfo, LldpTlv,
-    MplsInfo, MplsLabel, ParseConfig, ParseMode, ParseWarning, ParseWarningCode,
+    AhInfo, EspInfo, EthernetFrame, FlowKey, GeneveInfo, GreInfo, IgmpInfo, L2tpInfo, LldpInfo,
+    LldpTlv, MplsInfo, MplsLabel, ParseConfig, ParseMode, ParseWarning, ParseWarningCode,
     ParseWarningProtocol, ParseWarningSubcode, ParsedPacket, PppoeInfo, SctpChunk, SctpInfo,
-    StpBpdu, TcpOptionsParsed, TransportSegment, UdpAppHint, VxlanInfo, WireGuardInfo,
+    StopLayer, StpBpdu, TcpOptionsParsed, TransportSegment, UdpAppHint, VxlanInfo, WireGuardInfo,
     WireGuardMessageType,
 };
 
@@ -209,9 +209,14 @@ impl BuiltinPacketParser {
                     });
                 }
 
+                if config.stop_after == StopLayer::Network {
+                    parsed.ipv4 = Some(ipv4);
+                    return Ok(parsed);
+                }
+
                 let l4_end = total_len.min(l3_bytes.len());
                 let l4_bytes = &l3_bytes[ip_header_len..l4_end];
-                let transport_parse = parse_transport(ipv4.protocol, l4_bytes)?;
+                let transport_parse = parse_transport(ipv4.protocol, l4_bytes, config)?;
                 apply_transport_parse(&mut parsed, transport_parse);
                 recurse_transport_tunnel(
                     &mut parsed,
@@ -243,6 +248,11 @@ impl BuiltinPacketParser {
                 }
 
                 let l4_end = declared_l4_end.min(l3_bytes.len());
+                if config.stop_after == StopLayer::Network {
+                    parsed.ipv6 = Some(ipv6);
+                    return Ok(parsed);
+                }
+
                 let ipv6_payload = &l3_bytes[..l4_end];
                 let state = resolve_ipv6_transport(
                     ipv6_payload,
@@ -277,7 +287,7 @@ impl BuiltinPacketParser {
 
                 if !state.non_initial_fragment && !state.depth_limit_hit {
                     let l4_bytes = &ipv6_payload[state.l4_offset..];
-                    let transport_parse = parse_transport(state.next_header, l4_bytes)?;
+                    let transport_parse = parse_transport(state.next_header, l4_bytes, config)?;
                     apply_transport_parse(&mut parsed, transport_parse);
                     recurse_transport_tunnel(
                         &mut parsed,

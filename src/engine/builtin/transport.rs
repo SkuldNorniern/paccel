@@ -14,8 +14,9 @@ use crate::layer::transport::tcp::{TcpFlags, TcpHeader};
 use crate::layer::transport::udp::UdpHeader;
 
 use super::types::{
-    AhInfo, EspInfo, GeneveInfo, GreInfo, IgmpInfo, L2tpInfo, SctpChunk, SctpInfo,
-    TcpOptionsParsed, TransportSegment, UdpAppHint, VxlanInfo, WireGuardInfo, WireGuardMessageType,
+    AhInfo, EspInfo, GeneveInfo, GreInfo, IgmpInfo, L2tpInfo, ParseConfig, SctpChunk, SctpInfo,
+    StopLayer, TcpOptionsParsed, TransportSegment, UdpAppHint, VxlanInfo, WireGuardInfo,
+    WireGuardMessageType,
 };
 
 const UDP_HEADER_LEN: usize = 8;
@@ -56,10 +57,10 @@ pub(super) struct TransportParse {
 }
 
 impl TransportParse {
-    fn with_tcp(tcp: TcpHeader, tcp_options: TcpOptionsParsed) -> Self {
+    fn with_tcp(tcp: TcpHeader, tcp_options: Option<TcpOptionsParsed>) -> Self {
         Self {
             transport: Some(TransportSegment::Tcp(tcp)),
-            tcp_options: Some(tcp_options),
+            tcp_options,
             ..Self::default()
         }
     }
@@ -115,34 +116,42 @@ impl TransportParse {
     }
 }
 
-pub(super) fn parse_transport(protocol: u8, l4_bytes: &[u8]) -> Result<TransportParse, LayerError> {
+pub(super) fn parse_transport(
+    protocol: u8,
+    l4_bytes: &[u8],
+    config: ParseConfig,
+) -> Result<TransportParse, LayerError> {
     match protocol {
         ip_proto::TCP => {
-            let tcp = parse_tcp_header(l4_bytes)?;
+            let parse_application = config.stop_after == StopLayer::Application;
+            let tcp = parse_tcp_header(l4_bytes, parse_application)?;
             let header_len = usize::from(tcp.data_offset) * 4;
-            let tcp_options = tcp
-                .options
-                .as_deref()
-                .map(parse_tcp_options)
-                .unwrap_or_default();
-            let payload = &l4_bytes[header_len..];
-            let tls = (payload.len() >= 5 && payload[0] == 22)
-                .then(|| parse_tls_client_hello(payload).ok())
-                .flatten();
+            let tcp_options = parse_application.then(|| {
+                tcp.options
+                    .as_deref()
+                    .map(parse_tcp_options)
+                    .unwrap_or_default()
+            });
             let mut parsed = TransportParse::with_tcp(tcp, tcp_options);
-            parsed.tls = tls;
-            if parsed.tls.is_none() {
-                parsed.http = parse_http(payload).ok();
+            if parse_application {
+                let payload = &l4_bytes[header_len..];
+                parsed.tls = (payload.len() >= 5 && payload[0] == 22)
+                    .then(|| parse_tls_client_hello(payload).ok())
+                    .flatten();
+                if parsed.tls.is_none() {
+                    parsed.http = parse_http(payload).ok();
+                }
             }
             Ok(parsed)
         }
-        ip_proto::UDP => parse_udp_transport(l4_bytes),
+        ip_proto::UDP => parse_udp_transport(l4_bytes, config),
         ip_proto::ICMP => {
             let icmp = parse_icmp_minimal(l4_bytes)?;
             Ok(TransportParse::with_icmp(icmp))
         }
         ip_proto::ICMPV6 => {
-            let (icmpv6, ndp) = parse_icmpv6_minimal(l4_bytes)?;
+            let (icmpv6, ndp) =
+                parse_icmpv6_minimal(l4_bytes, config.stop_after == StopLayer::Application)?;
             Ok(TransportParse::with_icmpv6(icmpv6, ndp))
         }
         ip_proto::IGMP => {
@@ -169,7 +178,7 @@ pub(super) fn parse_transport(protocol: u8, l4_bytes: &[u8]) -> Result<Transport
     }
 }
 
-fn parse_udp_transport(l4_bytes: &[u8]) -> Result<TransportParse, LayerError> {
+fn parse_udp_transport(l4_bytes: &[u8], config: ParseConfig) -> Result<TransportParse, LayerError> {
     let udp = parse_udp_header(l4_bytes)?;
     let udp_end = (udp.length as usize).min(l4_bytes.len());
     let app = &l4_bytes[UDP_HEADER_LEN..udp_end];
@@ -178,16 +187,22 @@ fn parse_udp_transport(l4_bytes: &[u8]) -> Result<TransportParse, LayerError> {
     let mut dhcp = None;
     let mut ntp = None;
 
-    maybe_probe_dns_udp(&udp, app, &mut hints, &mut dns);
-    maybe_probe_mdns_udp(&udp, app, &mut hints, &mut dns);
-    maybe_probe_dhcp_udp(&udp, app, &mut hints, &mut dhcp);
-    maybe_probe_ntp_udp(&udp, app, &mut hints, &mut ntp);
-    let wireguard = maybe_classify_wireguard_udp(&udp, app, &mut hints);
+    let parse_application = config.stop_after == StopLayer::Application;
+    let wireguard = if parse_application {
+        maybe_probe_dns_udp(&udp, app, &mut hints, &mut dns);
+        maybe_probe_mdns_udp(&udp, app, &mut hints, &mut dns);
+        maybe_probe_dhcp_udp(&udp, app, &mut hints, &mut dhcp);
+        maybe_probe_ntp_udp(&udp, app, &mut hints, &mut ntp);
+        maybe_classify_wireguard_udp(&udp, app, &mut hints)
+    } else {
+        None
+    };
 
     let vxlan = maybe_parse_vxlan(&udp, app);
     let geneve = maybe_parse_geneve(&udp, app);
     let l2tp = maybe_parse_l2tp(&udp, app, &mut hints);
-    let quic = (wireguard.is_none()
+    let quic = (parse_application
+        && wireguard.is_none()
         && vxlan.is_none()
         && geneve.is_none()
         && l2tp.is_none()
@@ -337,7 +352,10 @@ fn parse_icmp_minimal(data: &[u8]) -> Result<IcmpHeader, LayerError> {
     })
 }
 
-fn parse_icmpv6_minimal(data: &[u8]) -> Result<(Icmpv6Header, Option<NdpMessage>), LayerError> {
+fn parse_icmpv6_minimal(
+    data: &[u8],
+    parse_application: bool,
+) -> Result<(Icmpv6Header, Option<NdpMessage>), LayerError> {
     if data.len() < 8 {
         return Err(LayerError::InvalidLength);
     }
@@ -347,7 +365,9 @@ fn parse_icmpv6_minimal(data: &[u8]) -> Result<(Icmpv6Header, Option<NdpMessage>
         checksum: u16::from_be_bytes([data[2], data[3]]),
         rest_of_header: [data[4], data[5], data[6], data[7]],
     };
-    let ndp = parse_ndp(data[0], &data[4..]);
+    let ndp = parse_application
+        .then(|| parse_ndp(data[0], &data[4..]))
+        .flatten();
     Ok((header, ndp))
 }
 
@@ -575,7 +595,7 @@ fn parse_l2tp_minimal(data: &[u8]) -> L2tpInfo {
     }
 }
 
-fn parse_tcp_header(l4_bytes: &[u8]) -> Result<TcpHeader, LayerError> {
+fn parse_tcp_header(l4_bytes: &[u8], parse_options: bool) -> Result<TcpHeader, LayerError> {
     if l4_bytes.len() < 20 {
         return Err(LayerError::InvalidLength);
     }
@@ -611,7 +631,7 @@ fn parse_tcp_header(l4_bytes: &[u8]) -> Result<TcpHeader, LayerError> {
     let window_size = u16::from_be_bytes([l4_bytes[14], l4_bytes[15]]);
     let checksum = u16::from_be_bytes([l4_bytes[16], l4_bytes[17]]);
     let urgent_pointer = u16::from_be_bytes([l4_bytes[18], l4_bytes[19]]);
-    let options = if header_length > 20 {
+    let options = if parse_options && header_length > 20 {
         Some(l4_bytes[20..header_length].to_vec())
     } else {
         None
@@ -708,11 +728,11 @@ fn push_hint_unique(hints: &mut Vec<UdpAppHint>, hint: UdpAppHint) {
 #[cfg(test)]
 #[allow(clippy::cast_possible_truncation)]
 mod tests {
-    use std::net::Ipv6Addr;
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
     use crate::engine::builtin::{
-        BuiltinPacketParser, ParseConfig, ParseWarningCode, TransportSegment, UdpAppHint,
-        WireGuardMessageType,
+        BuiltinPacketParser, FlowKey, ParseConfig, ParseWarningCode, StopLayer, TransportSegment,
+        UdpAppHint, WireGuardMessageType,
     };
     use crate::layer::application::http::HttpMessage;
     use crate::layer::network::icmpv6::NdpMessage;
@@ -876,6 +896,31 @@ mod tests {
         assert!(parsed.ethernet.is_some());
         assert!(parsed.ipv4.is_some());
         assert!(matches!(parsed.transport, Some(TransportSegment::Tcp(_))));
+    }
+
+    #[test]
+    fn flow_key_uses_outer_ipv4_tcp_tuple_and_reverses_it() {
+        let frame = build_ethernet_ipv4_tcp_frame(49152, 443, &[]);
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+        let expected = FlowKey {
+            src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            dst_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            src_port: 49152,
+            dst_port: 443,
+            protocol: 6,
+        };
+
+        assert_eq!(parsed.flow_key(), Some(expected));
+        assert_eq!(
+            parsed.reverse_flow_key(),
+            Some(FlowKey {
+                src_ip: expected.dst_ip,
+                dst_ip: expected.src_ip,
+                src_port: expected.dst_port,
+                dst_port: expected.src_port,
+                protocol: expected.protocol,
+            })
+        );
     }
 
     #[test]
@@ -1051,6 +1096,77 @@ mod tests {
         assert!(matches!(parsed.transport, Some(TransportSegment::Udp(_))));
         assert!(parsed.dns.is_some());
         assert!(parsed.udp_hints.contains(&UdpAppHint::Dns));
+    }
+
+    #[test]
+    fn transport_mode_skips_dns_but_keeps_udp_flow_key() {
+        let dns_query = [
+            0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, b'w',
+            b'w', b'w', 0x07, b'e', b'x', b'a', b'm', b'p', b'l', b'e', 0x03, b'c', b'o', b'm',
+            0x00, 0x00, 0x01, 0x00, 0x01,
+        ];
+        let frame = build_ethernet_ipv4_udp_frame(12345, 53, &dns_query);
+        let parsed = BuiltinPacketParser::parse_with_config(
+            &frame,
+            ParseConfig {
+                stop_after: StopLayer::Transport,
+                ..ParseConfig::default()
+            },
+        )
+        .expect("parse should succeed");
+
+        assert!(parsed.dns.is_none());
+        assert!(parsed.udp_hints.is_empty());
+        assert!(matches!(parsed.transport, Some(TransportSegment::Udp(_))));
+        assert_eq!(
+            parsed.flow_key(),
+            Some(FlowKey {
+                src_ip: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)),
+                dst_ip: IpAddr::V4(Ipv4Addr::new(224, 0, 0, 251)),
+                src_port: 12345,
+                dst_port: 53,
+                protocol: 17,
+            })
+        );
+    }
+
+    #[test]
+    fn default_application_mode_still_parses_dns() {
+        let dns_query = [
+            0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, b'w',
+            b'w', b'w', 0x07, b'e', b'x', b'a', b'm', b'p', b'l', b'e', 0x03, b'c', b'o', b'm',
+            0x00, 0x00, 0x01, 0x00, 0x01,
+        ];
+        let frame = build_ethernet_ipv4_udp_frame(12345, 53, &dns_query);
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+
+        assert!(parsed.dns.is_some());
+    }
+
+    #[test]
+    fn network_mode_stops_after_ipv4_header() {
+        let frame = build_ethernet_ipv4_tcp_frame(49152, 443, &[]);
+        let parsed = BuiltinPacketParser::parse_with_config(
+            &frame,
+            ParseConfig {
+                stop_after: StopLayer::Network,
+                ..ParseConfig::default()
+            },
+        )
+        .expect("parse should succeed");
+
+        assert!(parsed.ipv4.is_some());
+        assert!(parsed.transport.is_none());
+        assert_eq!(
+            parsed.flow_key(),
+            Some(FlowKey {
+                src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+                dst_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+                src_port: 0,
+                dst_port: 0,
+                protocol: 6,
+            })
+        );
     }
 
     #[test]
@@ -1236,6 +1352,35 @@ mod tests {
         assert!(inner.ethernet.is_some());
         assert!(inner.ipv4.is_some());
         assert!(matches!(inner.transport, Some(TransportSegment::Udp(_))));
+    }
+
+    #[test]
+    fn vxlan_flow_key_uses_inner_ipv4_tcp_tuple_in_transport_mode() {
+        let inner = build_ethernet_ipv4_tcp_frame(23456, 8443, &[]);
+        let mut payload = vec![0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 100, 0];
+        payload.extend_from_slice(&inner);
+        let frame = build_ethernet_ipv4_udp_frame(4789, 4789, &payload);
+        let parsed = BuiltinPacketParser::parse_with_config(
+            &frame,
+            ParseConfig {
+                stop_after: StopLayer::Transport,
+                ..ParseConfig::default()
+            },
+        )
+        .expect("parse should succeed");
+
+        assert!(parsed.vxlan.is_some());
+        assert!(parsed.inner.is_some());
+        assert_eq!(
+            parsed.flow_key(),
+            Some(FlowKey {
+                src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+                dst_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+                src_port: 23456,
+                dst_port: 8443,
+                protocol: 6,
+            })
+        );
     }
 
     #[test]
