@@ -9,6 +9,7 @@ pub use crate::layer::application::dhcp6::{Dhcp6Message, Dhcp6Option};
 pub use crate::layer::application::radius::{RadiusAttribute, RadiusMessage};
 pub use crate::layer::application::rtp::RtpHeader;
 pub use crate::layer::application::sip::SipMessage;
+pub use crate::layer::application::snmp::{SnmpMessage, SnmpPduType};
 pub use crate::layer::application::tftp::TftpMessage;
 use crate::layer::datalink::dot11::{parse_dot11, parse_radiotap};
 
@@ -700,6 +701,7 @@ fn apply_transport_parse(parsed: &mut ParsedPacket, transport_parse: transport::
     parsed.dhcp6 = transport_parse.dhcp6;
     parsed.tftp = transport_parse.tftp;
     parsed.radius = transport_parse.radius;
+    parsed.snmp = transport_parse.snmp;
     parsed.ntp = transport_parse.ntp;
     parsed.tls = transport_parse.tls;
     parsed.http = transport_parse.http;

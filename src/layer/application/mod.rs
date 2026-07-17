@@ -7,5 +7,6 @@ pub mod quic;
 pub mod radius;
 pub mod rtp;
 pub mod sip;
+pub mod snmp;
 pub mod tftp;
 pub mod tls;
