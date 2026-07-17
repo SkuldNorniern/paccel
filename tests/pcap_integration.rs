@@ -112,6 +112,24 @@ fn tftp_rrq_fixture_first_frame_matches_tshark() {
     assert!(parsed.udp_hints.contains(&UdpAppHint::Tftp));
 }
 
+#[test]
+fn radius_fixture_frame_one_matches_tshark() {
+    let bytes = include_bytes!("pcaps/protocol-gaps/radius_localhost.pcapng");
+    let frame = iter_capture_frames(bytes)
+        .expect("pcapng should parse")
+        .next()
+        .expect("capture should contain frame 1")
+        .expect("capture frame should parse");
+
+    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
+        .expect("packet should parse");
+    let radius = parsed.radius.as_ref().expect("RADIUS should be present");
+    assert_eq!(radius.code, 1);
+    assert_eq!(radius.identifier, 103);
+    assert_eq!(radius.length, 87);
+    assert!(parsed.udp_hints.contains(&UdpAppHint::Radius));
+}
+
 // ── DNS query ──────────────────────────────────────────────────────────────
 
 #[test]

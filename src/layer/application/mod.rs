@@ -4,6 +4,7 @@ pub mod dns;
 pub mod http;
 pub mod ntp;
 pub mod quic;
+pub mod radius;
 pub mod rtp;
 pub mod sip;
 pub mod tftp;

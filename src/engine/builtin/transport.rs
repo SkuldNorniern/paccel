@@ -8,6 +8,7 @@ use crate::layer::application::dns::{DnsMessage, parse_dns_message};
 use crate::layer::application::http::{HttpMessage, parse_http};
 use crate::layer::application::ntp::{NtpMessage, parse_ntp_message};
 use crate::layer::application::quic::{QuicLongHeader, parse_quic_long_header};
+use crate::layer::application::radius::{RadiusMessage, parse_radius_message};
 use crate::layer::application::rtp::{RtpHeader, parse_rtp};
 use crate::layer::application::sip::{SipMessage, parse_sip};
 use crate::layer::application::tftp::{TftpMessage, parse_tftp_message};
@@ -31,6 +32,10 @@ const UDP_PORT_DHCP_CLIENT: u16 = 68;
 const UDP_PORT_DHCPV6_CLIENT: u16 = 546;
 const UDP_PORT_DHCPV6_SERVER: u16 = 547;
 const UDP_PORT_TFTP: u16 = 69;
+const UDP_PORT_RADIUS_AUTH: u16 = 1812;
+const UDP_PORT_RADIUS_AUTH_LEGACY: u16 = 1645;
+const UDP_PORT_RADIUS_ACCT: u16 = 1813;
+const UDP_PORT_RADIUS_ACCT_LEGACY: u16 = 1646;
 const UDP_PORT_NTP: u16 = 123;
 const UDP_PORT_L2TP: u16 = 1701;
 const UDP_PORT_VXLAN: u16 = 4789;
@@ -61,6 +66,7 @@ pub(super) struct TransportParse {
     pub dhcp: Option<DhcpMessage>,
     pub dhcp6: Option<Dhcp6Message>,
     pub tftp: Option<TftpMessage>,
+    pub radius: Option<RadiusMessage>,
     pub ntp: Option<NtpMessage>,
     pub tls: Option<TlsClientHello>,
     pub http: Option<HttpMessage>,
@@ -211,6 +217,7 @@ fn parse_udp_transport(l4_bytes: &[u8], config: ParseConfig) -> Result<Transport
     let mut dhcp = None;
     let mut dhcp6 = None;
     let mut tftp = None;
+    let mut radius = None;
     let mut ntp = None;
     let mut sip = None;
 
@@ -221,6 +228,7 @@ fn parse_udp_transport(l4_bytes: &[u8], config: ParseConfig) -> Result<Transport
         maybe_probe_dhcp_udp(&udp, app, &mut hints, &mut dhcp);
         maybe_probe_dhcp6_udp(&udp, app, &mut hints, &mut dhcp6);
         maybe_probe_tftp_udp(&udp, app, &mut hints, &mut tftp);
+        maybe_probe_radius_udp(&udp, app, &mut hints, &mut radius);
         maybe_probe_ntp_udp(&udp, app, &mut hints, &mut ntp);
         maybe_probe_sip_udp(&udp, app, &mut hints, &mut sip);
         (
@@ -249,6 +257,7 @@ fn parse_udp_transport(l4_bytes: &[u8], config: ParseConfig) -> Result<Transport
         dhcp.is_some(),
         dhcp6.is_some(),
         tftp.is_some(),
+        radius.is_some(),
         ntp.is_some(),
         sip.is_some(),
         wireguard.is_some(),
@@ -273,6 +282,7 @@ fn parse_udp_transport(l4_bytes: &[u8], config: ParseConfig) -> Result<Transport
         dhcp,
         dhcp6,
         tftp,
+        radius,
         ntp,
         sip,
         rtp,
@@ -381,6 +391,22 @@ fn maybe_probe_tftp_udp(
     if is_udp_port_match(udp, UDP_PORT_TFTP) && likely_tftp_message(payload) {
         push_hint_unique(hints, UdpAppHint::Tftp);
         *tftp = parse_tftp_message(payload).ok();
+    }
+}
+
+fn maybe_probe_radius_udp(
+    udp: &UdpHeader,
+    payload: &[u8],
+    hints: &mut Vec<UdpAppHint>,
+    radius: &mut Option<RadiusMessage>,
+) {
+    let is_radius_port = is_udp_port_match(udp, UDP_PORT_RADIUS_AUTH)
+        || is_udp_port_match(udp, UDP_PORT_RADIUS_AUTH_LEGACY)
+        || is_udp_port_match(udp, UDP_PORT_RADIUS_ACCT)
+        || is_udp_port_match(udp, UDP_PORT_RADIUS_ACCT_LEGACY);
+    if is_radius_port && likely_radius_message(payload) {
+        push_hint_unique(hints, UdpAppHint::Radius);
+        *radius = parse_radius_message(payload).ok();
     }
 }
 
@@ -895,6 +921,20 @@ fn likely_tftp_message(payload: &[u8]) -> bool {
         return false;
     };
     (1..=6).contains(&u16::from_be_bytes([opcode[0], opcode[1]]))
+}
+
+fn likely_radius_message(payload: &[u8]) -> bool {
+    if payload.len() < 20 {
+        return false;
+    }
+
+    let known_code = matches!(
+        payload[0],
+        1 | 2 | 3 | 4 | 5 | 11 | 12 | 13 | 40 | 41 | 42 | 43 | 44 | 45
+    );
+    let length = u16::from_be_bytes([payload[2], payload[3]]);
+
+    known_code && (20..=4096).contains(&length)
 }
 
 fn likely_ntp_message(payload: &[u8]) -> bool {
@@ -1436,6 +1476,26 @@ mod tests {
         let dhcp6 = parsed.dhcp6.as_ref().expect("dhcpv6");
         assert_eq!(dhcp6.msg_type, 1);
         assert_eq!(dhcp6.transaction_id, 0x10_0874);
+    }
+
+    #[test]
+    fn parses_radius_access_request() {
+        let payload = [
+            0x01, 0x67, 0x00, 0x57, 0x40, 0xb6, 0x64, 0xdb, 0xf5, 0xd6, 0x81, 0xb2, 0xad, 0xbd,
+            0x17, 0x69, 0x51, 0x51, 0x18, 0xc8, 0x01, 0x07, 0x73, 0x74, 0x65, 0x76, 0x65, 0x02,
+            0x12, 0xdb, 0xc6, 0xc4, 0xb7, 0x58, 0xbe, 0x14, 0xf0, 0x05, 0xb3, 0x87, 0x7c, 0x9e,
+            0x2f, 0xb6, 0x01, 0x04, 0x06, 0xc0, 0xa8, 0x00, 0x1c, 0x05, 0x06, 0x00, 0x00, 0x00,
+            0x7b, 0x50, 0x12, 0x5f, 0x0f, 0x86, 0x47, 0xe8, 0xc8, 0x9b, 0xd8, 0x81, 0x36, 0x42,
+            0x68, 0xfc, 0xd0, 0x45, 0x32, 0x4f, 0x0c, 0x02, 0x66, 0x00, 0x0a, 0x01, 0x73, 0x74,
+            0x65, 0x76, 0x65,
+        ];
+
+        let frame = build_ethernet_ipv4_udp_frame(49_152, 1812, &payload);
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+        let radius = parsed.radius.as_ref().expect("RADIUS should be present");
+        assert_eq!(radius.code, 1);
+        assert_eq!(radius.identifier, 103);
+        assert!(parsed.udp_hints.contains(&UdpAppHint::Radius));
     }
 
     #[test]
