@@ -2,6 +2,7 @@ use std::net::{IpAddr, Ipv4Addr};
 
 use crate::engine::constants::ethertype_name;
 use crate::layer::application::dhcp::DhcpMessage;
+use crate::layer::application::dhcp6::Dhcp6Message;
 use crate::layer::application::dns::DnsMessage;
 use crate::layer::application::http::HttpMessage;
 use crate::layer::application::ntp::NtpMessage;
@@ -379,6 +380,7 @@ pub enum UdpAppHint {
     Dns,
     Mdns,
     Dhcp,
+    Dhcpv6,
     Ntp,
     L2tp,
     WireGuard,
@@ -391,6 +393,7 @@ impl UdpAppHint {
             Self::Dns => "dns",
             Self::Mdns => "mdns",
             Self::Dhcp => "dhcp",
+            Self::Dhcpv6 => "dhcpv6",
             Self::Ntp => "ntp",
             Self::L2tp => "l2tp",
             Self::WireGuard => "wireguard",
@@ -452,6 +455,7 @@ pub struct ParsedPacket {
     pub stp: Option<StpBpdu>,
     pub dns: Option<DnsMessage>,
     pub dhcp: Option<DhcpMessage>,
+    pub dhcp6: Option<Dhcp6Message>,
     pub ntp: Option<NtpMessage>,
     pub tls: Option<TlsClientHello>,
     pub http: Option<HttpMessage>,
@@ -570,6 +574,7 @@ mod tests {
         assert_eq!(ParseWarningProtocol::Tunnel.as_str(), "tunnel");
         assert_eq!(ParseWarningSubcode::VxlanInner.as_str(), "vxlan-inner");
         assert_eq!(UdpAppHint::L2tp.as_str(), "l2tp");
+        assert_eq!(UdpAppHint::Dhcpv6.as_str(), "dhcpv6");
         assert_eq!(UdpAppHint::WireGuard.as_str(), "wireguard");
         assert_eq!(UdpAppHint::OpenVpn.as_str(), "openvpn");
         assert_eq!(
