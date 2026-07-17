@@ -7,6 +7,7 @@ use crate::layer::application::dns::DnsMessage;
 use crate::layer::application::http::HttpMessage;
 use crate::layer::application::ntp::NtpMessage;
 use crate::layer::application::quic::QuicLongHeader;
+use crate::layer::application::radius::RadiusMessage;
 use crate::layer::application::rtp::RtpHeader;
 use crate::layer::application::sip::SipMessage;
 use crate::layer::application::tftp::TftpMessage;
@@ -385,6 +386,7 @@ pub enum UdpAppHint {
     Dhcp,
     Dhcpv6,
     Tftp,
+    Radius,
     Ntp,
     L2tp,
     WireGuard,
@@ -401,6 +403,7 @@ impl UdpAppHint {
             Self::Dhcp => "dhcp",
             Self::Dhcpv6 => "dhcpv6",
             Self::Tftp => "tftp",
+            Self::Radius => "radius",
             Self::Ntp => "ntp",
             Self::L2tp => "l2tp",
             Self::WireGuard => "wireguard",
@@ -466,6 +469,7 @@ pub struct ParsedPacket {
     pub dhcp: Option<DhcpMessage>,
     pub dhcp6: Option<Dhcp6Message>,
     pub tftp: Option<TftpMessage>,
+    pub radius: Option<RadiusMessage>,
     pub ntp: Option<NtpMessage>,
     pub tls: Option<TlsClientHello>,
     pub http: Option<HttpMessage>,
