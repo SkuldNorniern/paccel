@@ -3,6 +3,7 @@ use std::net::Ipv4Addr;
 use crate::engine::constants::ip_proto;
 use crate::layer::LayerError;
 use crate::layer::application::dhcp::{DhcpMessage, parse_dhcp_message};
+use crate::layer::application::dhcp6::{Dhcp6Message, parse_dhcp6_message};
 use crate::layer::application::dns::{DnsMessage, parse_dns_message};
 use crate::layer::application::http::{HttpMessage, parse_http};
 use crate::layer::application::ntp::{NtpMessage, parse_ntp_message};
@@ -24,6 +25,8 @@ const UDP_PORT_DNS: u16 = 53;
 const UDP_PORT_MDNS: u16 = 5353;
 const UDP_PORT_DHCP_SERVER: u16 = 67;
 const UDP_PORT_DHCP_CLIENT: u16 = 68;
+const UDP_PORT_DHCPV6_CLIENT: u16 = 546;
+const UDP_PORT_DHCPV6_SERVER: u16 = 547;
 const UDP_PORT_NTP: u16 = 123;
 const UDP_PORT_L2TP: u16 = 1701;
 const UDP_PORT_VXLAN: u16 = 4789;
@@ -51,6 +54,7 @@ pub(super) struct TransportParse {
     pub openvpn: Option<OpenVpnInfo>,
     pub dns: Option<DnsMessage>,
     pub dhcp: Option<DhcpMessage>,
+    pub dhcp6: Option<Dhcp6Message>,
     pub ntp: Option<NtpMessage>,
     pub tls: Option<TlsClientHello>,
     pub http: Option<HttpMessage>,
@@ -192,6 +196,7 @@ fn parse_udp_transport(l4_bytes: &[u8], config: ParseConfig) -> Result<Transport
     let mut hints = Vec::new();
     let mut dns = None;
     let mut dhcp = None;
+    let mut dhcp6 = None;
     let mut ntp = None;
 
     let parse_application = config.stop_after == StopLayer::Application;
@@ -199,6 +204,7 @@ fn parse_udp_transport(l4_bytes: &[u8], config: ParseConfig) -> Result<Transport
         maybe_probe_dns_udp(&udp, app, &mut hints, &mut dns);
         maybe_probe_mdns_udp(&udp, app, &mut hints, &mut dns);
         maybe_probe_dhcp_udp(&udp, app, &mut hints, &mut dhcp);
+        maybe_probe_dhcp6_udp(&udp, app, &mut hints, &mut dhcp6);
         maybe_probe_ntp_udp(&udp, app, &mut hints, &mut ntp);
         (
             maybe_classify_wireguard_udp(&udp, app, &mut hints),
@@ -231,6 +237,7 @@ fn parse_udp_transport(l4_bytes: &[u8], config: ParseConfig) -> Result<Transport
         openvpn,
         dns,
         dhcp,
+        dhcp6,
         ntp,
         quic,
         hints,
@@ -277,6 +284,20 @@ fn maybe_probe_dhcp_udp(
     if is_dhcp_port && likely_dhcp_message(payload) {
         push_hint_unique(hints, UdpAppHint::Dhcp);
         *dhcp = parse_dhcp_message(payload).ok();
+    }
+}
+
+fn maybe_probe_dhcp6_udp(
+    udp: &UdpHeader,
+    payload: &[u8],
+    hints: &mut Vec<UdpAppHint>,
+    dhcp6: &mut Option<Dhcp6Message>,
+) {
+    let is_dhcp6_port = is_udp_port_match(udp, UDP_PORT_DHCPV6_CLIENT)
+        || is_udp_port_match(udp, UDP_PORT_DHCPV6_SERVER);
+    if is_dhcp6_port && likely_dhcp6_message(payload) {
+        push_hint_unique(hints, UdpAppHint::Dhcpv6);
+        *dhcp6 = parse_dhcp6_message(payload).ok();
     }
 }
 
@@ -782,6 +803,10 @@ fn likely_dhcp_message(payload: &[u8]) -> bool {
     payload[236..240] == [99, 130, 83, 99]
 }
 
+fn likely_dhcp6_message(payload: &[u8]) -> bool {
+    payload.len() >= 4 && (1..=13).contains(&payload[0])
+}
+
 fn likely_ntp_message(payload: &[u8]) -> bool {
     if payload.len() < 48 {
         return false;
@@ -839,6 +864,17 @@ mod tests {
         frame.extend_from_slice(udp_payload);
 
         frame
+    }
+
+    fn build_ethernet_ipv6_udp_frame(src_port: u16, dst_port: u16, udp_payload: &[u8]) -> Vec<u8> {
+        let udp_len = (8 + udp_payload.len()) as u16;
+        let mut udp = Vec::with_capacity(usize::from(udp_len));
+        udp.extend_from_slice(&src_port.to_be_bytes());
+        udp.extend_from_slice(&dst_port.to_be_bytes());
+        udp.extend_from_slice(&udp_len.to_be_bytes());
+        udp.extend_from_slice(&[0, 0]);
+        udp.extend_from_slice(udp_payload);
+        build_ethernet_ipv6_l4_frame(17, &udp)
     }
 
     fn build_ethernet_ipv4_tcp_frame(src_port: u16, dst_port: u16, tcp_payload: &[u8]) -> Vec<u8> {
@@ -1255,6 +1291,20 @@ mod tests {
         let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
         assert!(parsed.udp_hints.contains(&UdpAppHint::Dhcp));
         assert_eq!(parsed.dhcp.as_ref().expect("dhcp").message_type, Some(1));
+    }
+
+    #[test]
+    fn parses_dhcp6_solicit() {
+        let payload = [
+            1, 0x10, 0x08, 0x74, 0, 1, 0, 14, 0, 1, 0, 1, 0x2a, 0x2b, 0x2c, 0x2d, 0, 1, 2, 3, 4, 5,
+        ];
+
+        let frame = build_ethernet_ipv6_udp_frame(546, 547, &payload);
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+        assert!(parsed.udp_hints.contains(&UdpAppHint::Dhcpv6));
+        let dhcp6 = parsed.dhcp6.as_ref().expect("dhcpv6");
+        assert_eq!(dhcp6.msg_type, 1);
+        assert_eq!(dhcp6.transaction_id, 0x10_0874);
     }
 
     #[test]
