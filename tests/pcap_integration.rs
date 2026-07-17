@@ -3,9 +3,46 @@
 use std::net::Ipv4Addr;
 
 use paccel::engine::{
-    BuiltinPacketParser, OpenVpnOpcode, TftpMessage, TransportSegment, UdpAppHint,
+    BuiltinPacketParser, OpenVpnOpcode, SipMessage, TftpMessage, TransportSegment, UdpAppHint,
     iter_capture_frames, parse_capture_frames, parse_pcap_frames,
 };
+
+#[test]
+fn sip_fixture_frame_one_matches_tshark() {
+    let bytes = include_bytes!("pcaps/protocol-gaps/sip-rtp-g711.pcap");
+    let frame = iter_capture_frames(bytes)
+        .expect("pcap should parse")
+        .next()
+        .expect("capture should contain frame 1")
+        .expect("capture frame should parse");
+    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
+        .expect("packet should parse");
+
+    assert!(matches!(
+        parsed.sip,
+        Some(SipMessage::Request { ref method, .. }) if method == "INVITE"
+    ));
+    assert!(parsed.udp_hints.contains(&UdpAppHint::Sip));
+}
+
+#[test]
+fn rtp_fixture_frame_six_matches_tshark() {
+    let bytes = include_bytes!("pcaps/protocol-gaps/sip-rtp-g711.pcap");
+    let frame = iter_capture_frames(bytes)
+        .expect("pcap should parse")
+        .nth(5)
+        .expect("capture should contain frame 6")
+        .expect("capture frame should parse");
+    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
+        .expect("packet should parse");
+    let rtp = parsed.rtp.as_ref().expect("RTP should be present");
+
+    assert_eq!(rtp.payload_type, 0);
+    assert_eq!(rtp.sequence_number, 37_595);
+    assert_eq!(rtp.timestamp, 160);
+    assert_eq!(rtp.ssrc, 0x343d_a99b);
+    assert!(parsed.udp_hints.contains(&UdpAppHint::Rtp));
+}
 
 #[test]
 fn openvpn_udp_fixture_first_five_frames_match_tshark() {

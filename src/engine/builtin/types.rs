@@ -7,6 +7,8 @@ use crate::layer::application::dns::DnsMessage;
 use crate::layer::application::http::HttpMessage;
 use crate::layer::application::ntp::NtpMessage;
 use crate::layer::application::quic::QuicLongHeader;
+use crate::layer::application::rtp::RtpHeader;
+use crate::layer::application::sip::SipMessage;
 use crate::layer::application::tftp::TftpMessage;
 use crate::layer::application::tls::TlsClientHello;
 use crate::layer::datalink::arp::ArpPacket;
@@ -387,6 +389,8 @@ pub enum UdpAppHint {
     L2tp,
     WireGuard,
     OpenVpn,
+    Sip,
+    Rtp,
 }
 
 impl UdpAppHint {
@@ -401,6 +405,8 @@ impl UdpAppHint {
             Self::L2tp => "l2tp",
             Self::WireGuard => "wireguard",
             Self::OpenVpn => "openvpn",
+            Self::Sip => "sip",
+            Self::Rtp => "rtp",
         }
     }
 }
@@ -463,6 +469,8 @@ pub struct ParsedPacket {
     pub ntp: Option<NtpMessage>,
     pub tls: Option<TlsClientHello>,
     pub http: Option<HttpMessage>,
+    pub sip: Option<SipMessage>,
+    pub rtp: Option<RtpHeader>,
     pub quic: Option<QuicLongHeader>,
     pub udp_hints: Vec<UdpAppHint>,
     pub warnings: Vec<ParseWarning>,

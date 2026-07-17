@@ -4,5 +4,7 @@ pub mod dns;
 pub mod http;
 pub mod ntp;
 pub mod quic;
+pub mod rtp;
+pub mod sip;
 pub mod tftp;
 pub mod tls;
