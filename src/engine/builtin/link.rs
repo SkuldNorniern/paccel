@@ -163,7 +163,12 @@ pub(super) fn parse_link_with_linktype(
             };
             Ok(synthetic_link_frame(protocol, 4))
         }
-        Some(101) => {
+        // 101 = LINKTYPE_RAW (modern cross-platform numbering, used by
+        // pcap-ng and most current tools). 12 = DLT_RAW on BSD-derived
+        // platforms (older libpcap headers) - same wire format, different
+        // historical numbering; some tools (older tcpdump/libpcap builds)
+        // still write 12 into the pcap global header for raw IP captures.
+        Some(101 | 12) => {
             let protocol = match raw.first().map(|byte| byte >> 4) {
                 Some(4) => ethertype::IPV4,
                 Some(6) => ethertype::IPV6,
@@ -392,6 +397,18 @@ mod tests {
         let frame = ethernet_ipv4_udp_frame();
         let parsed = BuiltinPacketParser::parse_with_linktype(&frame[14..], 101)
             .expect("RAW frame should parse");
+
+        assert!(parsed.ipv4.is_some());
+        assert!(matches!(parsed.transport, Some(TransportSegment::Udp(_))));
+    }
+
+    #[test]
+    fn parses_legacy_dlt_raw_ipv4_udp() {
+        // DLT_RAW = 12 on BSD-derived platforms; same wire format as
+        // LINKTYPE_RAW = 101, just an older numbering some tools still emit.
+        let frame = ethernet_ipv4_udp_frame();
+        let parsed = BuiltinPacketParser::parse_with_linktype(&frame[14..], 12)
+            .expect("legacy DLT_RAW frame should parse");
 
         assert!(parsed.ipv4.is_some());
         assert!(matches!(parsed.transport, Some(TransportSegment::Udp(_))));
