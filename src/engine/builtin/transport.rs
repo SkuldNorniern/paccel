@@ -11,6 +11,7 @@ use crate::layer::application::quic::{QuicLongHeader, parse_quic_long_header};
 use crate::layer::application::radius::{RadiusMessage, parse_radius_message};
 use crate::layer::application::rtp::{RtpHeader, parse_rtp};
 use crate::layer::application::sip::{SipMessage, parse_sip};
+use crate::layer::application::snmp::{SnmpMessage, parse_snmp_message};
 use crate::layer::application::tftp::{TftpMessage, parse_tftp_message};
 use crate::layer::application::tls::{TlsClientHello, parse_tls_client_hello};
 use crate::layer::network::icmp::IcmpHeader;
@@ -32,6 +33,8 @@ const UDP_PORT_DHCP_CLIENT: u16 = 68;
 const UDP_PORT_DHCPV6_CLIENT: u16 = 546;
 const UDP_PORT_DHCPV6_SERVER: u16 = 547;
 const UDP_PORT_TFTP: u16 = 69;
+const UDP_PORT_SNMP: u16 = 161;
+const UDP_PORT_SNMP_TRAP: u16 = 162;
 const UDP_PORT_RADIUS_AUTH: u16 = 1812;
 const UDP_PORT_RADIUS_AUTH_LEGACY: u16 = 1645;
 const UDP_PORT_RADIUS_ACCT: u16 = 1813;
@@ -67,6 +70,7 @@ pub(super) struct TransportParse {
     pub dhcp6: Option<Dhcp6Message>,
     pub tftp: Option<TftpMessage>,
     pub radius: Option<RadiusMessage>,
+    pub snmp: Option<SnmpMessage>,
     pub ntp: Option<NtpMessage>,
     pub tls: Option<TlsClientHello>,
     pub http: Option<HttpMessage>,
@@ -218,6 +222,7 @@ fn parse_udp_transport(l4_bytes: &[u8], config: ParseConfig) -> Result<Transport
     let mut dhcp6 = None;
     let mut tftp = None;
     let mut radius = None;
+    let mut snmp = None;
     let mut ntp = None;
     let mut sip = None;
 
@@ -229,6 +234,7 @@ fn parse_udp_transport(l4_bytes: &[u8], config: ParseConfig) -> Result<Transport
         maybe_probe_dhcp6_udp(&udp, app, &mut hints, &mut dhcp6);
         maybe_probe_tftp_udp(&udp, app, &mut hints, &mut tftp);
         maybe_probe_radius_udp(&udp, app, &mut hints, &mut radius);
+        maybe_probe_snmp_udp(&udp, app, &mut hints, &mut snmp);
         maybe_probe_ntp_udp(&udp, app, &mut hints, &mut ntp);
         maybe_probe_sip_udp(&udp, app, &mut hints, &mut sip);
         (
@@ -258,6 +264,7 @@ fn parse_udp_transport(l4_bytes: &[u8], config: ParseConfig) -> Result<Transport
         dhcp6.is_some(),
         tftp.is_some(),
         radius.is_some(),
+        snmp.is_some(),
         ntp.is_some(),
         sip.is_some(),
         wireguard.is_some(),
@@ -283,6 +290,7 @@ fn parse_udp_transport(l4_bytes: &[u8], config: ParseConfig) -> Result<Transport
         dhcp6,
         tftp,
         radius,
+        snmp,
         ntp,
         sip,
         rtp,
@@ -407,6 +415,20 @@ fn maybe_probe_radius_udp(
     if is_radius_port && likely_radius_message(payload) {
         push_hint_unique(hints, UdpAppHint::Radius);
         *radius = parse_radius_message(payload).ok();
+    }
+}
+
+fn maybe_probe_snmp_udp(
+    udp: &UdpHeader,
+    payload: &[u8],
+    hints: &mut Vec<UdpAppHint>,
+    snmp: &mut Option<SnmpMessage>,
+) {
+    let is_snmp_port =
+        is_udp_port_match(udp, UDP_PORT_SNMP) || is_udp_port_match(udp, UDP_PORT_SNMP_TRAP);
+    if is_snmp_port && likely_snmp_message(payload) {
+        push_hint_unique(hints, UdpAppHint::Snmp);
+        *snmp = parse_snmp_message(payload).ok();
     }
 }
 
@@ -937,6 +959,10 @@ fn likely_radius_message(payload: &[u8]) -> bool {
     known_code && (20..=4096).contains(&length)
 }
 
+fn likely_snmp_message(payload: &[u8]) -> bool {
+    payload.len() >= 2 && payload[0] == 0x30
+}
+
 fn likely_ntp_message(payload: &[u8]) -> bool {
     if payload.len() < 48 {
         return false;
@@ -962,7 +988,8 @@ mod tests {
 
     use crate::engine::builtin::{
         BuiltinPacketParser, FlowKey, OpenVpnOpcode, ParseConfig, ParseWarningCode, SipMessage,
-        StopLayer, TftpMessage, TransportSegment, UdpAppHint, WireGuardMessageType,
+        SnmpMessage, SnmpPduType, StopLayer, TftpMessage, TransportSegment, UdpAppHint,
+        WireGuardMessageType,
     };
     use crate::layer::application::http::HttpMessage;
     use crate::layer::network::icmpv6::NdpMessage;
@@ -1496,6 +1523,33 @@ mod tests {
         assert_eq!(radius.code, 1);
         assert_eq!(radius.identifier, 103);
         assert!(parsed.udp_hints.contains(&UdpAppHint::Radius));
+    }
+
+    #[test]
+    fn parses_snmp_v3_get_request() {
+        let payload = [
+            0x30, 0x4b, 0x02, 0x01, 0x03, 0x30, 0x11, 0x02, 0x04, 0x30, 0xf6, 0xf3, 0xd4, 0x02,
+            0x03, 0x00, 0xff, 0xe3, 0x04, 0x01, 0x04, 0x02, 0x01, 0x03, 0x04, 0x10, 0x30, 0x0e,
+            0x04, 0x00, 0x02, 0x01, 0x00, 0x02, 0x01, 0x00, 0x04, 0x00, 0x04, 0x00, 0x04, 0x00,
+            0x30, 0x21, 0x04, 0x0d, 0x80, 0x00, 0x1f, 0x88, 0x80, 0x59, 0xdc, 0x48, 0x61, 0x45,
+            0xa2, 0x63, 0x22, 0x04, 0x00, 0xa0, 0x0e, 0x02, 0x04, 0x7d, 0x0e, 0x08, 0x2e, 0x02,
+            0x01, 0x00, 0x02, 0x01, 0x00, 0x30, 0x00,
+        ];
+
+        let frame = build_ethernet_ipv4_udp_frame(49_152, 161, &payload);
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+        assert!(matches!(
+            parsed.snmp,
+            Some(SnmpMessage::V3 {
+                msg_id: 821_490_644,
+                msg_max_size: 65_507,
+                msg_flags: 0x04,
+                pdu_type: Some(SnmpPduType::GetRequest),
+                request_id: Some(2_098_071_598),
+                ..
+            })
+        ));
+        assert!(parsed.udp_hints.contains(&UdpAppHint::Snmp));
     }
 
     #[test]

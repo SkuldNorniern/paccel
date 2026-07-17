@@ -3,8 +3,8 @@
 use std::net::Ipv4Addr;
 
 use paccel::engine::{
-    BuiltinPacketParser, OpenVpnOpcode, SipMessage, TftpMessage, TransportSegment, UdpAppHint,
-    iter_capture_frames, parse_capture_frames, parse_pcap_frames,
+    BuiltinPacketParser, OpenVpnOpcode, SipMessage, SnmpMessage, SnmpPduType, TftpMessage,
+    TransportSegment, UdpAppHint, iter_capture_frames, parse_capture_frames, parse_pcap_frames,
 };
 
 #[test]
@@ -128,6 +128,34 @@ fn radius_fixture_frame_one_matches_tshark() {
     assert_eq!(radius.identifier, 103);
     assert_eq!(radius.length, 87);
     assert!(parsed.udp_hints.contains(&UdpAppHint::Radius));
+}
+
+#[test]
+fn snmp_v3_fixture_frame_one_matches_tshark() {
+    let bytes = include_bytes!("pcaps/protocol-gaps/snmp_usm.pcap");
+    let frame = iter_capture_frames(bytes)
+        .expect("pcap should parse")
+        .next()
+        .expect("capture should contain frame 1")
+        .expect("capture frame should parse");
+
+    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
+        .expect("packet should parse");
+    assert!(matches!(
+        parsed.snmp,
+        Some(SnmpMessage::V3 {
+            msg_id: 821_490_644,
+            msg_max_size: 65_507,
+            msg_flags: 0x04,
+            reportable: true,
+            encrypted: false,
+            authenticated: false,
+            msg_security_model: 3,
+            pdu_type: Some(SnmpPduType::GetRequest),
+            request_id: Some(2_098_071_598),
+        })
+    ));
+    assert!(parsed.udp_hints.contains(&UdpAppHint::Snmp));
 }
 
 // ── DNS query ──────────────────────────────────────────────────────────────

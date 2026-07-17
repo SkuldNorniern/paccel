@@ -15,8 +15,8 @@ pub use builtin::{
     GeneveInfo, GreInfo, IgmpInfo, L2tpInfo, MplsInfo, MplsLabel, OpenVpnInfo, OpenVpnOpcode,
     ParseConfig, ParseMode, ParseWarning, ParseWarningCode, ParseWarningProtocol,
     ParseWarningSubcode, ParsedPacket, PppoeInfo, RadiusAttribute, RadiusMessage, RtpHeader,
-    SipMessage, StopLayer, TcpOptionsParsed, TftpMessage, TransportSegment, UdpAppHint, VxlanInfo,
-    WireGuardInfo, WireGuardMessageType,
+    SipMessage, SnmpMessage, SnmpPduType, StopLayer, TcpOptionsParsed, TftpMessage,
+    TransportSegment, UdpAppHint, VxlanInfo, WireGuardInfo, WireGuardMessageType,
 };
 pub use constants::{ethertype_name, ip_protocol_name};
 pub use context::{DecodeConfig, DecodeContext, DecodeMode};
