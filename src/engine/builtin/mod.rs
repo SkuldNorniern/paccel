@@ -11,6 +11,7 @@ pub use crate::layer::application::dhcp6::{Dhcp6Message, Dhcp6Option};
 pub use crate::layer::application::dnp3::{
     Dnp3AppFunctionCode, Dnp3Application, Dnp3FunctionCode, Dnp3Message, Dnp3Transport,
 };
+pub use crate::layer::application::kerberos::{KerberosMessage, KerberosMessageType};
 pub use crate::layer::application::ldap::{LdapMessage, LdapProtocolOp};
 pub use crate::layer::application::modbus::ModbusMessage;
 pub use crate::layer::application::mqtt::{MqttMessage, MqttPacketType};
@@ -724,6 +725,7 @@ fn apply_transport_parse(parsed: &mut ParsedPacket, transport_parse: transport::
     parsed.mqtt = transport_parse.mqtt;
     parsed.modbus = transport_parse.modbus;
     parsed.coap = transport_parse.coap;
+    parsed.kerberos = transport_parse.kerberos;
     parsed.udp_hints = transport_parse.hints;
 }
 

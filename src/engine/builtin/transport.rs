@@ -9,6 +9,9 @@ use crate::layer::application::dhcp6::{Dhcp6Message, parse_dhcp6_message};
 use crate::layer::application::dnp3::{Dnp3Message, parse_dnp3_message};
 use crate::layer::application::dns::{DnsMessage, parse_dns_message};
 use crate::layer::application::http::{HttpMessage, parse_http};
+use crate::layer::application::kerberos::{
+    KerberosMessage, parse_kerberos_tcp, parse_kerberos_udp,
+};
 use crate::layer::application::ldap::{LdapMessage, parse_ldap_message};
 use crate::layer::application::modbus::{ModbusMessage, parse_modbus_message};
 use crate::layer::application::mqtt::{MqttMessage, parse_mqtt_message};
@@ -63,6 +66,7 @@ const TCP_PORT_NNTP: u16 = 119;
 const TCP_PORT_NNTPS: u16 = 563;
 const TCP_PORT_MQTT: u16 = 1883;
 const TCP_PORT_MODBUS: u16 = 502;
+const PORT_KERBEROS: u16 = 88;
 
 #[derive(Debug, Default)]
 pub(super) struct TransportParse {
@@ -100,6 +104,7 @@ pub(super) struct TransportParse {
     pub mqtt: Option<MqttMessage>,
     pub modbus: Option<ModbusMessage>,
     pub coap: Option<CoapMessage>,
+    pub kerberos: Option<KerberosMessage>,
     pub hints: Vec<UdpAppHint>,
 }
 
@@ -291,6 +296,15 @@ fn classify_tcp_app_by_port(
     {
         parsed.modbus = parse_modbus_message(payload).ok();
     }
+    if parsed.bgp.is_none()
+        && parsed.ldap.is_none()
+        && parsed.nntp.is_none()
+        && parsed.mqtt.is_none()
+        && parsed.modbus.is_none()
+        && (source_port == PORT_KERBEROS || destination_port == PORT_KERBEROS)
+    {
+        parsed.kerberos = parse_kerberos_tcp(payload).ok();
+    }
 }
 
 fn parse_udp_transport(l4_bytes: &[u8], config: ParseConfig) -> Result<TransportParse, LayerError> {
@@ -307,6 +321,7 @@ fn parse_udp_transport(l4_bytes: &[u8], config: ParseConfig) -> Result<Transport
     let mut ntp = None;
     let mut sip = None;
     let mut coap = None;
+    let mut kerberos = None;
 
     let parse_application = config.stop_after == StopLayer::Application;
     let (wireguard, openvpn) = if parse_application {
@@ -320,6 +335,7 @@ fn parse_udp_transport(l4_bytes: &[u8], config: ParseConfig) -> Result<Transport
         maybe_probe_ntp_udp(&udp, app, &mut hints, &mut ntp);
         maybe_probe_sip_udp(&udp, app, &mut hints, &mut sip);
         maybe_probe_coap_udp(&udp, app, &mut hints, &mut coap);
+        maybe_probe_kerberos_udp(&udp, app, &mut hints, &mut kerberos);
         (
             maybe_classify_wireguard_udp(&udp, app, &mut hints),
             maybe_classify_openvpn_udp(&udp, app, &mut hints),
@@ -351,6 +367,7 @@ fn parse_udp_transport(l4_bytes: &[u8], config: ParseConfig) -> Result<Transport
         ntp.is_some(),
         sip.is_some(),
         coap.is_some(),
+        kerberos.is_some(),
         wireguard.is_some(),
         openvpn.is_some(),
         vxlan.is_some(),
@@ -380,6 +397,7 @@ fn parse_udp_transport(l4_bytes: &[u8], config: ParseConfig) -> Result<Transport
         rtp,
         quic,
         coap,
+        kerberos,
         hints,
         ..TransportParse::default()
     })
@@ -498,6 +516,20 @@ fn maybe_probe_coap_udp(
     {
         push_hint_unique(hints, UdpAppHint::Coap);
         *coap = Some(message);
+    }
+}
+
+fn maybe_probe_kerberos_udp(
+    udp: &UdpHeader,
+    payload: &[u8],
+    hints: &mut Vec<UdpAppHint>,
+    kerberos: &mut Option<KerberosMessage>,
+) {
+    if is_udp_port_match(udp, PORT_KERBEROS)
+        && let Ok(message) = parse_kerberos_udp(payload)
+    {
+        push_hint_unique(hints, UdpAppHint::Kerberos);
+        *kerberos = Some(message);
     }
 }
 
