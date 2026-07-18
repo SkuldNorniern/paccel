@@ -8,6 +8,7 @@ use crate::layer::application::dhcp6::Dhcp6Message;
 use crate::layer::application::dnp3::Dnp3Message;
 use crate::layer::application::dns::DnsMessage;
 use crate::layer::application::http::HttpMessage;
+use crate::layer::application::kerberos::KerberosMessage;
 use crate::layer::application::ldap::LdapMessage;
 use crate::layer::application::modbus::ModbusMessage;
 use crate::layer::application::mqtt::MqttMessage;
@@ -403,6 +404,7 @@ pub enum UdpAppHint {
     Sip,
     Rtp,
     Coap,
+    Kerberos,
 }
 
 impl UdpAppHint {
@@ -422,6 +424,7 @@ impl UdpAppHint {
             Self::Sip => "sip",
             Self::Rtp => "rtp",
             Self::Coap => "coap",
+            Self::Kerberos => "kerberos",
         }
     }
 }
@@ -496,6 +499,7 @@ pub struct ParsedPacket {
     pub mqtt: Option<MqttMessage>,
     pub modbus: Option<ModbusMessage>,
     pub coap: Option<CoapMessage>,
+    pub kerberos: Option<KerberosMessage>,
     pub udp_hints: Vec<UdpAppHint>,
     pub warnings: Vec<ParseWarning>,
     pub inner: Option<Box<ParsedPacket>>,
