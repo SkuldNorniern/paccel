@@ -6,6 +6,8 @@ pub mod dnp3;
 pub mod dns;
 pub mod http;
 pub mod ldap;
+pub mod modbus;
+pub mod mqtt;
 pub mod nntp;
 pub mod ntp;
 pub mod quic;

@@ -9,6 +9,8 @@ use crate::layer::application::dnp3::Dnp3Message;
 use crate::layer::application::dns::DnsMessage;
 use crate::layer::application::http::HttpMessage;
 use crate::layer::application::ldap::LdapMessage;
+use crate::layer::application::modbus::ModbusMessage;
+use crate::layer::application::mqtt::MqttMessage;
 use crate::layer::application::nntp::NntpMessage;
 use crate::layer::application::ntp::NtpMessage;
 use crate::layer::application::quic::QuicLongHeader;
@@ -491,6 +493,8 @@ pub struct ParsedPacket {
     pub bgp: Option<BgpMessage>,
     pub ldap: Option<LdapMessage>,
     pub nntp: Option<NntpMessage>,
+    pub mqtt: Option<MqttMessage>,
+    pub modbus: Option<ModbusMessage>,
     pub coap: Option<CoapMessage>,
     pub udp_hints: Vec<UdpAppHint>,
     pub warnings: Vec<ParseWarning>,

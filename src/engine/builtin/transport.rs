@@ -10,6 +10,8 @@ use crate::layer::application::dnp3::{Dnp3Message, parse_dnp3_message};
 use crate::layer::application::dns::{DnsMessage, parse_dns_message};
 use crate::layer::application::http::{HttpMessage, parse_http};
 use crate::layer::application::ldap::{LdapMessage, parse_ldap_message};
+use crate::layer::application::modbus::{ModbusMessage, parse_modbus_message};
+use crate::layer::application::mqtt::{MqttMessage, parse_mqtt_message};
 use crate::layer::application::nntp::{NntpMessage, parse_nntp};
 use crate::layer::application::ntp::{NtpMessage, parse_ntp_message};
 use crate::layer::application::quic::{QuicLongHeader, parse_quic_long_header};
@@ -59,6 +61,8 @@ const TCP_PORT_LDAP: u16 = 389;
 const TCP_PORT_LDAPS: u16 = 636;
 const TCP_PORT_NNTP: u16 = 119;
 const TCP_PORT_NNTPS: u16 = 563;
+const TCP_PORT_MQTT: u16 = 1883;
+const TCP_PORT_MODBUS: u16 = 502;
 
 #[derive(Debug, Default)]
 pub(super) struct TransportParse {
@@ -93,6 +97,8 @@ pub(super) struct TransportParse {
     pub bgp: Option<BgpMessage>,
     pub ldap: Option<LdapMessage>,
     pub nntp: Option<NntpMessage>,
+    pub mqtt: Option<MqttMessage>,
+    pub modbus: Option<ModbusMessage>,
     pub coap: Option<CoapMessage>,
     pub hints: Vec<UdpAppHint>,
 }
@@ -269,6 +275,21 @@ fn classify_tcp_app_by_port(
             || destination_port == TCP_PORT_NNTPS)
     {
         parsed.nntp = parse_nntp(payload).ok();
+    }
+    if parsed.bgp.is_none()
+        && parsed.ldap.is_none()
+        && parsed.nntp.is_none()
+        && (source_port == TCP_PORT_MQTT || destination_port == TCP_PORT_MQTT)
+    {
+        parsed.mqtt = parse_mqtt_message(payload).ok();
+    }
+    if parsed.bgp.is_none()
+        && parsed.ldap.is_none()
+        && parsed.nntp.is_none()
+        && parsed.mqtt.is_none()
+        && (source_port == TCP_PORT_MODBUS || destination_port == TCP_PORT_MODBUS)
+    {
+        parsed.modbus = parse_modbus_message(payload).ok();
     }
 }
 

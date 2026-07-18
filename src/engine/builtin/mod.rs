@@ -12,6 +12,8 @@ pub use crate::layer::application::dnp3::{
     Dnp3AppFunctionCode, Dnp3Application, Dnp3FunctionCode, Dnp3Message, Dnp3Transport,
 };
 pub use crate::layer::application::ldap::{LdapMessage, LdapProtocolOp};
+pub use crate::layer::application::modbus::ModbusMessage;
+pub use crate::layer::application::mqtt::{MqttMessage, MqttPacketType};
 pub use crate::layer::application::nntp::NntpMessage;
 pub use crate::layer::application::radius::{RadiusAttribute, RadiusMessage};
 pub use crate::layer::application::rtp::RtpHeader;
@@ -719,6 +721,8 @@ fn apply_transport_parse(parsed: &mut ParsedPacket, transport_parse: transport::
     parsed.bgp = transport_parse.bgp;
     parsed.ldap = transport_parse.ldap;
     parsed.nntp = transport_parse.nntp;
+    parsed.mqtt = transport_parse.mqtt;
+    parsed.modbus = transport_parse.modbus;
     parsed.coap = transport_parse.coap;
     parsed.udp_hints = transport_parse.hints;
 }

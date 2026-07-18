@@ -4,8 +4,9 @@ use std::net::Ipv4Addr;
 
 use paccel::engine::{
     BgpMessageType, BuiltinPacketParser, CoapType, Dnp3AppFunctionCode, Dnp3FunctionCode,
-    LdapProtocolOp, NntpMessage, OpenVpnOpcode, SipMessage, SnmpMessage, SnmpPduType, TftpMessage,
-    TransportSegment, UdpAppHint, iter_capture_frames, parse_capture_frames, parse_pcap_frames,
+    LdapProtocolOp, MqttPacketType, NntpMessage, OpenVpnOpcode, SipMessage, SnmpMessage,
+    SnmpPduType, TftpMessage, TransportSegment, UdpAppHint, iter_capture_frames,
+    parse_capture_frames, parse_pcap_frames,
 };
 
 #[test]
@@ -110,6 +111,40 @@ fn nntp_fixture_frame_four_matches_tshark() {
         parsed.nntp,
         Some(NntpMessage::Response { code: 200, .. })
     ));
+}
+
+#[test]
+fn mqtt_fixture_frame_one_matches_tshark() {
+    let bytes = include_bytes!("pcaps/protocol-gaps/mqtt.pcap");
+    let frame = iter_capture_frames(bytes)
+        .expect("pcap should parse")
+        .next()
+        .expect("capture should contain frame 1")
+        .expect("capture frame should parse");
+    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
+        .expect("packet should parse");
+    let mqtt = parsed.mqtt.expect("MQTT should be present");
+
+    assert_eq!(mqtt.packet_type, MqttPacketType::Connect);
+    assert_eq!(mqtt.remaining_length, 37);
+}
+
+#[test]
+fn modbus_fixture_frame_two_matches_tshark() {
+    let bytes = include_bytes!("pcaps/protocol-gaps/modbus.pcap");
+    let frame = iter_capture_frames(bytes)
+        .expect("pcap should parse")
+        .nth(1)
+        .expect("capture should contain frame 2")
+        .expect("capture frame should parse");
+    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
+        .expect("packet should parse");
+    let modbus = parsed.modbus.expect("Modbus should be present");
+
+    assert_eq!(modbus.transaction_id, 0);
+    assert_eq!(modbus.unit_id, 255);
+    assert_eq!(modbus.function_code, 4);
+    assert!(!modbus.is_exception);
 }
 
 #[test]
