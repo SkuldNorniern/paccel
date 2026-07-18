@@ -1,8 +1,12 @@
+pub mod bgp;
+pub mod coap;
 pub mod dhcp;
 pub mod dhcp6;
 pub mod dnp3;
 pub mod dns;
 pub mod http;
+pub mod ldap;
+pub mod nntp;
 pub mod ntp;
 pub mod quic;
 pub mod radius;

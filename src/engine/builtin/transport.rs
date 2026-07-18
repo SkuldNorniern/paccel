@@ -2,11 +2,15 @@ use std::net::Ipv4Addr;
 
 use crate::engine::constants::ip_proto;
 use crate::layer::LayerError;
+use crate::layer::application::bgp::{BgpMessage, parse_bgp_message};
+use crate::layer::application::coap::{CoapMessage, parse_coap_message};
 use crate::layer::application::dhcp::{DhcpMessage, parse_dhcp_message};
 use crate::layer::application::dhcp6::{Dhcp6Message, parse_dhcp6_message};
 use crate::layer::application::dnp3::{Dnp3Message, parse_dnp3_message};
 use crate::layer::application::dns::{DnsMessage, parse_dns_message};
 use crate::layer::application::http::{HttpMessage, parse_http};
+use crate::layer::application::ldap::{LdapMessage, parse_ldap_message};
+use crate::layer::application::nntp::{NntpMessage, parse_nntp};
 use crate::layer::application::ntp::{NtpMessage, parse_ntp_message};
 use crate::layer::application::quic::{QuicLongHeader, parse_quic_long_header};
 use crate::layer::application::radius::{RadiusMessage, parse_radius_message};
@@ -48,7 +52,13 @@ const UDP_PORT_OPENVPN: u16 = 1194;
 const UDP_PORT_SIP: u16 = 5060;
 const UDP_PORT_WIREGUARD: u16 = 51820;
 const UDP_PORT_WIREGUARD_ALT: u16 = 51821;
+const UDP_PORT_COAP: u16 = 5683;
 const DNP3_PORT: u16 = 20_000;
+const TCP_PORT_BGP: u16 = 179;
+const TCP_PORT_LDAP: u16 = 389;
+const TCP_PORT_LDAPS: u16 = 636;
+const TCP_PORT_NNTP: u16 = 119;
+const TCP_PORT_NNTPS: u16 = 563;
 
 #[derive(Debug, Default)]
 pub(super) struct TransportParse {
@@ -80,6 +90,10 @@ pub(super) struct TransportParse {
     pub sip: Option<SipMessage>,
     pub rtp: Option<RtpHeader>,
     pub quic: Option<QuicLongHeader>,
+    pub bgp: Option<BgpMessage>,
+    pub ldap: Option<LdapMessage>,
+    pub nntp: Option<NntpMessage>,
+    pub coap: Option<CoapMessage>,
     pub hints: Vec<UdpAppHint>,
 }
 
@@ -182,6 +196,14 @@ pub(super) fn parse_transport(
                             {
                                 parsed.sip = parse_sip(payload).ok();
                             }
+                            if parsed.http.is_none() && parsed.sip.is_none() {
+                                classify_tcp_app_by_port(
+                                    source_port,
+                                    destination_port,
+                                    payload,
+                                    &mut parsed,
+                                );
+                            }
                         }
                     }
                 }
@@ -222,6 +244,34 @@ pub(super) fn parse_transport(
     }
 }
 
+fn classify_tcp_app_by_port(
+    source_port: u16,
+    destination_port: u16,
+    payload: &[u8],
+    parsed: &mut TransportParse,
+) {
+    if source_port == TCP_PORT_BGP || destination_port == TCP_PORT_BGP {
+        parsed.bgp = parse_bgp_message(payload).ok();
+    }
+    if parsed.bgp.is_none()
+        && (source_port == TCP_PORT_LDAP
+            || destination_port == TCP_PORT_LDAP
+            || source_port == TCP_PORT_LDAPS
+            || destination_port == TCP_PORT_LDAPS)
+    {
+        parsed.ldap = parse_ldap_message(payload).ok();
+    }
+    if parsed.bgp.is_none()
+        && parsed.ldap.is_none()
+        && (source_port == TCP_PORT_NNTP
+            || destination_port == TCP_PORT_NNTP
+            || source_port == TCP_PORT_NNTPS
+            || destination_port == TCP_PORT_NNTPS)
+    {
+        parsed.nntp = parse_nntp(payload).ok();
+    }
+}
+
 fn parse_udp_transport(l4_bytes: &[u8], config: ParseConfig) -> Result<TransportParse, LayerError> {
     let udp = parse_udp_header(l4_bytes)?;
     let udp_end = (udp.length as usize).min(l4_bytes.len());
@@ -235,6 +285,7 @@ fn parse_udp_transport(l4_bytes: &[u8], config: ParseConfig) -> Result<Transport
     let mut snmp = None;
     let mut ntp = None;
     let mut sip = None;
+    let mut coap = None;
 
     let parse_application = config.stop_after == StopLayer::Application;
     let (wireguard, openvpn) = if parse_application {
@@ -247,6 +298,7 @@ fn parse_udp_transport(l4_bytes: &[u8], config: ParseConfig) -> Result<Transport
         maybe_probe_snmp_udp(&udp, app, &mut hints, &mut snmp);
         maybe_probe_ntp_udp(&udp, app, &mut hints, &mut ntp);
         maybe_probe_sip_udp(&udp, app, &mut hints, &mut sip);
+        maybe_probe_coap_udp(&udp, app, &mut hints, &mut coap);
         (
             maybe_classify_wireguard_udp(&udp, app, &mut hints),
             maybe_classify_openvpn_udp(&udp, app, &mut hints),
@@ -277,6 +329,7 @@ fn parse_udp_transport(l4_bytes: &[u8], config: ParseConfig) -> Result<Transport
         snmp.is_some(),
         ntp.is_some(),
         sip.is_some(),
+        coap.is_some(),
         wireguard.is_some(),
         openvpn.is_some(),
         vxlan.is_some(),
@@ -305,6 +358,7 @@ fn parse_udp_transport(l4_bytes: &[u8], config: ParseConfig) -> Result<Transport
         sip,
         rtp,
         quic,
+        coap,
         hints,
         ..TransportParse::default()
     })
@@ -409,6 +463,20 @@ fn maybe_probe_tftp_udp(
     if is_udp_port_match(udp, UDP_PORT_TFTP) && likely_tftp_message(payload) {
         push_hint_unique(hints, UdpAppHint::Tftp);
         *tftp = parse_tftp_message(payload).ok();
+    }
+}
+
+fn maybe_probe_coap_udp(
+    udp: &UdpHeader,
+    payload: &[u8],
+    hints: &mut Vec<UdpAppHint>,
+    coap: &mut Option<CoapMessage>,
+) {
+    if is_udp_port_match(udp, UDP_PORT_COAP)
+        && let Ok(message) = parse_coap_message(payload)
+    {
+        push_hint_unique(hints, UdpAppHint::Coap);
+        *coap = Some(message);
     }
 }
 

@@ -1,11 +1,15 @@
 use std::net::{IpAddr, Ipv4Addr};
 
 use crate::engine::constants::ethertype_name;
+use crate::layer::application::bgp::BgpMessage;
+use crate::layer::application::coap::CoapMessage;
 use crate::layer::application::dhcp::DhcpMessage;
 use crate::layer::application::dhcp6::Dhcp6Message;
 use crate::layer::application::dnp3::Dnp3Message;
 use crate::layer::application::dns::DnsMessage;
 use crate::layer::application::http::HttpMessage;
+use crate::layer::application::ldap::LdapMessage;
+use crate::layer::application::nntp::NntpMessage;
 use crate::layer::application::ntp::NtpMessage;
 use crate::layer::application::quic::QuicLongHeader;
 use crate::layer::application::radius::RadiusMessage;
@@ -396,6 +400,7 @@ pub enum UdpAppHint {
     OpenVpn,
     Sip,
     Rtp,
+    Coap,
 }
 
 impl UdpAppHint {
@@ -414,6 +419,7 @@ impl UdpAppHint {
             Self::OpenVpn => "openvpn",
             Self::Sip => "sip",
             Self::Rtp => "rtp",
+            Self::Coap => "coap",
         }
     }
 }
@@ -482,6 +488,10 @@ pub struct ParsedPacket {
     pub sip: Option<SipMessage>,
     pub rtp: Option<RtpHeader>,
     pub quic: Option<QuicLongHeader>,
+    pub bgp: Option<BgpMessage>,
+    pub ldap: Option<LdapMessage>,
+    pub nntp: Option<NntpMessage>,
+    pub coap: Option<CoapMessage>,
     pub udp_hints: Vec<UdpAppHint>,
     pub warnings: Vec<ParseWarning>,
     pub inner: Option<Box<ParsedPacket>>,
