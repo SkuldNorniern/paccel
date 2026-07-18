@@ -3,9 +3,9 @@
 use std::net::Ipv4Addr;
 
 use paccel::engine::{
-    BuiltinPacketParser, Dnp3AppFunctionCode, Dnp3FunctionCode, OpenVpnOpcode, SipMessage,
-    SnmpMessage, SnmpPduType, TftpMessage, TransportSegment, UdpAppHint, iter_capture_frames,
-    parse_capture_frames, parse_pcap_frames,
+    BgpMessageType, BuiltinPacketParser, CoapType, Dnp3AppFunctionCode, Dnp3FunctionCode,
+    LdapProtocolOp, NntpMessage, OpenVpnOpcode, SipMessage, SnmpMessage, SnmpPduType, TftpMessage,
+    TransportSegment, UdpAppHint, iter_capture_frames, parse_capture_frames, parse_pcap_frames,
 };
 
 #[test]
@@ -27,6 +27,89 @@ fn dnp3_fixture_frame_four_matches_tshark() {
         dnp3.application.map(|application| application.function),
         Some(Dnp3AppFunctionCode::Read)
     );
+}
+
+#[test]
+fn bgp_fixture_frame_one_matches_tshark() {
+    let bytes = include_bytes!("pcaps/protocol-gaps/bgp_shutdown.pcap");
+    let frame = iter_capture_frames(bytes)
+        .expect("pcap should parse")
+        .next()
+        .expect("capture should contain frame 1")
+        .expect("capture frame should parse");
+    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
+        .expect("packet should parse");
+    let bgp = parsed.bgp.expect("BGP should be present");
+
+    assert_eq!(bgp.message_type, BgpMessageType::Keepalive);
+    assert_eq!(bgp.length, 19);
+}
+
+#[test]
+fn bgp_fixture_frame_five_is_notification() {
+    let bytes = include_bytes!("pcaps/protocol-gaps/bgp_shutdown.pcap");
+    let frame = iter_capture_frames(bytes)
+        .expect("pcap should parse")
+        .nth(4)
+        .expect("capture should contain frame 5")
+        .expect("capture frame should parse");
+    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
+        .expect("packet should parse");
+    let bgp = parsed.bgp.expect("BGP should be present");
+
+    assert_eq!(bgp.message_type, BgpMessageType::Notification);
+}
+
+#[test]
+fn coap_fixture_frame_one_matches_tshark() {
+    let bytes = include_bytes!("pcaps/protocol-gaps/coap_cbor.pcap");
+    let frame = iter_capture_frames(bytes)
+        .expect("pcap should parse")
+        .next()
+        .expect("capture should contain frame 1")
+        .expect("capture frame should parse");
+    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
+        .expect("packet should parse");
+    let coap = parsed.coap.expect("CoAP should be present");
+
+    assert_eq!(coap.version, 1);
+    assert_eq!(coap.message_type, CoapType::Confirmable);
+    assert_eq!(coap.code_class, 0);
+    assert_eq!(coap.code_detail, 2);
+    assert!(parsed.udp_hints.contains(&UdpAppHint::Coap));
+}
+
+#[test]
+fn ldap_fixture_frame_four_matches_tshark() {
+    let bytes = include_bytes!("pcaps/protocol-gaps/ldap_search.pcap");
+    let frame = iter_capture_frames(bytes)
+        .expect("pcap should parse")
+        .nth(3)
+        .expect("capture should contain frame 4")
+        .expect("capture frame should parse");
+    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
+        .expect("packet should parse");
+    let ldap = parsed.ldap.expect("LDAP should be present");
+
+    assert_eq!(ldap.message_id, 1);
+    assert_eq!(ldap.protocol_op, LdapProtocolOp::BindRequest);
+}
+
+#[test]
+fn nntp_fixture_frame_four_matches_tshark() {
+    let bytes = include_bytes!("pcaps/protocol-gaps/nntp.pcap");
+    let frame = iter_capture_frames(bytes)
+        .expect("pcap should parse")
+        .nth(3)
+        .expect("capture should contain frame 4")
+        .expect("capture frame should parse");
+    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
+        .expect("packet should parse");
+
+    assert!(matches!(
+        parsed.nntp,
+        Some(NntpMessage::Response { code: 200, .. })
+    ));
 }
 
 #[test]

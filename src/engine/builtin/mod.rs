@@ -5,10 +5,14 @@ mod types;
 
 use crate::engine::constants::{ethertype, ip_proto};
 use crate::layer::LayerError;
+pub use crate::layer::application::bgp::{BgpMessage, BgpMessageType};
+pub use crate::layer::application::coap::{CoapMessage, CoapType};
 pub use crate::layer::application::dhcp6::{Dhcp6Message, Dhcp6Option};
 pub use crate::layer::application::dnp3::{
     Dnp3AppFunctionCode, Dnp3Application, Dnp3FunctionCode, Dnp3Message, Dnp3Transport,
 };
+pub use crate::layer::application::ldap::{LdapMessage, LdapProtocolOp};
+pub use crate::layer::application::nntp::NntpMessage;
 pub use crate::layer::application::radius::{RadiusAttribute, RadiusMessage};
 pub use crate::layer::application::rtp::RtpHeader;
 pub use crate::layer::application::sip::SipMessage;
@@ -712,6 +716,10 @@ fn apply_transport_parse(parsed: &mut ParsedPacket, transport_parse: transport::
     parsed.sip = transport_parse.sip;
     parsed.rtp = transport_parse.rtp;
     parsed.quic = transport_parse.quic;
+    parsed.bgp = transport_parse.bgp;
+    parsed.ldap = transport_parse.ldap;
+    parsed.nntp = transport_parse.nntp;
+    parsed.coap = transport_parse.coap;
     parsed.udp_hints = transport_parse.hints;
 }
 
