@@ -17,9 +17,11 @@ use crate::layer::application::kerberos::{
 use crate::layer::application::ldap::{LdapMessage, parse_ldap_message};
 use crate::layer::application::modbus::{ModbusMessage, parse_modbus_message};
 use crate::layer::application::mqtt::{MqttMessage, parse_mqtt_message};
+use crate::layer::application::nat_pmp::{NatPmpMessage, parse_nat_pmp};
 use crate::layer::application::nntp::{NntpMessage, parse_nntp};
 use crate::layer::application::ntp::{NtpMessage, parse_ntp_message};
 use crate::layer::application::ospf::{OspfHeader, parse_ospf_header};
+use crate::layer::application::pcp::{PcpHeader, parse_pcp_header};
 use crate::layer::application::quic::{QuicLongHeader, parse_quic_long_header};
 use crate::layer::application::radius::{RadiusMessage, parse_radius_message};
 use crate::layer::application::rip::{RipHeader, parse_rip_header};
@@ -28,6 +30,7 @@ use crate::layer::application::rtp::{RtpHeader, parse_rtp};
 use crate::layer::application::sip::{SipMessage, parse_sip};
 use crate::layer::application::smtp::{SmtpMessage, parse_smtp};
 use crate::layer::application::snmp::{SnmpMessage, parse_snmp_message};
+use crate::layer::application::ssdp::{SsdpMessage, parse_ssdp};
 use crate::layer::application::ssh::{SshBanner, parse_ssh_banner};
 use crate::layer::application::stun::{StunMessage, parse_stun_message};
 use crate::layer::application::telnet::{TelnetCommand, parse_telnet_command};
@@ -67,6 +70,8 @@ const UDP_PORT_SIP: u16 = 5060;
 const UDP_PORT_WIREGUARD: u16 = 51820;
 const UDP_PORT_WIREGUARD_ALT: u16 = 51821;
 const UDP_PORT_COAP: u16 = 5683;
+const UDP_PORT_SSDP: u16 = 1900;
+const UDP_PORT_NAT_PMP: u16 = 5351;
 const UDP_PORT_ISAKMP: u16 = 500;
 const UDP_PORT_RIP: u16 = 520;
 const STUN_PORT: u16 = 3478;
@@ -114,6 +119,9 @@ pub(super) struct TransportParse {
     pub ntp: Option<NtpMessage>,
     pub tls: Option<TlsClientHello>,
     pub http: Option<HttpMessage>,
+    pub ssdp: Option<SsdpMessage>,
+    pub nat_pmp: Option<NatPmpMessage>,
+    pub pcp: Option<PcpHeader>,
     pub sip: Option<SipMessage>,
     pub rtcp: Option<RtcpHeader>,
     pub rtp: Option<RtpHeader>,
@@ -380,6 +388,9 @@ fn parse_udp_transport(l4_bytes: &[u8], config: ParseConfig) -> Result<Transport
     let mut ntp = None;
     let mut sip = None;
     let mut coap = None;
+    let mut ssdp = None;
+    let mut nat_pmp = None;
+    let mut pcp = None;
     let mut kerberos = None;
     let mut stun = None;
     let mut rip = None;
@@ -397,6 +408,8 @@ fn parse_udp_transport(l4_bytes: &[u8], config: ParseConfig) -> Result<Transport
         maybe_probe_ntp_udp(&udp, app, &mut hints, &mut ntp);
         maybe_probe_sip_udp(&udp, app, &mut hints, &mut sip);
         maybe_probe_coap_udp(&udp, app, &mut hints, &mut coap);
+        maybe_probe_ssdp_udp(&udp, app, &mut hints, &mut ssdp);
+        maybe_probe_pcp_nat_pmp_udp(&udp, app, &mut hints, &mut pcp, &mut nat_pmp);
         maybe_probe_kerberos_udp(&udp, app, &mut hints, &mut kerberos);
         maybe_probe_stun_udp(&udp, app, &mut hints, &mut stun);
         maybe_probe_rip_udp(&udp, app, &mut hints, &mut rip);
@@ -446,6 +459,9 @@ fn parse_udp_transport(l4_bytes: &[u8], config: ParseConfig) -> Result<Transport
         ntp.is_some(),
         sip.is_some(),
         coap.is_some(),
+        ssdp.is_some(),
+        nat_pmp.is_some(),
+        pcp.is_some(),
         kerberos.is_some(),
         stun.is_some(),
         rip.is_some(),
@@ -487,6 +503,9 @@ fn parse_udp_transport(l4_bytes: &[u8], config: ParseConfig) -> Result<Transport
         rtp,
         quic,
         coap,
+        ssdp,
+        nat_pmp,
+        pcp,
         kerberos,
         stun,
         rip,
@@ -623,6 +642,39 @@ fn maybe_probe_coap_udp(
     {
         push_hint_unique(hints, UdpAppHint::Coap);
         *coap = Some(message);
+    }
+}
+
+fn maybe_probe_ssdp_udp(
+    udp: &UdpHeader,
+    payload: &[u8],
+    hints: &mut Vec<UdpAppHint>,
+    ssdp: &mut Option<SsdpMessage>,
+) {
+    if is_udp_port_match(udp, UDP_PORT_SSDP)
+        && let Ok(message) = parse_ssdp(payload)
+    {
+        push_hint_unique(hints, UdpAppHint::Ssdp);
+        *ssdp = Some(message);
+    }
+}
+
+fn maybe_probe_pcp_nat_pmp_udp(
+    udp: &UdpHeader,
+    payload: &[u8],
+    hints: &mut Vec<UdpAppHint>,
+    pcp: &mut Option<PcpHeader>,
+    nat_pmp: &mut Option<NatPmpMessage>,
+) {
+    if !is_udp_port_match(udp, UDP_PORT_NAT_PMP) {
+        return;
+    }
+    if let Ok(header) = parse_pcp_header(payload) {
+        push_hint_unique(hints, UdpAppHint::Pcp);
+        *pcp = Some(header);
+    } else if let Ok(message) = parse_nat_pmp(payload) {
+        push_hint_unique(hints, UdpAppHint::NatPmp);
+        *nat_pmp = Some(message);
     }
 }
 
@@ -1288,9 +1340,9 @@ mod tests {
 
     use crate::engine::builtin::{
         BuiltinPacketParser, Dnp3AppFunctionCode, Dnp3FunctionCode, FlowKey, FtpMessage,
-        OpenVpnOpcode, ParseConfig, ParseWarningCode, SipMessage, SmtpMessage, SnmpMessage,
-        SnmpPduType, StopLayer, TelnetCommand, TftpMessage, TransportSegment, UdpAppHint,
-        WireGuardMessageType,
+        NatPmpMessage, OpenVpnOpcode, ParseConfig, ParseWarningCode, PcpHeader, SipMessage,
+        SmtpMessage, SnmpMessage, SnmpPduType, SsdpMessage, StopLayer, TelnetCommand, TftpMessage,
+        TransportSegment, UdpAppHint, WireGuardMessageType,
     };
     use crate::layer::application::http::HttpMessage;
     use crate::layer::network::icmpv6::NdpMessage;
@@ -1986,6 +2038,87 @@ mod tests {
         let dhcp6 = parsed.dhcp6.as_ref().expect("dhcpv6");
         assert_eq!(dhcp6.msg_type, 1);
         assert_eq!(dhcp6.transaction_id, 0x10_0874);
+    }
+
+    #[test]
+    fn parses_ssdp_msearch_over_udp() {
+        let payload = b"M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\n\
+            ST: ssdp:all\r\nMAN: \"ssdp:discover\"\r\nMX: 2\r\n\r\n";
+        let frame = build_ethernet_ipv4_udp_frame(49_152, 1900, payload);
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+
+        assert!(parsed.udp_hints.contains(&UdpAppHint::Ssdp));
+        assert!(matches!(
+            parsed.ssdp,
+            Some(SsdpMessage::Request {
+                ref method,
+                ref target,
+                ref version,
+                ..
+            }) if method == "M-SEARCH" && target == "*" && version == "HTTP/1.1"
+        ));
+
+        let response =
+            build_ethernet_ipv4_udp_frame(1900, 49_152, b"HTTP/1.1 200 OK\r\nST: ssdp:all\r\n\r\n");
+        let parsed = BuiltinPacketParser::parse(&response).expect("parse should succeed");
+        assert!(matches!(
+            parsed.ssdp,
+            Some(SsdpMessage::Response {
+                status: 200,
+                ref reason,
+                ..
+            }) if reason == "OK"
+        ));
+        assert!(parsed.udp_hints.contains(&UdpAppHint::Ssdp));
+    }
+
+    #[test]
+    fn parses_nat_pmp_requests_over_udp() {
+        let external_address = build_ethernet_ipv4_udp_frame(49_152, 5351, &[0, 0]);
+        let parsed = BuiltinPacketParser::parse(&external_address).expect("parse should succeed");
+        assert_eq!(
+            parsed.nat_pmp,
+            Some(NatPmpMessage {
+                version: 0,
+                opcode: 0,
+            })
+        );
+        assert!(parsed.pcp.is_none());
+        assert!(parsed.udp_hints.contains(&UdpAppHint::NatPmp));
+
+        let map_udp = [0, 1, 0, 0, 0xa2, 0xa9, 0, 0, 0, 0, 0x1c, 0x20];
+        let frame = build_ethernet_ipv4_udp_frame(49_152, 5351, &map_udp);
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+        assert_eq!(
+            parsed.nat_pmp,
+            Some(NatPmpMessage {
+                version: 0,
+                opcode: 1,
+            })
+        );
+        assert!(parsed.udp_hints.contains(&UdpAppHint::NatPmp));
+    }
+
+    #[test]
+    fn parses_pcp_announce_over_udp_before_nat_pmp() {
+        let payload = [
+            2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 0xc0, 0xa8, 0x32,
+            0x05,
+        ];
+        let frame = build_ethernet_ipv4_udp_frame(49_152, 5351, &payload);
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+
+        assert_eq!(
+            parsed.pcp,
+            Some(PcpHeader {
+                version: 2,
+                is_response: false,
+                opcode: 0,
+                lifetime: 0,
+            })
+        );
+        assert!(parsed.nat_pmp.is_none());
+        assert!(parsed.udp_hints.contains(&UdpAppHint::Pcp));
     }
 
     #[test]

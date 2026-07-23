@@ -17,8 +17,10 @@ pub use crate::layer::application::kerberos::{KerberosMessage, KerberosMessageTy
 pub use crate::layer::application::ldap::{LdapMessage, LdapProtocolOp};
 pub use crate::layer::application::modbus::ModbusMessage;
 pub use crate::layer::application::mqtt::{MqttMessage, MqttPacketType};
+pub use crate::layer::application::nat_pmp::NatPmpMessage;
 pub use crate::layer::application::nntp::NntpMessage;
 pub use crate::layer::application::ospf::OspfHeader;
+pub use crate::layer::application::pcp::PcpHeader;
 pub use crate::layer::application::radius::{RadiusAttribute, RadiusMessage};
 pub use crate::layer::application::rip::RipHeader;
 pub use crate::layer::application::rtcp::RtcpHeader;
@@ -26,6 +28,7 @@ pub use crate::layer::application::rtp::RtpHeader;
 pub use crate::layer::application::sip::SipMessage;
 pub use crate::layer::application::smtp::SmtpMessage;
 pub use crate::layer::application::snmp::{SnmpMessage, SnmpPduType};
+pub use crate::layer::application::ssdp::SsdpMessage;
 pub use crate::layer::application::ssh::SshBanner;
 pub use crate::layer::application::stun::StunMessage;
 pub use crate::layer::application::telnet::TelnetCommand;
@@ -726,6 +729,9 @@ fn apply_transport_parse(parsed: &mut ParsedPacket, transport_parse: transport::
     parsed.ntp = transport_parse.ntp;
     parsed.tls = transport_parse.tls;
     parsed.http = transport_parse.http;
+    parsed.ssdp = transport_parse.ssdp;
+    parsed.nat_pmp = transport_parse.nat_pmp;
+    parsed.pcp = transport_parse.pcp;
     parsed.sip = transport_parse.sip;
     parsed.rtcp = transport_parse.rtcp;
     parsed.rtp = transport_parse.rtp;
