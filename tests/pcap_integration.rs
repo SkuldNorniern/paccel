@@ -163,6 +163,74 @@ fn ospf_fixture_frame_one_is_hello() {
 }
 
 #[test]
+fn lacp_fixture_frame_one_is_actor_state() {
+    let bytes = include_bytes!("pcaps/protocol-gaps/lacp.pcap");
+    let frame = iter_capture_frames(bytes)
+        .expect("pcap should parse")
+        .next()
+        .expect("capture should contain frame 1")
+        .expect("capture frame should parse");
+    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
+        .expect("packet should parse");
+    let ethernet = parsed
+        .ethernet
+        .as_ref()
+        .expect("Ethernet should be present");
+    let lacp = parsed.lacp.as_ref().expect("LACP should be present");
+
+    assert_eq!(ethernet.destination, [0x01, 0x80, 0xc2, 0x00, 0x00, 0x02]);
+    assert_eq!(ethernet.ethertype, 0x8809);
+    assert_eq!(lacp.subtype, 1);
+    assert_eq!(lacp.version, 1);
+    assert_eq!(lacp.actor_port, 18);
+}
+
+#[test]
+fn hsrp_fixture_frame_one_is_hello() {
+    let bytes = include_bytes!("pcaps/protocol-gaps/hsrp_hello.pcap");
+    let frame = iter_capture_frames(bytes)
+        .expect("pcap should parse")
+        .next()
+        .expect("capture should contain frame 1")
+        .expect("capture frame should parse");
+    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
+        .expect("packet should parse");
+    let hsrp = parsed.hsrp.as_ref().expect("HSRP should be present");
+    let udp = match parsed.transport.as_ref() {
+        Some(TransportSegment::Udp(udp)) => udp,
+        _ => panic!("UDP should be present"),
+    };
+
+    assert_eq!(udp.destination_port, 1985);
+    assert_eq!(hsrp.version, 0);
+    assert_eq!(hsrp.opcode, 0);
+    assert_eq!(hsrp.state, 16);
+    assert_eq!(hsrp.group, 10);
+    assert_eq!(hsrp.priority, 90);
+    assert!(parsed.udp_hints.contains(&UdpAppHint::Hsrp));
+}
+
+#[test]
+fn eigrp_fixture_frame_one_is_hello() {
+    let bytes = include_bytes!("pcaps/protocol-gaps/eigrp_hello.cap");
+    let frame = iter_capture_frames(bytes)
+        .expect("pcap should parse")
+        .next()
+        .expect("capture should contain frame 1")
+        .expect("capture frame should parse");
+    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
+        .expect("packet should parse");
+    let ipv4 = parsed.ipv4.as_ref().expect("IPv4 should be present");
+    let eigrp = parsed.eigrp.as_ref().expect("EIGRP should be present");
+
+    assert_eq!(ipv4.destination, Ipv4Addr::new(224, 0, 0, 10));
+    assert_eq!(ipv4.protocol, 88);
+    assert_eq!(eigrp.version, 2);
+    assert_eq!(eigrp.opcode, 5);
+    assert_eq!(eigrp.as_number, 100);
+}
+
+#[test]
 fn pim_fixture_frame_one_is_hello() {
     let bytes = include_bytes!("pcaps/protocol-gaps/pim_hello_register.cap");
     let frame = iter_capture_frames(bytes)
