@@ -17,9 +17,11 @@ pub use crate::layer::application::modbus::ModbusMessage;
 pub use crate::layer::application::mqtt::{MqttMessage, MqttPacketType};
 pub use crate::layer::application::nntp::NntpMessage;
 pub use crate::layer::application::radius::{RadiusAttribute, RadiusMessage};
+pub use crate::layer::application::rtcp::RtcpHeader;
 pub use crate::layer::application::rtp::RtpHeader;
 pub use crate::layer::application::sip::SipMessage;
 pub use crate::layer::application::snmp::{SnmpMessage, SnmpPduType};
+pub use crate::layer::application::ssh::SshBanner;
 pub use crate::layer::application::stun::StunMessage;
 pub use crate::layer::application::tftp::TftpMessage;
 use crate::layer::datalink::dot11::{parse_dot11, parse_radiotap};
@@ -718,6 +720,7 @@ fn apply_transport_parse(parsed: &mut ParsedPacket, transport_parse: transport::
     parsed.tls = transport_parse.tls;
     parsed.http = transport_parse.http;
     parsed.sip = transport_parse.sip;
+    parsed.rtcp = transport_parse.rtcp;
     parsed.rtp = transport_parse.rtp;
     parsed.quic = transport_parse.quic;
     parsed.bgp = transport_parse.bgp;
@@ -725,6 +728,7 @@ fn apply_transport_parse(parsed: &mut ParsedPacket, transport_parse: transport::
     parsed.nntp = transport_parse.nntp;
     parsed.mqtt = transport_parse.mqtt;
     parsed.modbus = transport_parse.modbus;
+    parsed.ssh = transport_parse.ssh;
     parsed.coap = transport_parse.coap;
     parsed.kerberos = transport_parse.kerberos;
     parsed.stun = transport_parse.stun;
