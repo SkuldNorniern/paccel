@@ -195,6 +195,34 @@ fn pim_fixture_frame_three_is_register() {
 }
 
 #[test]
+fn vrrp_fixture_frame_one_is_advertisement() {
+    let bytes = include_bytes!("pcaps/protocol-gaps/vrrp_advertisement.pcapng");
+    let frame = iter_capture_frames(bytes)
+        .expect("pcap should parse")
+        .next()
+        .expect("capture should contain frame 1")
+        .expect("capture frame should parse");
+    let ethernet_end = frame
+        .data
+        .len()
+        .checked_sub(4)
+        .expect("mPacket frame should include its FCS");
+    let ethernet = frame
+        .data
+        .get(8..ethernet_end)
+        .expect("mPacket frame should include a preamble and Ethernet payload");
+    let parsed =
+        BuiltinPacketParser::parse_with_linktype(ethernet, 1).expect("packet should parse");
+    let vrrp = parsed.vrrp.as_ref().expect("VRRP should be present");
+
+    assert_eq!(vrrp.version, 2);
+    assert_eq!(vrrp.packet_type, 1);
+    assert_eq!(vrrp.virtual_router_id, 1);
+    assert_eq!(vrrp.priority, 100);
+    assert_eq!(vrrp.address_count, 1);
+}
+
+#[test]
 fn rpc_fixture_frame_one_is_nfs_getattr_call() {
     let bytes = include_bytes!("pcaps/protocol-gaps/nfs_getattr.pcap");
     let frame = iter_capture_frames(bytes)
@@ -600,6 +628,44 @@ fn ftp_fixture_frame_seven_is_user_command() {
             args: "anonymous".to_string(),
         })
     );
+}
+
+#[test]
+fn smb2_fixture_frame_one_is_negotiate_response() {
+    let bytes = include_bytes!("pcaps/protocol-gaps/smb2_negotiate.pcapng");
+    let frame = iter_capture_frames(bytes)
+        .expect("pcap should parse")
+        .next()
+        .expect("capture should contain frame 1")
+        .expect("capture frame should parse");
+    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
+        .expect("packet should parse");
+    let smb2 = parsed.smb2.as_ref().expect("SMB2 should be present");
+
+    assert_eq!(smb2.command, 0);
+    assert!(smb2.is_response);
+    assert_eq!(smb2.message_id, 0);
+    assert_eq!(smb2.tree_id, 0);
+    assert_eq!(smb2.session_id, 0);
+}
+
+#[test]
+fn smb2_fixture_frame_two_is_negotiate_request() {
+    let bytes = include_bytes!("pcaps/protocol-gaps/smb2_negotiate.pcapng");
+    let frame = iter_capture_frames(bytes)
+        .expect("pcap should parse")
+        .nth(1)
+        .expect("capture should contain frame 2")
+        .expect("capture frame should parse");
+    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
+        .expect("packet should parse");
+    let smb2 = parsed.smb2.as_ref().expect("SMB2 should be present");
+
+    assert_eq!(smb2.command, 0);
+    assert!(!smb2.is_response);
+    assert_eq!(smb2.message_id, 1);
+    assert_eq!(smb2.tree_id, 0);
+    assert_eq!(smb2.session_id, 0);
 }
 
 #[test]
