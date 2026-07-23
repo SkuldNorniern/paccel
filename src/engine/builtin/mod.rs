@@ -21,8 +21,10 @@ pub use crate::layer::application::nat_pmp::NatPmpMessage;
 pub use crate::layer::application::nntp::NntpMessage;
 pub use crate::layer::application::ospf::OspfHeader;
 pub use crate::layer::application::pcp::PcpHeader;
+pub use crate::layer::application::pim::PimHeader;
 pub use crate::layer::application::radius::{RadiusAttribute, RadiusMessage};
 pub use crate::layer::application::rip::RipHeader;
+pub use crate::layer::application::rpc::RpcMessage;
 pub use crate::layer::application::rtcp::RtcpHeader;
 pub use crate::layer::application::rtp::RtpHeader;
 pub use crate::layer::application::sip::SipMessage;
@@ -100,7 +102,11 @@ impl BuiltinPacketParser {
             _ => {}
         }
 
-        let (eth, l3_offset) = parse_link_with_linktype(raw, linktype)?;
+        let (eth, l3_offset) = if linktype == Some(10) {
+            parse_fddi_snap(raw)?
+        } else {
+            parse_link_with_linktype(raw, linktype)?
+        };
         let parsed = ParsedPacket {
             ethernet: Some(eth.clone()),
             ..ParsedPacket::default()
@@ -709,6 +715,7 @@ fn apply_transport_parse(parsed: &mut ParsedPacket, transport_parse: transport::
     parsed.ndp = transport_parse.ndp;
     parsed.igmp = transport_parse.igmp;
     parsed.ospf = transport_parse.ospf;
+    parsed.pim = transport_parse.pim;
     parsed.sctp = transport_parse.sctp;
     parsed.tcp_options = transport_parse.tcp_options;
     parsed.gre = transport_parse.gre;
@@ -750,7 +757,36 @@ fn apply_transport_parse(parsed: &mut ParsedPacket, transport_parse: transport::
     parsed.stun = transport_parse.stun;
     parsed.rip = transport_parse.rip;
     parsed.isakmp = transport_parse.isakmp;
+    parsed.rpc = transport_parse.rpc;
     parsed.udp_hints = transport_parse.hints;
+}
+
+fn parse_fddi_snap(raw: &[u8]) -> Result<(EthernetFrame, usize), LayerError> {
+    const FDDI_HEADER_LEN: usize = 13;
+    const SNAP_HEADER_LEN: usize = 8;
+    const PAYLOAD_OFFSET: usize = FDDI_HEADER_LEN + SNAP_HEADER_LEN;
+
+    let Some(header) = raw.get(..PAYLOAD_OFFSET) else {
+        return Err(LayerError::InvalidLength);
+    };
+    if header[FDDI_HEADER_LEN..FDDI_HEADER_LEN + 6] != [0xaa, 0xaa, 0x03, 0x00, 0x00, 0x00] {
+        return Err(LayerError::InvalidHeader);
+    }
+    let mut destination = [0; 6];
+    destination.copy_from_slice(&header[1..7]);
+    let mut source = [0; 6];
+    source.copy_from_slice(&header[7..13]);
+
+    Ok((
+        EthernetFrame {
+            destination,
+            source,
+            ethertype: u16::from_be_bytes([header[19], header[20]]),
+            vlan_tags: Vec::new(),
+            payload_offset: PAYLOAD_OFFSET,
+        },
+        PAYLOAD_OFFSET,
+    ))
 }
 
 fn parse_lldp(data: &[u8]) -> LldpInfo {

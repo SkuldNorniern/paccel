@@ -22,9 +22,11 @@ use crate::layer::application::nntp::{NntpMessage, parse_nntp};
 use crate::layer::application::ntp::{NtpMessage, parse_ntp_message};
 use crate::layer::application::ospf::{OspfHeader, parse_ospf_header};
 use crate::layer::application::pcp::{PcpHeader, parse_pcp_header};
+use crate::layer::application::pim::{PimHeader, parse_pim_header};
 use crate::layer::application::quic::{QuicLongHeader, parse_quic_long_header};
 use crate::layer::application::radius::{RadiusMessage, parse_radius_message};
 use crate::layer::application::rip::{RipHeader, parse_rip_header};
+use crate::layer::application::rpc::{RpcMessage, parse_rpc_message};
 use crate::layer::application::rtcp::{RtcpHeader, parse_rtcp};
 use crate::layer::application::rtp::{RtpHeader, parse_rtp};
 use crate::layer::application::sip::{SipMessage, parse_sip};
@@ -74,6 +76,7 @@ const UDP_PORT_SSDP: u16 = 1900;
 const UDP_PORT_NAT_PMP: u16 = 5351;
 const UDP_PORT_ISAKMP: u16 = 500;
 const UDP_PORT_RIP: u16 = 520;
+const UDP_PORT_RPC: u16 = 2049;
 const STUN_PORT: u16 = 3478;
 const UDP_PORT_LLMNR: u16 = 5355;
 const UDP_PORT_NBNS: u16 = 137;
@@ -99,6 +102,7 @@ pub(super) struct TransportParse {
     pub ndp: Option<NdpMessage>,
     pub igmp: Option<IgmpInfo>,
     pub ospf: Option<OspfHeader>,
+    pub pim: Option<PimHeader>,
     pub sctp: Option<SctpInfo>,
     pub tcp_options: Option<TcpOptionsParsed>,
     pub gre: Option<GreInfo>,
@@ -140,6 +144,7 @@ pub(super) struct TransportParse {
     pub stun: Option<StunMessage>,
     pub rip: Option<RipHeader>,
     pub isakmp: Option<IsakmpHeader>,
+    pub rpc: Option<RpcMessage>,
     pub hints: Vec<UdpAppHint>,
 }
 
@@ -177,6 +182,13 @@ impl TransportParse {
     fn with_ospf(ospf: OspfHeader) -> Self {
         Self {
             ospf: Some(ospf),
+            ..Self::default()
+        }
+    }
+
+    fn with_pim(pim: PimHeader) -> Self {
+        Self {
+            pim: Some(pim),
             ..Self::default()
         }
     }
@@ -285,6 +297,10 @@ pub(super) fn parse_transport(
         ip_proto::OSPF => {
             let ospf = parse_ospf_header(l4_bytes)?;
             Ok(TransportParse::with_ospf(ospf))
+        }
+        ip_proto::PIM => {
+            let pim = parse_pim_header(l4_bytes)?;
+            Ok(TransportParse::with_pim(pim))
         }
         ip_proto::SCTP => {
             let sctp = parse_sctp_minimal(l4_bytes)?;
@@ -395,6 +411,7 @@ fn parse_udp_transport(l4_bytes: &[u8], config: ParseConfig) -> Result<Transport
     let mut stun = None;
     let mut rip = None;
     let mut isakmp = None;
+    let mut rpc = None;
 
     let parse_application = config.stop_after == StopLayer::Application;
     let (wireguard, openvpn) = if parse_application {
@@ -414,6 +431,7 @@ fn parse_udp_transport(l4_bytes: &[u8], config: ParseConfig) -> Result<Transport
         maybe_probe_stun_udp(&udp, app, &mut hints, &mut stun);
         maybe_probe_rip_udp(&udp, app, &mut hints, &mut rip);
         maybe_probe_isakmp_udp(&udp, app, &mut hints, &mut isakmp);
+        maybe_probe_rpc_udp(&udp, app, &mut hints, &mut rpc);
         maybe_probe_llmnr_udp(&udp, app, &mut hints);
         maybe_probe_nbns_udp(&udp, app, &mut hints);
         (
@@ -466,6 +484,7 @@ fn parse_udp_transport(l4_bytes: &[u8], config: ParseConfig) -> Result<Transport
         stun.is_some(),
         rip.is_some(),
         isakmp.is_some(),
+        rpc.is_some(),
         wireguard.is_some(),
         openvpn.is_some(),
         vxlan.is_some(),
@@ -510,6 +529,7 @@ fn parse_udp_transport(l4_bytes: &[u8], config: ParseConfig) -> Result<Transport
         stun,
         rip,
         isakmp,
+        rpc,
         hints,
         ..TransportParse::default()
     })
@@ -701,6 +721,20 @@ fn maybe_probe_stun_udp(
     if is_udp_port_match(udp, STUN_PORT) && likely_stun_message(payload) {
         push_hint_unique(hints, UdpAppHint::Stun);
         *stun = parse_stun_message(payload).ok();
+    }
+}
+
+fn maybe_probe_rpc_udp(
+    udp: &UdpHeader,
+    payload: &[u8],
+    hints: &mut Vec<UdpAppHint>,
+    rpc: &mut Option<RpcMessage>,
+) {
+    if is_udp_port_match(udp, UDP_PORT_RPC)
+        && let Ok(message) = parse_rpc_message(payload)
+    {
+        push_hint_unique(hints, UdpAppHint::Rpc);
+        *rpc = Some(message);
     }
 }
 
@@ -1340,9 +1374,9 @@ mod tests {
 
     use crate::engine::builtin::{
         BuiltinPacketParser, Dnp3AppFunctionCode, Dnp3FunctionCode, FlowKey, FtpMessage,
-        NatPmpMessage, OpenVpnOpcode, ParseConfig, ParseWarningCode, PcpHeader, SipMessage,
-        SmtpMessage, SnmpMessage, SnmpPduType, SsdpMessage, StopLayer, TelnetCommand, TftpMessage,
-        TransportSegment, UdpAppHint, WireGuardMessageType,
+        NatPmpMessage, OpenVpnOpcode, ParseConfig, ParseWarningCode, PcpHeader, RpcMessage,
+        SipMessage, SmtpMessage, SnmpMessage, SnmpPduType, SsdpMessage, StopLayer, TelnetCommand,
+        TftpMessage, TransportSegment, UdpAppHint, WireGuardMessageType,
     };
     use crate::layer::application::http::HttpMessage;
     use crate::layer::network::icmpv6::NdpMessage;
@@ -1649,6 +1683,38 @@ mod tests {
         assert_eq!(ospf.version, 2);
         assert_eq!(ospf.message_type, 1);
         assert_eq!(ospf.router_id, Ipv4Addr::new(192, 168, 170, 8));
+    }
+
+    #[test]
+    fn parses_pim_from_ip_payload() {
+        let frame = build_ethernet_ipv4_l4_frame(103, &[0x21, 0x00, 0x12, 0x34]);
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+        let pim = parsed.pim.as_ref().expect("PIM header");
+
+        assert_eq!(pim.version, 2);
+        assert_eq!(pim.message_type, 1);
+    }
+
+    #[test]
+    fn parses_rpc_from_udp_payload() {
+        let payload = [
+            0x7b, 0x55, 0x8a, 0xeb, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x01,
+            0x86, 0xa3, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x01,
+        ];
+        let frame = build_ethernet_ipv4_udp_frame(49_152, 2049, &payload);
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+
+        assert_eq!(
+            parsed.rpc,
+            Some(RpcMessage::Call {
+                xid: 0x7b55_8aeb,
+                rpc_version: 2,
+                program: 100_003,
+                program_version: 3,
+                procedure: 1,
+            })
+        );
+        assert!(parsed.udp_hints.contains(&UdpAppHint::Rpc));
     }
 
     #[test]
