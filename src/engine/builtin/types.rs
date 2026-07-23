@@ -27,6 +27,7 @@ use crate::layer::application::rpc::RpcMessage;
 use crate::layer::application::rtcp::RtcpHeader;
 use crate::layer::application::rtp::RtpHeader;
 use crate::layer::application::sip::SipMessage;
+use crate::layer::application::smb2::Smb2Header;
 use crate::layer::application::smtp::SmtpMessage;
 use crate::layer::application::snmp::SnmpMessage;
 use crate::layer::application::ssdp::SsdpMessage;
@@ -35,6 +36,7 @@ use crate::layer::application::stun::StunMessage;
 use crate::layer::application::telnet::TelnetCommand;
 use crate::layer::application::tftp::TftpMessage;
 use crate::layer::application::tls::TlsClientHello;
+use crate::layer::application::vrrp::VrrpHeader;
 use crate::layer::datalink::arp::ArpPacket;
 use crate::layer::datalink::dot11::{Dot11Frame, RadiotapHeader};
 use crate::layer::network::icmp::IcmpHeader;
@@ -504,6 +506,7 @@ pub struct ParsedPacket {
     pub igmp: Option<IgmpInfo>,
     pub ospf: Option<OspfHeader>,
     pub pim: Option<PimHeader>,
+    pub vrrp: Option<VrrpHeader>,
     pub sctp: Option<SctpInfo>,
     pub tcp_options: Option<TcpOptionsParsed>,
     pub gre: Option<GreInfo>,
@@ -539,6 +542,7 @@ pub struct ParsedPacket {
     pub ldap: Option<LdapMessage>,
     pub nntp: Option<NntpMessage>,
     pub ftp: Option<FtpMessage>,
+    pub smb2: Option<Smb2Header>,
     pub smtp: Option<SmtpMessage>,
     pub telnet: Option<TelnetCommand>,
     pub mqtt: Option<MqttMessage>,
