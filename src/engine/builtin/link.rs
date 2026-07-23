@@ -168,7 +168,9 @@ pub(super) fn parse_link_with_linktype(
         // platforms (older libpcap headers) - same wire format, different
         // historical numbering; some tools (older tcpdump/libpcap builds)
         // still write 12 into the pcap global header for raw IP captures.
-        Some(101 | 12) => {
+        // 228/229 = LINKTYPE_IPV4/LINKTYPE_IPV6, family-fixed variants of
+        // the same no-link-header wire format.
+        Some(101 | 12 | 228 | 229) => {
             let protocol = match raw.first().map(|byte| byte >> 4) {
                 Some(4) => ethertype::IPV4,
                 Some(6) => ethertype::IPV6,
