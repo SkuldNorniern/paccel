@@ -11,8 +11,8 @@ pub mod session;
 pub mod tree;
 
 pub use builtin::{
-    AhInfo, BgpMessage, BgpMessageType, BuiltinPacketParser, CoapMessage, CoapType, Dhcp6Message,
-    Dhcp6Option, Dnp3AppFunctionCode, Dnp3Application, Dnp3FunctionCode, Dnp3Message,
+    AhInfo, BgpMessage, BgpMessageType, BuiltinPacketParser, CdpHeader, CoapMessage, CoapType,
+    Dhcp6Message, Dhcp6Option, Dnp3AppFunctionCode, Dnp3Application, Dnp3FunctionCode, Dnp3Message,
     Dnp3Transport, EigrpHeader, EspInfo, EthernetFrame, FlowKey, FtpMessage, GeneveInfo, GreInfo,
     HsrpHeader, IgmpInfo, ImapMessage, IsakmpHeader, KerberosMessage, KerberosMessageType,
     L2tpInfo, LacpHeader, LdapMessage, LdapProtocolOp, ModbusMessage, MplsInfo, MplsLabel,

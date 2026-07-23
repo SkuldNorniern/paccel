@@ -6,6 +6,8 @@ mod types;
 use crate::engine::constants::{ethertype, ip_proto};
 use crate::layer::LayerError;
 pub use crate::layer::application::bgp::{BgpMessage, BgpMessageType};
+pub use crate::layer::application::cdp::CdpHeader;
+use crate::layer::application::cdp::parse_cdp_header;
 pub use crate::layer::application::coap::{CoapMessage, CoapType};
 pub use crate::layer::application::dhcp6::{Dhcp6Message, Dhcp6Option};
 pub use crate::layer::application::dnp3::{
@@ -128,6 +130,12 @@ impl BuiltinPacketParser {
         if eth.ethertype == 0 && eth.payload_offset == 17 {
             let mut parsed = parsed;
             parsed.stp = Some(parse_stp(&raw[l3_offset..])?);
+            return Ok(parsed);
+        }
+
+        if eth.ethertype == 0 && eth.payload_offset == 22 {
+            let mut parsed = parsed;
+            parsed.cdp = parse_cdp_header(&raw[l3_offset..]).ok();
             return Ok(parsed);
         }
 
@@ -1122,6 +1130,28 @@ mod tests {
         assert_eq!(
             parsed.ethernet.as_ref().expect("ethernet").payload_offset,
             17
+        );
+    }
+
+    #[test]
+    fn parses_cdp_from_llc_snap_ethernet_frame() {
+        let mut frame = Vec::new();
+        frame.extend_from_slice(&[0x01, 0x00, 0x0c, 0xcc, 0xcc, 0xcc]);
+        frame.extend_from_slice(&[0x02, 0x00, 0x00, 0x00, 0x00, 0x03]);
+        frame.extend_from_slice(&12u16.to_be_bytes());
+        frame.extend_from_slice(&[0xaa, 0xaa, 0x03, 0x00, 0x00, 0x0c, 0x20, 0x00]);
+        frame.extend_from_slice(&[1, 180, 0xc6, 0x5e]);
+
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+        let cdp = parsed.cdp.as_ref().expect("CDP header");
+
+        assert_eq!(cdp.version, 1);
+        assert_eq!(cdp.ttl, 180);
+        assert_eq!(cdp.checksum, 0xc65e);
+        assert_eq!(parsed.ethernet.as_ref().expect("ethernet").ethertype, 0);
+        assert_eq!(
+            parsed.ethernet.as_ref().expect("ethernet").payload_offset,
+            22
         );
     }
 }
