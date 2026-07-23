@@ -4,10 +4,10 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 
 use paccel::engine::{
     BgpMessageType, BuiltinPacketParser, CoapType, Dnp3AppFunctionCode, Dnp3FunctionCode,
-    FtpMessage, KerberosMessageType, LdapProtocolOp, MqttPacketType, NntpMessage, OpenVpnOpcode,
-    RpcMessage, SipMessage, SmtpMessage, SnmpMessage, SnmpPduType, SsdpMessage, TelnetCommand,
-    TftpMessage, TransportSegment, UdpAppHint, WireGuardMessageType, iter_capture_frames,
-    parse_capture_frames, parse_pcap_frames,
+    FtpMessage, ImapMessage, KerberosMessageType, LdapProtocolOp, MqttPacketType, NntpMessage,
+    OpenVpnOpcode, RpcMessage, SipMessage, SmtpMessage, SnmpMessage, SnmpPduType, SsdpMessage,
+    TelnetCommand, TftpMessage, TransportSegment, UdpAppHint, WireGuardMessageType,
+    iter_capture_frames, parse_capture_frames, parse_pcap_frames,
 };
 use paccel::layer::application::quic::QuicPacketType;
 
@@ -585,6 +585,64 @@ fn nntp_fixture_frame_four_matches_tshark() {
         parsed.nntp,
         Some(NntpMessage::Response { code: 200, .. })
     ));
+}
+
+#[test]
+fn syslog_fixture_frame_one_has_expected_facility_severity() {
+    let bytes = include_bytes!("pcaps/protocol-gaps/syslog_messages.pcapng");
+    let frame = iter_capture_frames(bytes)
+        .expect("pcapng should parse")
+        .next()
+        .expect("capture should contain frame 1")
+        .expect("capture frame should parse");
+    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
+        .expect("packet should parse");
+    let syslog = parsed.syslog.expect("Syslog should be present");
+
+    assert_eq!(syslog.facility, 23);
+    assert_eq!(syslog.severity, 5);
+    assert!(matches!(
+        parsed.transport,
+        Some(TransportSegment::Udp(ref udp)) if udp.destination_port == 514
+    ));
+    assert!(parsed.udp_hints.contains(&UdpAppHint::Syslog));
+}
+
+#[test]
+fn syslog_fixture_frame_two_has_expected_facility_severity() {
+    let bytes = include_bytes!("pcaps/protocol-gaps/syslog_messages.pcapng");
+    let frame = iter_capture_frames(bytes)
+        .expect("pcapng should parse")
+        .nth(1)
+        .expect("capture should contain frame 2")
+        .expect("capture frame should parse");
+    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
+        .expect("packet should parse");
+    let syslog = parsed.syslog.expect("Syslog should be present");
+
+    assert_eq!(syslog.facility, 23);
+    assert_eq!(syslog.severity, 6);
+    assert!(parsed.udp_hints.contains(&UdpAppHint::Syslog));
+}
+
+#[test]
+fn imap_fixture_frame_four_is_greeting() {
+    let bytes = include_bytes!("pcaps/protocol-gaps/imap_banner.cap");
+    let frame = iter_capture_frames(bytes)
+        .expect("pcap should parse")
+        .nth(3)
+        .expect("capture should contain frame 4")
+        .expect("capture frame should parse");
+    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
+        .expect("packet should parse");
+
+    assert_eq!(
+        parsed.imap,
+        Some(ImapMessage::Untagged {
+            text: "OK Microsoft Exchange IMAP4rev1 server version 5.5.2650.23 (umr-mail02) ready"
+                .to_string(),
+        })
+    );
 }
 
 #[test]
