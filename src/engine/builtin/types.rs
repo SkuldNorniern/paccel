@@ -2,6 +2,7 @@ use std::net::{IpAddr, Ipv4Addr};
 
 use crate::engine::constants::ethertype_name;
 use crate::layer::application::bgp::BgpMessage;
+use crate::layer::application::cdp::CdpHeader;
 use crate::layer::application::coap::CoapMessage;
 use crate::layer::application::dhcp::DhcpMessage;
 use crate::layer::application::dhcp6::Dhcp6Message;
@@ -534,6 +535,7 @@ pub struct ParsedPacket {
     pub lldp: Option<LldpInfo>,
     pub lacp: Option<LacpHeader>,
     pub stp: Option<StpBpdu>,
+    pub cdp: Option<CdpHeader>,
     pub dns: Option<DnsMessage>,
     pub dhcp: Option<DhcpMessage>,
     pub dhcp6: Option<Dhcp6Message>,

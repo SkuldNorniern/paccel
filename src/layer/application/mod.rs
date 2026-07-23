@@ -1,4 +1,5 @@
 pub mod bgp;
+pub mod cdp;
 pub mod coap;
 pub mod dhcp;
 pub mod dhcp6;
@@ -41,6 +42,7 @@ pub mod tftp;
 pub mod tls;
 pub mod vrrp;
 
+pub use cdp::CdpHeader;
 pub use eigrp::EigrpHeader;
 pub use hsrp::HsrpHeader;
 pub use isakmp::IsakmpHeader;

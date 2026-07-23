@@ -13,6 +13,8 @@ const ETHERTYPE_OFFSET: usize = 12;
 const IEEE_8023_MAX_LENGTH: u16 = 1500;
 const STP_DESTINATION: [u8; MAC_ADDR_LEN] = [0x01, 0x80, 0xc2, 0x00, 0x00, 0x00];
 const STP_LLC_HEADER: [u8; 3] = [0x42, 0x42, 0x03];
+const CDP_DESTINATION: [u8; MAC_ADDR_LEN] = [0x01, 0x00, 0x0c, 0xcc, 0xcc, 0xcc];
+const CDP_LLC_SNAP_HEADER: [u8; 8] = [0xaa, 0xaa, 0x03, 0x00, 0x00, 0x0c, 0x20, 0x00];
 
 const SLL_HEADER_LEN: usize = 16;
 const SLL2_HEADER_LEN: usize = 20;
@@ -204,6 +206,11 @@ pub(super) fn parse_ethernet(raw: &[u8]) -> Result<(EthernetFrame, usize), Layer
                 == Some(STP_LLC_HEADER.as_slice())
         {
             ETH_HEADER_LEN + STP_LLC_HEADER.len()
+        } else if destination == CDP_DESTINATION
+            && raw.get(ETH_HEADER_LEN..ETH_HEADER_LEN + CDP_LLC_SNAP_HEADER.len())
+                == Some(CDP_LLC_SNAP_HEADER.as_slice())
+        {
+            ETH_HEADER_LEN + CDP_LLC_SNAP_HEADER.len()
         } else {
             ETH_HEADER_LEN
         };
