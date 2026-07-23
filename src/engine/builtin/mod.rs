@@ -12,6 +12,7 @@ pub use crate::layer::application::dnp3::{
     Dnp3AppFunctionCode, Dnp3Application, Dnp3FunctionCode, Dnp3Message, Dnp3Transport,
 };
 pub use crate::layer::application::ftp::FtpMessage;
+pub use crate::layer::application::imap::ImapMessage;
 pub use crate::layer::application::isakmp::IsakmpHeader;
 pub use crate::layer::application::kerberos::{KerberosMessage, KerberosMessageType};
 pub use crate::layer::application::ldap::{LdapMessage, LdapProtocolOp};
@@ -34,6 +35,7 @@ pub use crate::layer::application::snmp::{SnmpMessage, SnmpPduType};
 pub use crate::layer::application::ssdp::SsdpMessage;
 pub use crate::layer::application::ssh::SshBanner;
 pub use crate::layer::application::stun::StunMessage;
+pub use crate::layer::application::syslog::SyslogMessage;
 pub use crate::layer::application::telnet::TelnetCommand;
 pub use crate::layer::application::tftp::TftpMessage;
 pub use crate::layer::application::vrrp::VrrpHeader;
@@ -749,6 +751,7 @@ fn apply_transport_parse(parsed: &mut ParsedPacket, transport_parse: transport::
     parsed.bgp = transport_parse.bgp;
     parsed.ldap = transport_parse.ldap;
     parsed.nntp = transport_parse.nntp;
+    parsed.imap = transport_parse.imap;
     parsed.ftp = transport_parse.ftp;
     parsed.smb2 = transport_parse.smb2;
     parsed.smtp = transport_parse.smtp;
@@ -762,6 +765,7 @@ fn apply_transport_parse(parsed: &mut ParsedPacket, transport_parse: transport::
     parsed.rip = transport_parse.rip;
     parsed.isakmp = transport_parse.isakmp;
     parsed.rpc = transport_parse.rpc;
+    parsed.syslog = transport_parse.syslog;
     parsed.udp_hints = transport_parse.hints;
 }
 
