@@ -20,7 +20,8 @@ The goal is to become a strong parsing alternative for Fluere workloads (not a f
 | Network | IPv4 with options; IPv6 with extension headers; ICMP with echo; ICMPv6 with NDP; IGMP |
 | Transport | TCP with options; UDP; SCTP; GRE; AH; ESP; L2TP |
 | Tunnel (recursive inner decode) | GRE; VXLAN; GENEVE; MPLS; IP-in-IP |
-| Application | DNS with full records and EDNS; DHCP; NTP; TLS ClientHello with SNI/ALPN; HTTP/1.x; QUIC long headers; WireGuard classification |
+| Application (full parse) | DNS (records + EDNS), mDNS, DHCP, DHCPv6, NTP, TLS ClientHello (SNI/ALPN), HTTP/1.x, QUIC long headers, BGP, CoAP, DNP3, Kerberos (UDP/TCP), LDAP, Modbus/TCP, MQTT, NNTP, RADIUS, RTP, SIP, SNMP, TFTP |
+| Application (port/heuristic classification only) | WireGuard, OpenVPN, L2TP |
 | Capture formats | pcap and pcapng (linktype-aware: Ethernet, SLL, SLL2, NULL, RAW, and 802.11) |
 | Reassembly | IPv4/IPv6 fragments; TCP streams (opt-in) |
 | Streaming | Multi-segment HTTP/TLS through `SessionTracker` |
@@ -84,6 +85,7 @@ Flow/state tracking should be composed on the integration side (for example insi
 | Linux cooked capture (SLL/SLL2) | yes | yes |
 | Typed protocol/ethertype name helpers | yes | yes |
 | One-shot structured parse output with warnings | limited | yes |
+| Application-layer protocol parsing (20 protocols, see table above) | no (link/network/transport only) | yes |
 | Tunnel metadata in one parse pass (MPLS/VXLAN/GENEVE/AH/ESP/WireGuard) | partial | yes |
 | Strict/permissive parser mode | no | yes |
 | Built-in raw send/receive transport stack | yes | no (out of scope) |
