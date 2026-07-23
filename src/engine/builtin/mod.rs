@@ -11,6 +11,7 @@ pub use crate::layer::application::dhcp6::{Dhcp6Message, Dhcp6Option};
 pub use crate::layer::application::dnp3::{
     Dnp3AppFunctionCode, Dnp3Application, Dnp3FunctionCode, Dnp3Message, Dnp3Transport,
 };
+pub use crate::layer::application::ftp::FtpMessage;
 pub use crate::layer::application::kerberos::{KerberosMessage, KerberosMessageType};
 pub use crate::layer::application::ldap::{LdapMessage, LdapProtocolOp};
 pub use crate::layer::application::modbus::ModbusMessage;
@@ -20,9 +21,11 @@ pub use crate::layer::application::radius::{RadiusAttribute, RadiusMessage};
 pub use crate::layer::application::rtcp::RtcpHeader;
 pub use crate::layer::application::rtp::RtpHeader;
 pub use crate::layer::application::sip::SipMessage;
+pub use crate::layer::application::smtp::SmtpMessage;
 pub use crate::layer::application::snmp::{SnmpMessage, SnmpPduType};
 pub use crate::layer::application::ssh::SshBanner;
 pub use crate::layer::application::stun::StunMessage;
+pub use crate::layer::application::telnet::TelnetCommand;
 pub use crate::layer::application::tftp::TftpMessage;
 use crate::layer::datalink::dot11::{parse_dot11, parse_radiotap};
 
@@ -726,6 +729,9 @@ fn apply_transport_parse(parsed: &mut ParsedPacket, transport_parse: transport::
     parsed.bgp = transport_parse.bgp;
     parsed.ldap = transport_parse.ldap;
     parsed.nntp = transport_parse.nntp;
+    parsed.ftp = transport_parse.ftp;
+    parsed.smtp = transport_parse.smtp;
+    parsed.telnet = transport_parse.telnet;
     parsed.mqtt = transport_parse.mqtt;
     parsed.modbus = transport_parse.modbus;
     parsed.ssh = transport_parse.ssh;

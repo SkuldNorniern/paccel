@@ -7,6 +7,7 @@ use crate::layer::application::dhcp::DhcpMessage;
 use crate::layer::application::dhcp6::Dhcp6Message;
 use crate::layer::application::dnp3::Dnp3Message;
 use crate::layer::application::dns::DnsMessage;
+use crate::layer::application::ftp::FtpMessage;
 use crate::layer::application::http::HttpMessage;
 use crate::layer::application::kerberos::KerberosMessage;
 use crate::layer::application::ldap::LdapMessage;
@@ -19,9 +20,11 @@ use crate::layer::application::radius::RadiusMessage;
 use crate::layer::application::rtcp::RtcpHeader;
 use crate::layer::application::rtp::RtpHeader;
 use crate::layer::application::sip::SipMessage;
+use crate::layer::application::smtp::SmtpMessage;
 use crate::layer::application::snmp::SnmpMessage;
 use crate::layer::application::ssh::SshBanner;
 use crate::layer::application::stun::StunMessage;
+use crate::layer::application::telnet::TelnetCommand;
 use crate::layer::application::tftp::TftpMessage;
 use crate::layer::application::tls::TlsClientHello;
 use crate::layer::datalink::arp::ArpPacket;
@@ -510,6 +513,9 @@ pub struct ParsedPacket {
     pub bgp: Option<BgpMessage>,
     pub ldap: Option<LdapMessage>,
     pub nntp: Option<NntpMessage>,
+    pub ftp: Option<FtpMessage>,
+    pub smtp: Option<SmtpMessage>,
+    pub telnet: Option<TelnetCommand>,
     pub mqtt: Option<MqttMessage>,
     pub modbus: Option<ModbusMessage>,
     pub ssh: Option<SshBanner>,

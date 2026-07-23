@@ -8,6 +8,7 @@ use crate::layer::application::dhcp::{DhcpMessage, parse_dhcp_message};
 use crate::layer::application::dhcp6::{Dhcp6Message, parse_dhcp6_message};
 use crate::layer::application::dnp3::{Dnp3Message, parse_dnp3_message};
 use crate::layer::application::dns::{DnsMessage, parse_dns_message};
+use crate::layer::application::ftp::{FtpMessage, parse_ftp};
 use crate::layer::application::http::{HttpMessage, parse_http};
 use crate::layer::application::kerberos::{
     KerberosMessage, parse_kerberos_tcp, parse_kerberos_udp,
@@ -22,9 +23,11 @@ use crate::layer::application::radius::{RadiusMessage, parse_radius_message};
 use crate::layer::application::rtcp::{RtcpHeader, parse_rtcp};
 use crate::layer::application::rtp::{RtpHeader, parse_rtp};
 use crate::layer::application::sip::{SipMessage, parse_sip};
+use crate::layer::application::smtp::{SmtpMessage, parse_smtp};
 use crate::layer::application::snmp::{SnmpMessage, parse_snmp_message};
 use crate::layer::application::ssh::{SshBanner, parse_ssh_banner};
 use crate::layer::application::stun::{StunMessage, parse_stun_message};
+use crate::layer::application::telnet::{TelnetCommand, parse_telnet_command};
 use crate::layer::application::tftp::{TftpMessage, parse_tftp_message};
 use crate::layer::application::tls::{TlsClientHello, parse_tls_client_hello};
 use crate::layer::network::icmp::IcmpHeader;
@@ -65,6 +68,9 @@ const STUN_PORT: u16 = 3478;
 const UDP_PORT_LLMNR: u16 = 5355;
 const UDP_PORT_NBNS: u16 = 137;
 const DNP3_PORT: u16 = 20_000;
+const TCP_PORT_FTP: u16 = 21;
+const TCP_PORT_SMTP: u16 = 25;
+const TCP_PORT_TELNET: u16 = 23;
 const TCP_PORT_BGP: u16 = 179;
 const TCP_PORT_LDAP: u16 = 389;
 const TCP_PORT_LDAPS: u16 = 636;
@@ -72,6 +78,7 @@ const TCP_PORT_NNTP: u16 = 119;
 const TCP_PORT_NNTPS: u16 = 563;
 const TCP_PORT_MQTT: u16 = 1883;
 const TCP_PORT_MODBUS: u16 = 502;
+const TCP_PORT_SUBMISSION: u16 = 587;
 const PORT_KERBEROS: u16 = 88;
 
 #[derive(Debug, Default)]
@@ -108,6 +115,9 @@ pub(super) struct TransportParse {
     pub bgp: Option<BgpMessage>,
     pub ldap: Option<LdapMessage>,
     pub nntp: Option<NntpMessage>,
+    pub ftp: Option<FtpMessage>,
+    pub smtp: Option<SmtpMessage>,
+    pub telnet: Option<TelnetCommand>,
     pub mqtt: Option<MqttMessage>,
     pub modbus: Option<ModbusMessage>,
     pub ssh: Option<SshBanner>,
@@ -275,6 +285,22 @@ fn classify_tcp_app_by_port(
     payload: &[u8],
     parsed: &mut TransportParse,
 ) {
+    if source_port == TCP_PORT_FTP || destination_port == TCP_PORT_FTP {
+        parsed.ftp = parse_ftp(payload).ok();
+        return;
+    }
+    if source_port == TCP_PORT_SMTP
+        || destination_port == TCP_PORT_SMTP
+        || source_port == TCP_PORT_SUBMISSION
+        || destination_port == TCP_PORT_SUBMISSION
+    {
+        parsed.smtp = parse_smtp(payload).ok();
+        return;
+    }
+    if source_port == TCP_PORT_TELNET || destination_port == TCP_PORT_TELNET {
+        parsed.telnet = parse_telnet_command(payload).ok();
+        return;
+    }
     if source_port == TCP_PORT_BGP || destination_port == TCP_PORT_BGP {
         parsed.bgp = parse_bgp_message(payload).ok();
     }
@@ -1206,9 +1232,10 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
     use crate::engine::builtin::{
-        BuiltinPacketParser, Dnp3AppFunctionCode, Dnp3FunctionCode, FlowKey, OpenVpnOpcode,
-        ParseConfig, ParseWarningCode, SipMessage, SnmpMessage, SnmpPduType, StopLayer,
-        TftpMessage, TransportSegment, UdpAppHint, WireGuardMessageType,
+        BuiltinPacketParser, Dnp3AppFunctionCode, Dnp3FunctionCode, FlowKey, FtpMessage,
+        OpenVpnOpcode, ParseConfig, ParseWarningCode, SipMessage, SmtpMessage, SnmpMessage,
+        SnmpPduType, StopLayer, TelnetCommand, TftpMessage, TransportSegment, UdpAppHint,
+        WireGuardMessageType,
     };
     use crate::layer::application::http::HttpMessage;
     use crate::layer::network::icmpv6::NdpMessage;
@@ -1565,6 +1592,81 @@ mod tests {
 
         assert_eq!(ssh.protocol_version, "2.0");
         assert_eq!(ssh.software_version, "OpenSSH_7.6p1");
+    }
+
+    #[test]
+    fn parses_ftp_response_on_tcp_port_21() {
+        let payload = b"220 FTP server ready.\r\n";
+        let frame = build_ethernet_ipv4_tcp_frame(21, 49_152, payload);
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+
+        assert_eq!(
+            parsed.ftp,
+            Some(FtpMessage::Response {
+                code: 220,
+                text: "FTP server ready.".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn parses_ftp_command_on_tcp_port_21() {
+        let payload = b"USER anonymous\r\n";
+        let frame = build_ethernet_ipv4_tcp_frame(49_152, 21, payload);
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+
+        assert_eq!(
+            parsed.ftp,
+            Some(FtpMessage::Command {
+                verb: "USER".to_string(),
+                args: "anonymous".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn parses_smtp_response_on_tcp_port_25() {
+        let payload = b"220-mail.example ESMTP ready\r\n220 mail.example ready\r\n";
+        let frame = build_ethernet_ipv4_tcp_frame(25, 49_152, payload);
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+
+        assert_eq!(
+            parsed.smtp,
+            Some(SmtpMessage::Response {
+                code: 220,
+                text: "mail.example ESMTP ready".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn parses_smtp_command_on_tcp_port_25() {
+        let payload = b"EHLO client.example\r\n";
+        let frame = build_ethernet_ipv4_tcp_frame(49_152, 25, payload);
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+
+        assert_eq!(
+            parsed.smtp,
+            Some(SmtpMessage::Command {
+                verb: "EHLO".to_string(),
+                args: "client.example".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn parses_telnet_iac_do_on_tcp_port_23() {
+        let payload = [0xff, 0xfd, 0x03, 0xff, 0xfb, 0x01];
+        let frame = build_ethernet_ipv4_tcp_frame(49_152, 23, &payload);
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+
+        assert_eq!(
+            parsed.telnet,
+            Some(TelnetCommand {
+                command: 0xfd,
+                option: 0x03,
+            })
+        );
     }
 
     #[test]
