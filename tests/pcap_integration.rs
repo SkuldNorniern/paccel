@@ -168,9 +168,7 @@ fn quic_tls_upgrade_fixture_frame_forty_seven_is_v1_initial() {
 
     assert_eq!(
         ipv6.destination,
-        "2606:4700:10::6816:826"
-            .parse::<Ipv6Addr>()
-            .unwrap()
+        "2606:4700:10::6816:826".parse::<Ipv6Addr>().unwrap()
     );
     assert_eq!(quic.version, 1);
     assert_eq!(quic.kind, QuicPacketType::Initial);
@@ -437,6 +435,55 @@ fn rtp_fixture_frame_six_matches_tshark() {
     assert_eq!(rtp.timestamp, 160);
     assert_eq!(rtp.ssrc, 0x343d_a99b);
     assert!(parsed.udp_hints.contains(&UdpAppHint::Rtp));
+}
+
+#[test]
+fn rtcp_fixture_frame_228_is_sender_report() {
+    let bytes = include_bytes!("pcaps/protocol-gaps/rtcp_sr_rr.pcap");
+    let frame = iter_capture_frames(bytes)
+        .expect("pcap should parse")
+        .nth(227)
+        .expect("capture should contain frame 228")
+        .expect("capture frame should parse");
+    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
+        .expect("packet should parse");
+    let rtcp = parsed.rtcp.as_ref().expect("RTCP should be present");
+
+    assert_eq!(rtcp.packet_type, 200);
+    assert_eq!(rtcp.version, 2);
+    assert_eq!(rtcp.ssrc, 0x5d93_1534);
+}
+
+#[test]
+fn rtcp_fixture_frame_230_is_receiver_report() {
+    let bytes = include_bytes!("pcaps/protocol-gaps/rtcp_sr_rr.pcap");
+    let frame = iter_capture_frames(bytes)
+        .expect("pcap should parse")
+        .nth(229)
+        .expect("capture should contain frame 230")
+        .expect("capture frame should parse");
+    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
+        .expect("packet should parse");
+    let rtcp = parsed.rtcp.as_ref().expect("RTCP should be present");
+
+    assert_eq!(rtcp.packet_type, 201);
+    assert_eq!(rtcp.ssrc, 0x0193_2db4);
+}
+
+#[test]
+fn ssh_banner_fixture_frame_four_parses_openssh_client_banner() {
+    let bytes = include_bytes!("pcaps/protocol-gaps/ssh_banner.pcapng");
+    let frame = iter_capture_frames(bytes)
+        .expect("pcapng should parse")
+        .nth(3)
+        .expect("capture should contain frame 4")
+        .expect("capture frame should parse");
+    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
+        .expect("packet should parse");
+    let ssh = parsed.ssh.as_ref().expect("SSH should be present");
+
+    assert_eq!(ssh.protocol_version, "2.0");
+    assert_eq!(ssh.software_version, "OpenSSH_7.6p1");
 }
 
 #[test]
