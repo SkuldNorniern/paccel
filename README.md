@@ -20,8 +20,8 @@ The goal is to become a strong parsing alternative for Fluere workloads (not a f
 | Network | IPv4 with options; IPv6 with extension headers; ICMP with echo; ICMPv6 with NDP; IGMP |
 | Transport | TCP with options; UDP; SCTP; GRE; AH; ESP; L2TP |
 | Tunnel (recursive inner decode) | GRE; VXLAN; GENEVE; MPLS; IP-in-IP |
-| Application (full parse) | DNS (records + EDNS), mDNS, DHCP, DHCPv6, NTP, TLS ClientHello (SNI/ALPN), HTTP/1.x, QUIC (version-aware long-header packet types v1/v2), BGP, CoAP, DNP3, Kerberos (UDP/TCP), LDAP, Modbus/TCP, MQTT, NNTP, RADIUS, RTCP, RTP, SIP, SNMP, SSH (banner), STUN, TFTP |
-| Application (port/heuristic classification only) | WireGuard, OpenVPN, L2TP, QUIC short header (1-RTT), LLMNR, NBNS |
+| Application (full parse) | DNS (records + EDNS), mDNS, DHCP, DHCPv6, NTP, TLS ClientHello (SNI/ALPN), HTTP/1.x, QUIC (version-aware long-header packet types v1/v2), BGP, CoAP, DNP3, FTP, IKE/ISAKMP (v1/v2), Kerberos (UDP/TCP), LDAP, Modbus/TCP, MQTT, NNTP, OSPF, PCP, RADIUS, RIP, RTCP, RTP, SIP, SMTP, SNMP, SSDP, SSH (banner), STUN, TFTP, Telnet (IAC negotiation) |
+| Application (port/heuristic classification only) | WireGuard, OpenVPN, L2TP, QUIC short header (1-RTT), LLMNR, NBNS, NAT-PMP |
 | Capture formats | pcap and pcapng (linktype-aware: Ethernet, SLL, SLL2, NULL, RAW/IPv4/IPv6, and 802.11) |
 | Reassembly | IPv4/IPv6 fragments; TCP streams (opt-in) |
 | Streaming | Multi-segment HTTP/TLS through `SessionTracker` |
