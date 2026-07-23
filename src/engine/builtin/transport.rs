@@ -8,7 +8,9 @@ use crate::layer::application::dhcp::{DhcpMessage, parse_dhcp_message};
 use crate::layer::application::dhcp6::{Dhcp6Message, parse_dhcp6_message};
 use crate::layer::application::dnp3::{Dnp3Message, parse_dnp3_message};
 use crate::layer::application::dns::{DnsMessage, parse_dns_message};
+use crate::layer::application::eigrp::{EigrpHeader, parse_eigrp_header};
 use crate::layer::application::ftp::{FtpMessage, parse_ftp};
+use crate::layer::application::hsrp::{HsrpHeader, parse_hsrp_header};
 use crate::layer::application::http::{HttpMessage, parse_http};
 use crate::layer::application::imap::{ImapMessage, parse_imap_message};
 use crate::layer::application::isakmp::{IsakmpHeader, parse_isakmp_header};
@@ -82,6 +84,7 @@ const UDP_PORT_ISAKMP: u16 = 500;
 const UDP_PORT_RIP: u16 = 520;
 const UDP_PORT_RPC: u16 = 2049;
 const UDP_PORT_SYSLOG: u16 = 514;
+const UDP_PORT_HSRP: u16 = 1985;
 const STUN_PORT: u16 = 3478;
 const UDP_PORT_LLMNR: u16 = 5355;
 const UDP_PORT_NBNS: u16 = 137;
@@ -109,6 +112,7 @@ pub(super) struct TransportParse {
     pub ndp: Option<NdpMessage>,
     pub igmp: Option<IgmpInfo>,
     pub ospf: Option<OspfHeader>,
+    pub eigrp: Option<EigrpHeader>,
     pub pim: Option<PimHeader>,
     pub vrrp: Option<VrrpHeader>,
     pub sctp: Option<SctpInfo>,
@@ -156,6 +160,7 @@ pub(super) struct TransportParse {
     pub isakmp: Option<IsakmpHeader>,
     pub rpc: Option<RpcMessage>,
     pub syslog: Option<SyslogMessage>,
+    pub hsrp: Option<HsrpHeader>,
     pub hints: Vec<UdpAppHint>,
 }
 
@@ -200,6 +205,13 @@ impl TransportParse {
     fn with_pim(pim: PimHeader) -> Self {
         Self {
             pim: Some(pim),
+            ..Self::default()
+        }
+    }
+
+    fn with_eigrp(eigrp: EigrpHeader) -> Self {
+        Self {
+            eigrp: Some(eigrp),
             ..Self::default()
         }
     }
@@ -315,6 +327,10 @@ pub(super) fn parse_transport(
         ip_proto::OSPF => {
             let ospf = parse_ospf_header(l4_bytes)?;
             Ok(TransportParse::with_ospf(ospf))
+        }
+        ip_proto::EIGRP => {
+            let eigrp = parse_eigrp_header(l4_bytes)?;
+            Ok(TransportParse::with_eigrp(eigrp))
         }
         ip_proto::PIM => {
             let pim = parse_pim_header(l4_bytes)?;
@@ -443,6 +459,7 @@ fn parse_udp_transport(l4_bytes: &[u8], config: ParseConfig) -> Result<Transport
     let mut isakmp = None;
     let mut rpc = None;
     let mut syslog = None;
+    let mut hsrp = None;
 
     let parse_application = config.stop_after == StopLayer::Application;
     let (wireguard, openvpn) = if parse_application {
@@ -464,6 +481,7 @@ fn parse_udp_transport(l4_bytes: &[u8], config: ParseConfig) -> Result<Transport
         maybe_probe_isakmp_udp(&udp, app, &mut hints, &mut isakmp);
         maybe_probe_rpc_udp(&udp, app, &mut hints, &mut rpc);
         maybe_probe_syslog_udp(&udp, app, &mut hints, &mut syslog);
+        maybe_probe_hsrp_udp(&udp, app, &mut hints, &mut hsrp);
         maybe_probe_llmnr_udp(&udp, app, &mut hints);
         maybe_probe_nbns_udp(&udp, app, &mut hints);
         (
@@ -518,6 +536,7 @@ fn parse_udp_transport(l4_bytes: &[u8], config: ParseConfig) -> Result<Transport
         isakmp.is_some(),
         rpc.is_some(),
         syslog.is_some(),
+        hsrp.is_some(),
         wireguard.is_some(),
         openvpn.is_some(),
         vxlan.is_some(),
@@ -564,9 +583,24 @@ fn parse_udp_transport(l4_bytes: &[u8], config: ParseConfig) -> Result<Transport
         isakmp,
         rpc,
         syslog,
+        hsrp,
         hints,
         ..TransportParse::default()
     })
+}
+
+fn maybe_probe_hsrp_udp(
+    udp: &UdpHeader,
+    payload: &[u8],
+    hints: &mut Vec<UdpAppHint>,
+    hsrp: &mut Option<HsrpHeader>,
+) {
+    if is_udp_port_match(udp, UDP_PORT_HSRP)
+        && let Ok(header) = parse_hsrp_header(payload)
+    {
+        push_hint_unique(hints, UdpAppHint::Hsrp);
+        *hsrp = Some(header);
+    }
 }
 
 fn maybe_probe_syslog_udp(
@@ -1736,6 +1770,21 @@ mod tests {
     }
 
     #[test]
+    fn parses_eigrp_from_ip_payload() {
+        let mut payload = [0; 20];
+        payload[0] = 2;
+        payload[1] = 5;
+        payload[18..20].copy_from_slice(&100u16.to_be_bytes());
+        let frame = build_ethernet_ipv4_l4_frame(88, &payload);
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+        let eigrp = parsed.eigrp.as_ref().expect("EIGRP header");
+
+        assert_eq!(eigrp.version, 2);
+        assert_eq!(eigrp.opcode, 5);
+        assert_eq!(eigrp.as_number, 100);
+    }
+
+    #[test]
     fn parses_pim_from_ip_payload() {
         let frame = build_ethernet_ipv4_l4_frame(103, &[0x21, 0x00, 0x12, 0x34]);
         let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
@@ -1756,6 +1805,24 @@ mod tests {
         assert_eq!(vrrp.virtual_router_id, 1);
         assert_eq!(vrrp.priority, 100);
         assert_eq!(vrrp.address_count, 1);
+    }
+
+    #[test]
+    fn parses_hsrp_from_udp_payload() {
+        let mut payload = [0; 20];
+        payload[2] = 16;
+        payload[5] = 90;
+        payload[6] = 10;
+        let frame = build_ethernet_ipv4_udp_frame(49_152, 1985, &payload);
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+        let hsrp = parsed.hsrp.as_ref().expect("HSRP header");
+
+        assert_eq!(hsrp.version, 0);
+        assert_eq!(hsrp.opcode, 0);
+        assert_eq!(hsrp.state, 16);
+        assert_eq!(hsrp.group, 10);
+        assert_eq!(hsrp.priority, 90);
+        assert!(parsed.udp_hints.contains(&UdpAppHint::Hsrp));
     }
 
     #[test]

@@ -9,6 +9,7 @@ pub mod ethertype {
     pub const PPPOE_SESSION: u16 = 0x8864;
     pub const TRANSPARENT_ETHERNET_BRIDGING: u16 = 0x6558;
     pub const QINQ_8021AD: u16 = 0x88A8;
+    pub const SLOW_PROTOCOLS: u16 = 0x8809;
     pub const LLDP: u16 = 0x88CC;
     pub const PTP_1588: u16 = 0x88F7;
 }
@@ -24,6 +25,7 @@ pub mod ip_proto {
     pub const ESP: u8 = 50;
     pub const AH: u8 = 51;
     pub const ICMPV6: u8 = 58;
+    pub const EIGRP: u8 = 88;
     pub const OSPF: u8 = 89;
     pub const PIM: u8 = 103;
     pub const VRRP: u8 = 112;
@@ -43,6 +45,7 @@ pub fn ethertype_name(value: u16) -> &'static str {
         ethertype::PPPOE_DISCOVERY => "pppoe-discovery",
         ethertype::PPPOE_SESSION => "pppoe-session",
         ethertype::QINQ_8021AD => "qinq",
+        ethertype::SLOW_PROTOCOLS => "slow-protocols",
         ethertype::LLDP => "lldp",
         ethertype::PTP_1588 => "ptp",
         _ => "unknown",
@@ -61,6 +64,7 @@ pub fn ip_protocol_name(value: u8) -> &'static str {
         ip_proto::ESP => "esp",
         ip_proto::AH => "ah",
         ip_proto::ICMPV6 => "icmpv6",
+        ip_proto::EIGRP => "eigrp",
         ip_proto::OSPF => "ospf",
         ip_proto::PIM => "pim",
         ip_proto::VRRP => "vrrp",
