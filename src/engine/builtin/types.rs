@@ -19,6 +19,7 @@ use crate::layer::application::radius::RadiusMessage;
 use crate::layer::application::rtp::RtpHeader;
 use crate::layer::application::sip::SipMessage;
 use crate::layer::application::snmp::SnmpMessage;
+use crate::layer::application::stun::StunMessage;
 use crate::layer::application::tftp::TftpMessage;
 use crate::layer::application::tls::TlsClientHello;
 use crate::layer::datalink::arp::ArpPacket;
@@ -405,6 +406,9 @@ pub enum UdpAppHint {
     Rtp,
     Coap,
     Kerberos,
+    Stun,
+    Llmnr,
+    Nbns,
 }
 
 impl UdpAppHint {
@@ -425,6 +429,9 @@ impl UdpAppHint {
             Self::Rtp => "rtp",
             Self::Coap => "coap",
             Self::Kerberos => "kerberos",
+            Self::Stun => "stun",
+            Self::Llmnr => "llmnr",
+            Self::Nbns => "nbns",
         }
     }
 }
@@ -500,6 +507,7 @@ pub struct ParsedPacket {
     pub modbus: Option<ModbusMessage>,
     pub coap: Option<CoapMessage>,
     pub kerberos: Option<KerberosMessage>,
+    pub stun: Option<StunMessage>,
     pub udp_hints: Vec<UdpAppHint>,
     pub warnings: Vec<ParseWarning>,
     pub inner: Option<Box<ParsedPacket>>,

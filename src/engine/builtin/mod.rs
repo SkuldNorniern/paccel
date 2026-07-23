@@ -20,6 +20,7 @@ pub use crate::layer::application::radius::{RadiusAttribute, RadiusMessage};
 pub use crate::layer::application::rtp::RtpHeader;
 pub use crate::layer::application::sip::SipMessage;
 pub use crate::layer::application::snmp::{SnmpMessage, SnmpPduType};
+pub use crate::layer::application::stun::StunMessage;
 pub use crate::layer::application::tftp::TftpMessage;
 use crate::layer::datalink::dot11::{parse_dot11, parse_radiotap};
 
@@ -726,6 +727,7 @@ fn apply_transport_parse(parsed: &mut ParsedPacket, transport_parse: transport::
     parsed.modbus = transport_parse.modbus;
     parsed.coap = transport_parse.coap;
     parsed.kerberos = transport_parse.kerberos;
+    parsed.stun = transport_parse.stun;
     parsed.udp_hints = transport_parse.hints;
 }
 

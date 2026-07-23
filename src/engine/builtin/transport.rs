@@ -22,6 +22,7 @@ use crate::layer::application::radius::{RadiusMessage, parse_radius_message};
 use crate::layer::application::rtp::{RtpHeader, parse_rtp};
 use crate::layer::application::sip::{SipMessage, parse_sip};
 use crate::layer::application::snmp::{SnmpMessage, parse_snmp_message};
+use crate::layer::application::stun::{StunMessage, parse_stun_message};
 use crate::layer::application::tftp::{TftpMessage, parse_tftp_message};
 use crate::layer::application::tls::{TlsClientHello, parse_tls_client_hello};
 use crate::layer::network::icmp::IcmpHeader;
@@ -58,6 +59,9 @@ const UDP_PORT_SIP: u16 = 5060;
 const UDP_PORT_WIREGUARD: u16 = 51820;
 const UDP_PORT_WIREGUARD_ALT: u16 = 51821;
 const UDP_PORT_COAP: u16 = 5683;
+const STUN_PORT: u16 = 3478;
+const UDP_PORT_LLMNR: u16 = 5355;
+const UDP_PORT_NBNS: u16 = 137;
 const DNP3_PORT: u16 = 20_000;
 const TCP_PORT_BGP: u16 = 179;
 const TCP_PORT_LDAP: u16 = 389;
@@ -105,6 +109,7 @@ pub(super) struct TransportParse {
     pub modbus: Option<ModbusMessage>,
     pub coap: Option<CoapMessage>,
     pub kerberos: Option<KerberosMessage>,
+    pub stun: Option<StunMessage>,
     pub hints: Vec<UdpAppHint>,
 }
 
@@ -322,6 +327,7 @@ fn parse_udp_transport(l4_bytes: &[u8], config: ParseConfig) -> Result<Transport
     let mut sip = None;
     let mut coap = None;
     let mut kerberos = None;
+    let mut stun = None;
 
     let parse_application = config.stop_after == StopLayer::Application;
     let (wireguard, openvpn) = if parse_application {
@@ -336,6 +342,9 @@ fn parse_udp_transport(l4_bytes: &[u8], config: ParseConfig) -> Result<Transport
         maybe_probe_sip_udp(&udp, app, &mut hints, &mut sip);
         maybe_probe_coap_udp(&udp, app, &mut hints, &mut coap);
         maybe_probe_kerberos_udp(&udp, app, &mut hints, &mut kerberos);
+        maybe_probe_stun_udp(&udp, app, &mut hints, &mut stun);
+        maybe_probe_llmnr_udp(&udp, app, &mut hints);
+        maybe_probe_nbns_udp(&udp, app, &mut hints);
         (
             maybe_classify_wireguard_udp(&udp, app, &mut hints),
             maybe_classify_openvpn_udp(&udp, app, &mut hints),
@@ -368,6 +377,7 @@ fn parse_udp_transport(l4_bytes: &[u8], config: ParseConfig) -> Result<Transport
         sip.is_some(),
         coap.is_some(),
         kerberos.is_some(),
+        stun.is_some(),
         wireguard.is_some(),
         openvpn.is_some(),
         vxlan.is_some(),
@@ -398,6 +408,7 @@ fn parse_udp_transport(l4_bytes: &[u8], config: ParseConfig) -> Result<Transport
         quic,
         coap,
         kerberos,
+        stun,
         hints,
         ..TransportParse::default()
     })
@@ -530,6 +541,36 @@ fn maybe_probe_kerberos_udp(
     {
         push_hint_unique(hints, UdpAppHint::Kerberos);
         *kerberos = Some(message);
+    }
+}
+
+fn maybe_probe_stun_udp(
+    udp: &UdpHeader,
+    payload: &[u8],
+    hints: &mut Vec<UdpAppHint>,
+    stun: &mut Option<StunMessage>,
+) {
+    if is_udp_port_match(udp, STUN_PORT) && likely_stun_message(payload) {
+        push_hint_unique(hints, UdpAppHint::Stun);
+        *stun = parse_stun_message(payload).ok();
+    }
+}
+
+fn maybe_probe_llmnr_udp(udp: &UdpHeader, payload: &[u8], hints: &mut Vec<UdpAppHint>) {
+    if is_udp_port_match(udp, UDP_PORT_LLMNR)
+        && payload.len() >= 12
+        && parse_dns_message(payload).is_ok()
+    {
+        push_hint_unique(hints, UdpAppHint::Llmnr);
+    }
+}
+
+fn maybe_probe_nbns_udp(udp: &UdpHeader, payload: &[u8], hints: &mut Vec<UdpAppHint>) {
+    if is_udp_port_match(udp, UDP_PORT_NBNS)
+        && payload.len() >= 12
+        && parse_dns_message(payload).is_ok()
+    {
+        push_hint_unique(hints, UdpAppHint::Nbns);
     }
 }
 
@@ -1088,6 +1129,10 @@ fn likely_radius_message(payload: &[u8]) -> bool {
     let length = u16::from_be_bytes([payload[2], payload[3]]);
 
     known_code && (20..=4096).contains(&length)
+}
+
+fn likely_stun_message(payload: &[u8]) -> bool {
+    payload.len() >= 20 && payload[4..8] == [0x21, 0x12, 0xa4, 0x42]
 }
 
 fn likely_snmp_message(payload: &[u8]) -> bool {
@@ -1782,6 +1827,43 @@ mod tests {
         let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
         assert!(parsed.udp_hints.contains(&UdpAppHint::Mdns));
         assert!(parsed.dns.is_some());
+    }
+
+    #[test]
+    fn test_stun_udp_hint() {
+        let payload = [
+            0x00, 0x01, 0x00, 0x00, 0x21, 0x12, 0xa4, 0x42, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06,
+            0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c,
+        ];
+        let frame = build_ethernet_ipv4_udp_frame(49152, 3478, &payload);
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+
+        assert!(parsed.udp_hints.contains(&UdpAppHint::Stun));
+        assert!(parsed.stun.is_some());
+    }
+
+    #[test]
+    fn test_llmnr_udp_hint() {
+        let payload = [
+            0x12, 0x34, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ];
+        let frame = build_ethernet_ipv4_udp_frame(49152, 5355, &payload);
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+
+        assert!(parsed.udp_hints.contains(&UdpAppHint::Llmnr));
+        assert!(parsed.dns.is_none());
+    }
+
+    #[test]
+    fn test_nbns_udp_hint() {
+        let payload = [
+            0x12, 0x34, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ];
+        let frame = build_ethernet_ipv4_udp_frame(49152, 137, &payload);
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+
+        assert!(parsed.udp_hints.contains(&UdpAppHint::Nbns));
+        assert!(parsed.dns.is_none());
     }
 
     #[test]

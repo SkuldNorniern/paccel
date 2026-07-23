@@ -18,7 +18,7 @@ pub use builtin::{
     MqttMessage, MqttPacketType, NntpMessage, OpenVpnInfo, OpenVpnOpcode, ParseConfig, ParseMode,
     ParseWarning, ParseWarningCode, ParseWarningProtocol, ParseWarningSubcode, ParsedPacket,
     PppoeInfo, RadiusAttribute, RadiusMessage, RtpHeader, SipMessage, SnmpMessage, SnmpPduType,
-    StopLayer, TcpOptionsParsed, TftpMessage, TransportSegment, UdpAppHint, VxlanInfo,
+    StopLayer, StunMessage, TcpOptionsParsed, TftpMessage, TransportSegment, UdpAppHint, VxlanInfo,
     WireGuardInfo, WireGuardMessageType,
 };
 pub use constants::{ethertype_name, ip_protocol_name};
