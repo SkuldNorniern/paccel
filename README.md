@@ -105,8 +105,13 @@ Flow/state tracking should be composed on the integration side (for example insi
 
 | Fixture | Source |
 |---|---|
+| `cdp_device_id.pcap` | [Wireshark SampleCaptures: `cdp.pcap`]([redacted]) |
+| `eigrp_hello.cap` | [Wireshark SampleCaptures: `[redacted]`]([redacted]) |
 | `ftp_session.cap` | [Wireshark SampleCaptures: `[redacted]`]([redacted]) (trimmed to `tcp.port==21`, reformatted from NetMon to pcapng) |
+| `hsrp_hello.pcap` | [Wireshark SampleCaptures: `hsrp.pcap`]([redacted]) |
 | `ikev2_sa_init.pcap` | [Wireshark test suite: `[redacted]`]([redacted]) |
+| `imap_banner.cap` | [Wireshark SampleCaptures: `imap.cap`]([redacted]) |
+| `lacp.pcap` | [Wireshark SampleCaptures: `[redacted]`]([redacted]) |
 | `nfs_getattr.pcap` | [Wireshark test suite: `nfs.pcap`]([redacted]) |
 | `ospf_hello.cap` | [Wireshark SampleCaptures: `ospf.cap`]([redacted]) |
 | `pim_hello_register.cap` | [Wireshark SampleCaptures: `[redacted]`]([redacted]) |
@@ -116,19 +121,22 @@ Flow/state tracking should be composed on the integration side (for example insi
 | `quic_tls_upgrade.pcapng` | [Wireshark test suite: `[redacted]`]([redacted]) |
 | `rip_v1.pcap` | [Wireshark SampleCaptures: `RIP_v1`]([redacted]) |
 | `rtcp_sr_rr.pcap` | [Wireshark SampleCaptures: `[redacted]`]([redacted]) (`tls-1.3/sip.pcap` inside the archive) |
+| `smb1_negotiate.cap` | [Wireshark SampleCaptures: `[redacted]`]([redacted]) (2 frames extracted) |
 | `smb2_negotiate.pcapng` | [The Ultimate PCAP by Johannes Weber]([redacted]) (2 frames extracted) |
 | `smtp_session.pcap` | [Wireshark SampleCaptures: `smtp.pcap`]([redacted]) |
 | `ssh_banner.pcapng` | [Wireshark SampleCaptures: `[redacted]`]([redacted]) |
+| `syslog_messages.pcapng` | [The Ultimate PCAP by Johannes Weber]([redacted]) (2 frames extracted) |
 | `telnet_iac.pcap` | [Wireshark SampleCaptures: `[redacted]`]([redacted]) |
 | `tls12_sni.pcapng` | [Wireshark test suite: `[redacted]`]([redacted]) |
 | `tls13_handshake.pcap` | [Wireshark test suite: `[redacted]`]([redacted]) |
 | `vrrp_advertisement.pcapng` | [The Ultimate PCAP by Johannes Weber]([redacted]) (1 frame extracted) |
 | `wireguard_ping_tcp.pcap` | [Wireshark test suite: `[redacted]`]([redacted]) |
 | `wireguard_psk.pcap` | [Wireshark test suite: `[redacted]`]([redacted]) |
-| `discovery_protocols.pcap` | Local capture from the sibling [`openplay`](https://github.com/SkuldNorniern/openplay) project's own test data (`data/homepods.pcap`, real home-network AirPlay/HomePod discovery traffic; 4 frames extracted) |
 | `bgp_shutdown.pcap`, `coap_cbor.pcap`, `dhcpv6.pcap`, `dnp3_read.pcap`, `kerberos.pcapng`, `ldap_search.pcap`, `modbus.pcap`, `mqtt.pcap`, `nntp.pcap`, `openvpn_tcp_tls-auth.pcapng`, `openvpn_udp_tls-auth.pcapng`, `radius_localhost.pcapng`, `sip-rtp-g711.pcap`, `snmp_usm.pcap`, `tftp_rrq.pcap` | Added in an earlier session; exact source not recorded |
 
 [redacted]
+
+SSDP/NAT-PMP/PCP classification is tested against in-code synthetic frames (`tests/pcap_integration.rs`) rather than a captured pcap — an earlier fixture built from a local home-network capture was removed and purged from git history since it embedded real device MAC/IP addresses.
 
 ## License
 
