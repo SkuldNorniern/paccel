@@ -7,11 +7,14 @@ use crate::layer::application::dhcp::DhcpMessage;
 use crate::layer::application::dhcp6::Dhcp6Message;
 use crate::layer::application::dnp3::Dnp3Message;
 use crate::layer::application::dns::DnsMessage;
+use crate::layer::application::eigrp::EigrpHeader;
 use crate::layer::application::ftp::FtpMessage;
+use crate::layer::application::hsrp::HsrpHeader;
 use crate::layer::application::http::HttpMessage;
 use crate::layer::application::imap::ImapMessage;
 use crate::layer::application::isakmp::IsakmpHeader;
 use crate::layer::application::kerberos::KerberosMessage;
+use crate::layer::application::lacp::LacpHeader;
 use crate::layer::application::ldap::LdapMessage;
 use crate::layer::application::modbus::ModbusMessage;
 use crate::layer::application::mqtt::MqttMessage;
@@ -432,6 +435,7 @@ pub enum UdpAppHint {
     Isakmp,
     Rpc,
     Syslog,
+    Hsrp,
     Llmnr,
     Nbns,
     QuicShort,
@@ -464,6 +468,7 @@ impl UdpAppHint {
             Self::Isakmp => "isakmp",
             Self::Rpc => "rpc",
             Self::Syslog => "syslog",
+            Self::Hsrp => "hsrp",
             Self::Llmnr => "llmnr",
             Self::Nbns => "nbns",
             Self::QuicShort => "quic-short",
@@ -509,6 +514,7 @@ pub struct ParsedPacket {
     pub ndp: Option<NdpMessage>,
     pub igmp: Option<IgmpInfo>,
     pub ospf: Option<OspfHeader>,
+    pub eigrp: Option<EigrpHeader>,
     pub pim: Option<PimHeader>,
     pub vrrp: Option<VrrpHeader>,
     pub sctp: Option<SctpInfo>,
@@ -525,6 +531,7 @@ pub struct ParsedPacket {
     pub dnp3: Option<Dnp3Message>,
     pub mpls: Option<MplsInfo>,
     pub lldp: Option<LldpInfo>,
+    pub lacp: Option<LacpHeader>,
     pub stp: Option<StpBpdu>,
     pub dns: Option<DnsMessage>,
     pub dhcp: Option<DhcpMessage>,
@@ -560,6 +567,7 @@ pub struct ParsedPacket {
     pub isakmp: Option<IsakmpHeader>,
     pub rpc: Option<RpcMessage>,
     pub syslog: Option<SyslogMessage>,
+    pub hsrp: Option<HsrpHeader>,
     pub udp_hints: Vec<UdpAppHint>,
     pub warnings: Vec<ParseWarning>,
     pub inner: Option<Box<ParsedPacket>>,

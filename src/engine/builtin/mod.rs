@@ -11,10 +11,14 @@ pub use crate::layer::application::dhcp6::{Dhcp6Message, Dhcp6Option};
 pub use crate::layer::application::dnp3::{
     Dnp3AppFunctionCode, Dnp3Application, Dnp3FunctionCode, Dnp3Message, Dnp3Transport,
 };
+pub use crate::layer::application::eigrp::EigrpHeader;
 pub use crate::layer::application::ftp::FtpMessage;
+pub use crate::layer::application::hsrp::HsrpHeader;
 pub use crate::layer::application::imap::ImapMessage;
 pub use crate::layer::application::isakmp::IsakmpHeader;
 pub use crate::layer::application::kerberos::{KerberosMessage, KerberosMessageType};
+pub use crate::layer::application::lacp::LacpHeader;
+use crate::layer::application::lacp::parse_lacp_header;
 pub use crate::layer::application::ldap::{LdapMessage, LdapProtocolOp};
 pub use crate::layer::application::modbus::ModbusMessage;
 pub use crate::layer::application::mqtt::{MqttMessage, MqttPacketType};
@@ -418,6 +422,10 @@ impl BuiltinPacketParser {
                 parsed.lldp = Some(parse_lldp(l3_bytes));
                 Ok(parsed)
             }
+            ethertype::SLOW_PROTOCOLS => {
+                parsed.lacp = parse_lacp_header(l3_bytes).ok();
+                Ok(parsed)
+            }
             other => {
                 if config.mode == ParseMode::Strict {
                     return Err(LayerError::ValidationError(format!(
@@ -719,6 +727,7 @@ fn apply_transport_parse(parsed: &mut ParsedPacket, transport_parse: transport::
     parsed.ndp = transport_parse.ndp;
     parsed.igmp = transport_parse.igmp;
     parsed.ospf = transport_parse.ospf;
+    parsed.eigrp = transport_parse.eigrp;
     parsed.pim = transport_parse.pim;
     parsed.vrrp = transport_parse.vrrp;
     parsed.sctp = transport_parse.sctp;
@@ -766,6 +775,7 @@ fn apply_transport_parse(parsed: &mut ParsedPacket, transport_parse: transport::
     parsed.isakmp = transport_parse.isakmp;
     parsed.rpc = transport_parse.rpc;
     parsed.syslog = transport_parse.syslog;
+    parsed.hsrp = transport_parse.hsrp;
     parsed.udp_hints = transport_parse.hints;
 }
 
@@ -1067,6 +1077,24 @@ mod tests {
         assert_eq!(lldp.port_id.as_deref(), Some(&b"eth0"[..]));
         assert_eq!(lldp.tlvs.len(), 3);
         assert!(parsed.warnings.is_empty());
+    }
+
+    #[test]
+    fn parses_lacp_and_silently_skips_marker_protocol() {
+        let mut frame = vec![
+            0x01, 0x80, 0xc2, 0x00, 0x00, 0x02, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x88, 0x09, 1,
+            1, 1, 20, 0, 1, 0, 1, 2, 3, 4, 5, 0, 2, 0, 3, 0, 18,
+        ];
+
+        let parsed = BuiltinPacketParser::parse(&frame).expect("LACP frame should parse");
+        let lacp = parsed.lacp.expect("LACP header");
+        assert_eq!(lacp.subtype, 1);
+        assert_eq!(lacp.version, 1);
+        assert_eq!(lacp.actor_port, 18);
+
+        frame[14] = 2;
+        let marker = BuiltinPacketParser::parse(&frame).expect("Marker frame should parse");
+        assert!(marker.lacp.is_none());
     }
 
     #[test]

@@ -13,15 +13,16 @@ pub mod tree;
 pub use builtin::{
     AhInfo, BgpMessage, BgpMessageType, BuiltinPacketParser, CoapMessage, CoapType, Dhcp6Message,
     Dhcp6Option, Dnp3AppFunctionCode, Dnp3Application, Dnp3FunctionCode, Dnp3Message,
-    Dnp3Transport, EspInfo, EthernetFrame, FlowKey, FtpMessage, GeneveInfo, GreInfo, IgmpInfo,
-    ImapMessage, IsakmpHeader, KerberosMessage, KerberosMessageType, L2tpInfo, LdapMessage,
-    LdapProtocolOp, ModbusMessage, MplsInfo, MplsLabel, MqttMessage, MqttPacketType, NatPmpMessage,
-    NntpMessage, OpenVpnInfo, OpenVpnOpcode, OspfHeader, ParseConfig, ParseMode, ParseWarning,
-    ParseWarningCode, ParseWarningProtocol, ParseWarningSubcode, ParsedPacket, PcpHeader,
-    PimHeader, PppoeInfo, RadiusAttribute, RadiusMessage, RipHeader, RpcMessage, RtcpHeader,
-    RtpHeader, SipMessage, Smb2Header, SmtpMessage, SnmpMessage, SnmpPduType, SsdpMessage,
-    SshBanner, StopLayer, StunMessage, SyslogMessage, TcpOptionsParsed, TelnetCommand, TftpMessage,
-    TransportSegment, UdpAppHint, VrrpHeader, VxlanInfo, WireGuardInfo, WireGuardMessageType,
+    Dnp3Transport, EigrpHeader, EspInfo, EthernetFrame, FlowKey, FtpMessage, GeneveInfo, GreInfo,
+    HsrpHeader, IgmpInfo, ImapMessage, IsakmpHeader, KerberosMessage, KerberosMessageType,
+    L2tpInfo, LacpHeader, LdapMessage, LdapProtocolOp, ModbusMessage, MplsInfo, MplsLabel,
+    MqttMessage, MqttPacketType, NatPmpMessage, NntpMessage, OpenVpnInfo, OpenVpnOpcode,
+    OspfHeader, ParseConfig, ParseMode, ParseWarning, ParseWarningCode, ParseWarningProtocol,
+    ParseWarningSubcode, ParsedPacket, PcpHeader, PimHeader, PppoeInfo, RadiusAttribute,
+    RadiusMessage, RipHeader, RpcMessage, RtcpHeader, RtpHeader, SipMessage, Smb2Header,
+    SmtpMessage, SnmpMessage, SnmpPduType, SsdpMessage, SshBanner, StopLayer, StunMessage,
+    SyslogMessage, TcpOptionsParsed, TelnetCommand, TftpMessage, TransportSegment, UdpAppHint,
+    VrrpHeader, VxlanInfo, WireGuardInfo, WireGuardMessageType,
 };
 pub use constants::{ethertype_name, ip_protocol_name};
 pub use context::{DecodeConfig, DecodeContext, DecodeMode};
