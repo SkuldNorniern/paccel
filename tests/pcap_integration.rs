@@ -208,6 +208,23 @@ fn lacp_fixture_frame_one_is_actor_state() {
 }
 
 #[test]
+fn cdp_fixture_frame_one_has_device_id_header() {
+    let bytes = include_bytes!("pcaps/protocol-gaps/cdp_device_id.pcap");
+    let frame = iter_capture_frames(bytes)
+        .expect("pcap should parse")
+        .next()
+        .expect("capture should contain frame 1")
+        .expect("capture frame should parse");
+    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
+        .expect("packet should parse");
+    let cdp = parsed.cdp.as_ref().expect("CDP should be present");
+
+    assert_eq!(cdp.version, 1);
+    assert_eq!(cdp.ttl, 180);
+    assert_eq!(cdp.checksum, 0xc65e);
+}
+
+#[test]
 fn hsrp_fixture_frame_one_is_hello() {
     let bytes = include_bytes!("pcaps/protocol-gaps/hsrp_hello.pcap");
     let frame = iter_capture_frames(bytes)
