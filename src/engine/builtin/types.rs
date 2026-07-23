@@ -19,9 +19,11 @@ use crate::layer::application::nntp::NntpMessage;
 use crate::layer::application::ntp::NtpMessage;
 use crate::layer::application::ospf::OspfHeader;
 use crate::layer::application::pcp::PcpHeader;
+use crate::layer::application::pim::PimHeader;
 use crate::layer::application::quic::QuicLongHeader;
 use crate::layer::application::radius::RadiusMessage;
 use crate::layer::application::rip::RipHeader;
+use crate::layer::application::rpc::RpcMessage;
 use crate::layer::application::rtcp::RtcpHeader;
 use crate::layer::application::rtp::RtpHeader;
 use crate::layer::application::sip::SipMessage;
@@ -424,6 +426,7 @@ pub enum UdpAppHint {
     Stun,
     Rip,
     Isakmp,
+    Rpc,
     Llmnr,
     Nbns,
     QuicShort,
@@ -454,6 +457,7 @@ impl UdpAppHint {
             Self::Stun => "stun",
             Self::Rip => "rip",
             Self::Isakmp => "isakmp",
+            Self::Rpc => "rpc",
             Self::Llmnr => "llmnr",
             Self::Nbns => "nbns",
             Self::QuicShort => "quic-short",
@@ -499,6 +503,7 @@ pub struct ParsedPacket {
     pub ndp: Option<NdpMessage>,
     pub igmp: Option<IgmpInfo>,
     pub ospf: Option<OspfHeader>,
+    pub pim: Option<PimHeader>,
     pub sctp: Option<SctpInfo>,
     pub tcp_options: Option<TcpOptionsParsed>,
     pub gre: Option<GreInfo>,
@@ -544,6 +549,7 @@ pub struct ParsedPacket {
     pub stun: Option<StunMessage>,
     pub rip: Option<RipHeader>,
     pub isakmp: Option<IsakmpHeader>,
+    pub rpc: Option<RpcMessage>,
     pub udp_hints: Vec<UdpAppHint>,
     pub warnings: Vec<ParseWarning>,
     pub inner: Option<Box<ParsedPacket>>,
