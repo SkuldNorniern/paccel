@@ -30,6 +30,7 @@ use crate::layer::application::rpc::{RpcMessage, parse_rpc_message};
 use crate::layer::application::rtcp::{RtcpHeader, parse_rtcp};
 use crate::layer::application::rtp::{RtpHeader, parse_rtp};
 use crate::layer::application::sip::{SipMessage, parse_sip};
+use crate::layer::application::smb2::{Smb2Header, parse_smb2_message};
 use crate::layer::application::smtp::{SmtpMessage, parse_smtp};
 use crate::layer::application::snmp::{SnmpMessage, parse_snmp_message};
 use crate::layer::application::ssdp::{SsdpMessage, parse_ssdp};
@@ -38,6 +39,7 @@ use crate::layer::application::stun::{StunMessage, parse_stun_message};
 use crate::layer::application::telnet::{TelnetCommand, parse_telnet_command};
 use crate::layer::application::tftp::{TftpMessage, parse_tftp_message};
 use crate::layer::application::tls::{TlsClientHello, parse_tls_client_hello};
+use crate::layer::application::vrrp::{VrrpHeader, parse_vrrp_header};
 use crate::layer::network::icmp::IcmpHeader;
 use crate::layer::network::icmpv6::{Icmpv6Header, NdpMessage, parse_ndp};
 use crate::layer::transport::tcp::{TcpFlags, TcpHeader};
@@ -92,6 +94,7 @@ const TCP_PORT_NNTPS: u16 = 563;
 const TCP_PORT_MQTT: u16 = 1883;
 const TCP_PORT_MODBUS: u16 = 502;
 const TCP_PORT_SUBMISSION: u16 = 587;
+const TCP_PORT_SMB2: u16 = 445;
 const PORT_KERBEROS: u16 = 88;
 
 #[derive(Debug, Default)]
@@ -103,6 +106,7 @@ pub(super) struct TransportParse {
     pub igmp: Option<IgmpInfo>,
     pub ospf: Option<OspfHeader>,
     pub pim: Option<PimHeader>,
+    pub vrrp: Option<VrrpHeader>,
     pub sctp: Option<SctpInfo>,
     pub tcp_options: Option<TcpOptionsParsed>,
     pub gre: Option<GreInfo>,
@@ -134,6 +138,7 @@ pub(super) struct TransportParse {
     pub ldap: Option<LdapMessage>,
     pub nntp: Option<NntpMessage>,
     pub ftp: Option<FtpMessage>,
+    pub smb2: Option<Smb2Header>,
     pub smtp: Option<SmtpMessage>,
     pub telnet: Option<TelnetCommand>,
     pub mqtt: Option<MqttMessage>,
@@ -189,6 +194,13 @@ impl TransportParse {
     fn with_pim(pim: PimHeader) -> Self {
         Self {
             pim: Some(pim),
+            ..Self::default()
+        }
+    }
+
+    fn with_vrrp(vrrp: VrrpHeader) -> Self {
+        Self {
+            vrrp: Some(vrrp),
             ..Self::default()
         }
     }
@@ -302,6 +314,10 @@ pub(super) fn parse_transport(
             let pim = parse_pim_header(l4_bytes)?;
             Ok(TransportParse::with_pim(pim))
         }
+        ip_proto::VRRP => {
+            let vrrp = parse_vrrp_header(l4_bytes)?;
+            Ok(TransportParse::with_vrrp(vrrp))
+        }
         ip_proto::SCTP => {
             let sctp = parse_sctp_minimal(l4_bytes)?;
             Ok(TransportParse::with_sctp(sctp))
@@ -330,6 +346,10 @@ fn classify_tcp_app_by_port(
 ) {
     if source_port == TCP_PORT_FTP || destination_port == TCP_PORT_FTP {
         parsed.ftp = parse_ftp(payload).ok();
+        return;
+    }
+    if source_port == TCP_PORT_SMB2 || destination_port == TCP_PORT_SMB2 {
+        parsed.smb2 = parse_smb2_message(payload).ok();
         return;
     }
     if source_port == TCP_PORT_SMTP
@@ -1696,6 +1716,19 @@ mod tests {
     }
 
     #[test]
+    fn parses_vrrp_from_ip_payload() {
+        let frame = build_ethernet_ipv4_l4_frame(112, &[0x21, 1, 100, 1, 0, 1, 0x12, 0x34]);
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+        let vrrp = parsed.vrrp.as_ref().expect("VRRP header");
+
+        assert_eq!(vrrp.version, 2);
+        assert_eq!(vrrp.packet_type, 1);
+        assert_eq!(vrrp.virtual_router_id, 1);
+        assert_eq!(vrrp.priority, 100);
+        assert_eq!(vrrp.address_count, 1);
+    }
+
+    #[test]
     fn parses_rpc_from_udp_payload() {
         let payload = [
             0x7b, 0x55, 0x8a, 0xeb, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x01,
@@ -1837,6 +1870,25 @@ mod tests {
                 args: "anonymous".to_string(),
             })
         );
+    }
+
+    #[test]
+    fn parses_smb2_from_tcp_payload() {
+        let mut payload = [0; 68];
+        payload[3] = 64;
+        payload[4..8].copy_from_slice(&[0xfe, b'S', b'M', b'B']);
+        payload[8..10].copy_from_slice(&64u16.to_le_bytes());
+        payload[20..24].copy_from_slice(&1u32.to_le_bytes());
+        payload[28..36].copy_from_slice(&1u64.to_le_bytes());
+        let frame = build_ethernet_ipv4_tcp_frame(445, 49_152, &payload);
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+        let smb2 = parsed.smb2.as_ref().expect("SMB2 header");
+
+        assert_eq!(smb2.command, 0);
+        assert!(smb2.is_response);
+        assert_eq!(smb2.message_id, 1);
+        assert_eq!(smb2.tree_id, 0);
+        assert_eq!(smb2.session_id, 0);
     }
 
     #[test]
