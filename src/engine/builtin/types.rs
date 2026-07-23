@@ -14,9 +14,11 @@ use crate::layer::application::kerberos::KerberosMessage;
 use crate::layer::application::ldap::LdapMessage;
 use crate::layer::application::modbus::ModbusMessage;
 use crate::layer::application::mqtt::MqttMessage;
+use crate::layer::application::nat_pmp::NatPmpMessage;
 use crate::layer::application::nntp::NntpMessage;
 use crate::layer::application::ntp::NtpMessage;
 use crate::layer::application::ospf::OspfHeader;
+use crate::layer::application::pcp::PcpHeader;
 use crate::layer::application::quic::QuicLongHeader;
 use crate::layer::application::radius::RadiusMessage;
 use crate::layer::application::rip::RipHeader;
@@ -25,6 +27,7 @@ use crate::layer::application::rtp::RtpHeader;
 use crate::layer::application::sip::SipMessage;
 use crate::layer::application::smtp::SmtpMessage;
 use crate::layer::application::snmp::SnmpMessage;
+use crate::layer::application::ssdp::SsdpMessage;
 use crate::layer::application::ssh::SshBanner;
 use crate::layer::application::stun::StunMessage;
 use crate::layer::application::telnet::TelnetCommand;
@@ -414,6 +417,9 @@ pub enum UdpAppHint {
     Rtcp,
     Rtp,
     Coap,
+    Ssdp,
+    NatPmp,
+    Pcp,
     Kerberos,
     Stun,
     Rip,
@@ -441,6 +447,9 @@ impl UdpAppHint {
             Self::Rtcp => "rtcp",
             Self::Rtp => "rtp",
             Self::Coap => "coap",
+            Self::Ssdp => "ssdp",
+            Self::NatPmp => "nat-pmp",
+            Self::Pcp => "pcp",
             Self::Kerberos => "kerberos",
             Self::Stun => "stun",
             Self::Rip => "rip",
@@ -514,6 +523,9 @@ pub struct ParsedPacket {
     pub ntp: Option<NtpMessage>,
     pub tls: Option<TlsClientHello>,
     pub http: Option<HttpMessage>,
+    pub ssdp: Option<SsdpMessage>,
+    pub nat_pmp: Option<NatPmpMessage>,
+    pub pcp: Option<PcpHeader>,
     pub sip: Option<SipMessage>,
     pub rtcp: Option<RtcpHeader>,
     pub rtp: Option<RtpHeader>,
@@ -659,5 +671,12 @@ mod tests {
     #[test]
     fn tftp_hint_has_stable_name() {
         assert_eq!(UdpAppHint::Tftp.as_str(), "tftp");
+    }
+
+    #[test]
+    fn discovery_hints_have_stable_names() {
+        assert_eq!(UdpAppHint::Ssdp.as_str(), "ssdp");
+        assert_eq!(UdpAppHint::NatPmp.as_str(), "nat-pmp");
+        assert_eq!(UdpAppHint::Pcp.as_str(), "pcp");
     }
 }
