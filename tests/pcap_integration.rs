@@ -5,11 +5,92 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use paccel::engine::{
     BgpMessageType, BuiltinPacketParser, CoapType, Dnp3AppFunctionCode, Dnp3FunctionCode,
     FtpMessage, KerberosMessageType, LdapProtocolOp, MqttPacketType, NntpMessage, OpenVpnOpcode,
-    SipMessage, SmtpMessage, SnmpMessage, SnmpPduType, TelnetCommand, TftpMessage,
+    SipMessage, SmtpMessage, SnmpMessage, SnmpPduType, SsdpMessage, TelnetCommand, TftpMessage,
     TransportSegment, UdpAppHint, WireGuardMessageType, iter_capture_frames, parse_capture_frames,
     parse_pcap_frames,
 };
 use paccel::layer::application::quic::QuicPacketType;
+
+#[test]
+fn ssdp_fixture_frame_one_is_msearch_request() {
+    let bytes = include_bytes!("pcaps/protocol-gaps/discovery_protocols.pcap");
+    let frame = iter_capture_frames(bytes)
+        .expect("pcap should parse")
+        .next()
+        .expect("capture should contain frame 1")
+        .expect("capture frame should parse");
+    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
+        .expect("packet should parse");
+
+    assert_eq!(
+        parsed.ssdp,
+        Some(SsdpMessage::Request {
+            method: "M-SEARCH".to_string(),
+            target: "*".to_string(),
+            version: "HTTP/1.1".to_string(),
+            headers: vec![
+                ("HOST".to_string(), "239.255.255.250:1900".to_string()),
+                ("ST".to_string(), "ssdp:all".to_string()),
+                ("MAN".to_string(), "\"ssdp:discover\"".to_string()),
+                ("MX".to_string(), "2".to_string()),
+            ],
+        })
+    );
+    assert!(parsed.udp_hints.contains(&UdpAppHint::Ssdp));
+}
+
+#[test]
+fn nat_pmp_fixture_frame_two_is_external_address_request() {
+    let bytes = include_bytes!("pcaps/protocol-gaps/discovery_protocols.pcap");
+    let frame = iter_capture_frames(bytes)
+        .expect("pcap should parse")
+        .nth(1)
+        .expect("capture should contain frame 2")
+        .expect("capture frame should parse");
+    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
+        .expect("packet should parse");
+    let nat_pmp = parsed.nat_pmp.expect("NAT-PMP should be present");
+
+    assert_eq!(nat_pmp.version, 0);
+    assert_eq!(nat_pmp.opcode, 0);
+    assert!(parsed.udp_hints.contains(&UdpAppHint::NatPmp));
+}
+
+#[test]
+fn nat_pmp_fixture_frame_three_is_map_udp_request() {
+    let bytes = include_bytes!("pcaps/protocol-gaps/discovery_protocols.pcap");
+    let frame = iter_capture_frames(bytes)
+        .expect("pcap should parse")
+        .nth(2)
+        .expect("capture should contain frame 3")
+        .expect("capture frame should parse");
+    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
+        .expect("packet should parse");
+    let nat_pmp = parsed.nat_pmp.expect("NAT-PMP should be present");
+
+    assert_eq!(nat_pmp.version, 0);
+    assert_eq!(nat_pmp.opcode, 1);
+    assert!(parsed.udp_hints.contains(&UdpAppHint::NatPmp));
+}
+
+#[test]
+fn pcp_fixture_frame_four_is_announce_request() {
+    let bytes = include_bytes!("pcaps/protocol-gaps/discovery_protocols.pcap");
+    let frame = iter_capture_frames(bytes)
+        .expect("pcap should parse")
+        .nth(3)
+        .expect("capture should contain frame 4")
+        .expect("capture frame should parse");
+    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
+        .expect("packet should parse");
+    let pcp = parsed.pcp.expect("PCP should be present");
+
+    assert_eq!(pcp.version, 2);
+    assert!(!pcp.is_response);
+    assert_eq!(pcp.opcode, 0);
+    assert_eq!(pcp.lifetime, 0);
+    assert!(parsed.udp_hints.contains(&UdpAppHint::Pcp));
+}
 
 #[test]
 fn dnp3_fixture_frame_four_matches_tshark() {
