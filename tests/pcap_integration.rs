@@ -64,6 +64,78 @@ fn bgp_fixture_frame_five_is_notification() {
 }
 
 #[test]
+fn ospf_fixture_frame_one_is_hello() {
+    let bytes = include_bytes!("pcaps/protocol-gaps/ospf_hello.cap");
+    let frame = iter_capture_frames(bytes)
+        .expect("pcap should parse")
+        .next()
+        .expect("capture should contain frame 1")
+        .expect("capture frame should parse");
+    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
+        .expect("packet should parse");
+    let ospf = parsed.ospf.as_ref().expect("OSPF should be present");
+
+    assert_eq!(ospf.version, 2);
+    assert_eq!(ospf.message_type, 1);
+    assert_eq!(ospf.packet_length, 44);
+    assert_eq!(ospf.router_id, Ipv4Addr::new(192, 168, 170, 8));
+    assert_eq!(ospf.area_id, Ipv4Addr::new(0, 0, 0, 1));
+}
+
+#[test]
+fn rip_fixture_frame_one_is_request() {
+    let bytes = include_bytes!("pcaps/protocol-gaps/rip_v1.pcap");
+    let frame = iter_capture_frames(bytes)
+        .expect("pcap should parse")
+        .next()
+        .expect("capture should contain frame 1")
+        .expect("capture frame should parse");
+    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
+        .expect("packet should parse");
+    let rip = parsed.rip.as_ref().expect("RIP should be present");
+
+    assert_eq!(rip.command, 1);
+    assert_eq!(rip.version, 1);
+}
+
+#[test]
+fn rip_fixture_frame_two_is_response() {
+    let bytes = include_bytes!("pcaps/protocol-gaps/rip_v1.pcap");
+    let frame = iter_capture_frames(bytes)
+        .expect("pcap should parse")
+        .nth(1)
+        .expect("capture should contain frame 2")
+        .expect("capture frame should parse");
+    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
+        .expect("packet should parse");
+    let rip = parsed.rip.as_ref().expect("RIP should be present");
+
+    assert_eq!(rip.command, 2);
+    assert_eq!(rip.version, 1);
+}
+
+#[test]
+fn ikev2_fixture_frame_one_is_sa_init_initiator_request() {
+    let bytes = include_bytes!("pcaps/protocol-gaps/ikev2_sa_init.pcap");
+    let frame = iter_capture_frames(bytes)
+        .expect("pcap should parse")
+        .next()
+        .expect("capture should contain frame 1")
+        .expect("capture frame should parse");
+    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
+        .expect("packet should parse");
+    let isakmp = parsed.isakmp.as_ref().expect("ISAKMP should be present");
+
+    assert_eq!(isakmp.initiator_spi, 0x5d48_bfee_b7d5_74da);
+    assert_eq!(isakmp.next_payload, 0x21);
+    assert_eq!(isakmp.major_version, 2);
+    assert_eq!(isakmp.exchange_type, 0x22);
+    assert!(isakmp.is_initiator);
+    assert!(!isakmp.is_response);
+    assert_eq!(isakmp.length, 232);
+}
+
+#[test]
 fn quic_multistream_fixture_frame_one_has_expected_dcid() {
     let bytes = include_bytes!("pcaps/protocol-gaps/quic_multistream.pcapng");
     let frame = iter_capture_frames(bytes)
