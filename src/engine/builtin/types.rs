@@ -31,6 +31,7 @@ use crate::layer::application::rpc::RpcMessage;
 use crate::layer::application::rtcp::RtcpHeader;
 use crate::layer::application::rtp::RtpHeader;
 use crate::layer::application::sip::SipMessage;
+use crate::layer::application::smb1::Smb1Header;
 use crate::layer::application::smb2::Smb2Header;
 use crate::layer::application::smtp::SmtpMessage;
 use crate::layer::application::snmp::SnmpMessage;
@@ -554,6 +555,7 @@ pub struct ParsedPacket {
     pub nntp: Option<NntpMessage>,
     pub imap: Option<ImapMessage>,
     pub ftp: Option<FtpMessage>,
+    pub smb1: Option<Smb1Header>,
     pub smb2: Option<Smb2Header>,
     pub smtp: Option<SmtpMessage>,
     pub telnet: Option<TelnetCommand>,

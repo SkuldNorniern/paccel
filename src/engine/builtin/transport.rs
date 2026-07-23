@@ -33,6 +33,7 @@ use crate::layer::application::rpc::{RpcMessage, parse_rpc_message};
 use crate::layer::application::rtcp::{RtcpHeader, parse_rtcp};
 use crate::layer::application::rtp::{RtpHeader, parse_rtp};
 use crate::layer::application::sip::{SipMessage, parse_sip};
+use crate::layer::application::smb1::{Smb1Header, parse_smb1_message};
 use crate::layer::application::smb2::{Smb2Header, parse_smb2_message};
 use crate::layer::application::smtp::{SmtpMessage, parse_smtp};
 use crate::layer::application::snmp::{SnmpMessage, parse_snmp_message};
@@ -147,6 +148,7 @@ pub(super) struct TransportParse {
     pub nntp: Option<NntpMessage>,
     pub imap: Option<ImapMessage>,
     pub ftp: Option<FtpMessage>,
+    pub smb1: Option<Smb1Header>,
     pub smb2: Option<Smb2Header>,
     pub smtp: Option<SmtpMessage>,
     pub telnet: Option<TelnetCommand>,
@@ -371,7 +373,7 @@ fn classify_tcp_app_by_port(
         return;
     }
     if source_port == TCP_PORT_SMB2 || destination_port == TCP_PORT_SMB2 {
-        parsed.smb2 = parse_smb2_message(payload).ok();
+        classify_smb(payload, parsed);
         return;
     }
     if source_port == TCP_PORT_SMTP
@@ -433,6 +435,13 @@ fn classify_tcp_app_by_port(
         && (source_port == PORT_KERBEROS || destination_port == PORT_KERBEROS)
     {
         parsed.kerberos = parse_kerberos_tcp(payload).ok();
+    }
+}
+
+fn classify_smb(payload: &[u8], parsed: &mut TransportParse) {
+    parsed.smb2 = parse_smb2_message(payload).ok();
+    if parsed.smb2.is_none() {
+        parsed.smb1 = parse_smb1_message(payload).ok();
     }
 }
 
@@ -2016,6 +2025,26 @@ mod tests {
         assert_eq!(smb2.message_id, 1);
         assert_eq!(smb2.tree_id, 0);
         assert_eq!(smb2.session_id, 0);
+    }
+
+    #[test]
+    fn parses_smb1_from_tcp_payload() {
+        let mut payload = [0; 36];
+        payload[3] = 32;
+        payload[4..8].copy_from_slice(&[0xff, b'S', b'M', b'B']);
+        payload[8] = 0x72;
+        payload[34..36].copy_from_slice(&1u16.to_le_bytes());
+        let frame = build_ethernet_ipv4_tcp_frame(49_152, 445, &payload);
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+        let smb1 = parsed.smb1.as_ref().expect("SMB1 header");
+
+        assert_eq!(smb1.command, 0x72);
+        assert!(!smb1.is_response);
+        assert_eq!(smb1.tid, 0);
+        assert_eq!(smb1.pid, 0);
+        assert_eq!(smb1.uid, 0);
+        assert_eq!(smb1.mid, 1);
+        assert!(parsed.smb2.is_none());
     }
 
     #[test]

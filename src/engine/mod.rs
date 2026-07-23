@@ -19,10 +19,10 @@ pub use builtin::{
     MqttMessage, MqttPacketType, NatPmpMessage, NntpMessage, OpenVpnInfo, OpenVpnOpcode,
     OspfHeader, ParseConfig, ParseMode, ParseWarning, ParseWarningCode, ParseWarningProtocol,
     ParseWarningSubcode, ParsedPacket, PcpHeader, PimHeader, PppoeInfo, RadiusAttribute,
-    RadiusMessage, RipHeader, RpcMessage, RtcpHeader, RtpHeader, SipMessage, Smb2Header,
-    SmtpMessage, SnmpMessage, SnmpPduType, SsdpMessage, SshBanner, StopLayer, StunMessage,
-    SyslogMessage, TcpOptionsParsed, TelnetCommand, TftpMessage, TransportSegment, UdpAppHint,
-    VrrpHeader, VxlanInfo, WireGuardInfo, WireGuardMessageType,
+    RadiusMessage, RipHeader, RpcMessage, RtcpHeader, RtpHeader, SipMessage, Smb1Header,
+    Smb2Header, SmtpMessage, SnmpMessage, SnmpPduType, SsdpMessage, SshBanner, StopLayer,
+    StunMessage, SyslogMessage, TcpOptionsParsed, TelnetCommand, TftpMessage, TransportSegment,
+    UdpAppHint, VrrpHeader, VxlanInfo, WireGuardInfo, WireGuardMessageType,
 };
 pub use constants::{ethertype_name, ip_protocol_name};
 pub use context::{DecodeConfig, DecodeContext, DecodeMode};
