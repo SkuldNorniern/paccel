@@ -12,12 +12,15 @@ pub use crate::layer::application::dnp3::{
     Dnp3AppFunctionCode, Dnp3Application, Dnp3FunctionCode, Dnp3Message, Dnp3Transport,
 };
 pub use crate::layer::application::ftp::FtpMessage;
+pub use crate::layer::application::isakmp::IsakmpHeader;
 pub use crate::layer::application::kerberos::{KerberosMessage, KerberosMessageType};
 pub use crate::layer::application::ldap::{LdapMessage, LdapProtocolOp};
 pub use crate::layer::application::modbus::ModbusMessage;
 pub use crate::layer::application::mqtt::{MqttMessage, MqttPacketType};
 pub use crate::layer::application::nntp::NntpMessage;
+pub use crate::layer::application::ospf::OspfHeader;
 pub use crate::layer::application::radius::{RadiusAttribute, RadiusMessage};
+pub use crate::layer::application::rip::RipHeader;
 pub use crate::layer::application::rtcp::RtcpHeader;
 pub use crate::layer::application::rtp::RtpHeader;
 pub use crate::layer::application::sip::SipMessage;
@@ -702,6 +705,7 @@ fn apply_transport_parse(parsed: &mut ParsedPacket, transport_parse: transport::
     parsed.icmpv6 = transport_parse.icmpv6;
     parsed.ndp = transport_parse.ndp;
     parsed.igmp = transport_parse.igmp;
+    parsed.ospf = transport_parse.ospf;
     parsed.sctp = transport_parse.sctp;
     parsed.tcp_options = transport_parse.tcp_options;
     parsed.gre = transport_parse.gre;
@@ -738,6 +742,8 @@ fn apply_transport_parse(parsed: &mut ParsedPacket, transport_parse: transport::
     parsed.coap = transport_parse.coap;
     parsed.kerberos = transport_parse.kerberos;
     parsed.stun = transport_parse.stun;
+    parsed.rip = transport_parse.rip;
+    parsed.isakmp = transport_parse.isakmp;
     parsed.udp_hints = transport_parse.hints;
 }
 

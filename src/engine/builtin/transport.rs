@@ -10,6 +10,7 @@ use crate::layer::application::dnp3::{Dnp3Message, parse_dnp3_message};
 use crate::layer::application::dns::{DnsMessage, parse_dns_message};
 use crate::layer::application::ftp::{FtpMessage, parse_ftp};
 use crate::layer::application::http::{HttpMessage, parse_http};
+use crate::layer::application::isakmp::{IsakmpHeader, parse_isakmp_header};
 use crate::layer::application::kerberos::{
     KerberosMessage, parse_kerberos_tcp, parse_kerberos_udp,
 };
@@ -18,8 +19,10 @@ use crate::layer::application::modbus::{ModbusMessage, parse_modbus_message};
 use crate::layer::application::mqtt::{MqttMessage, parse_mqtt_message};
 use crate::layer::application::nntp::{NntpMessage, parse_nntp};
 use crate::layer::application::ntp::{NtpMessage, parse_ntp_message};
+use crate::layer::application::ospf::{OspfHeader, parse_ospf_header};
 use crate::layer::application::quic::{QuicLongHeader, parse_quic_long_header};
 use crate::layer::application::radius::{RadiusMessage, parse_radius_message};
+use crate::layer::application::rip::{RipHeader, parse_rip_header};
 use crate::layer::application::rtcp::{RtcpHeader, parse_rtcp};
 use crate::layer::application::rtp::{RtpHeader, parse_rtp};
 use crate::layer::application::sip::{SipMessage, parse_sip};
@@ -64,6 +67,8 @@ const UDP_PORT_SIP: u16 = 5060;
 const UDP_PORT_WIREGUARD: u16 = 51820;
 const UDP_PORT_WIREGUARD_ALT: u16 = 51821;
 const UDP_PORT_COAP: u16 = 5683;
+const UDP_PORT_ISAKMP: u16 = 500;
+const UDP_PORT_RIP: u16 = 520;
 const STUN_PORT: u16 = 3478;
 const UDP_PORT_LLMNR: u16 = 5355;
 const UDP_PORT_NBNS: u16 = 137;
@@ -88,6 +93,7 @@ pub(super) struct TransportParse {
     pub icmpv6: Option<Icmpv6Header>,
     pub ndp: Option<NdpMessage>,
     pub igmp: Option<IgmpInfo>,
+    pub ospf: Option<OspfHeader>,
     pub sctp: Option<SctpInfo>,
     pub tcp_options: Option<TcpOptionsParsed>,
     pub gre: Option<GreInfo>,
@@ -124,6 +130,8 @@ pub(super) struct TransportParse {
     pub coap: Option<CoapMessage>,
     pub kerberos: Option<KerberosMessage>,
     pub stun: Option<StunMessage>,
+    pub rip: Option<RipHeader>,
+    pub isakmp: Option<IsakmpHeader>,
     pub hints: Vec<UdpAppHint>,
 }
 
@@ -154,6 +162,13 @@ impl TransportParse {
     fn with_igmp(igmp: IgmpInfo) -> Self {
         Self {
             igmp: Some(igmp),
+            ..Self::default()
+        }
+    }
+
+    fn with_ospf(ospf: OspfHeader) -> Self {
+        Self {
+            ospf: Some(ospf),
             ..Self::default()
         }
     }
@@ -259,6 +274,10 @@ pub(super) fn parse_transport(
             let igmp = parse_igmp_minimal(l4_bytes)?;
             Ok(TransportParse::with_igmp(igmp))
         }
+        ip_proto::OSPF => {
+            let ospf = parse_ospf_header(l4_bytes)?;
+            Ok(TransportParse::with_ospf(ospf))
+        }
         ip_proto::SCTP => {
             let sctp = parse_sctp_minimal(l4_bytes)?;
             Ok(TransportParse::with_sctp(sctp))
@@ -363,6 +382,8 @@ fn parse_udp_transport(l4_bytes: &[u8], config: ParseConfig) -> Result<Transport
     let mut coap = None;
     let mut kerberos = None;
     let mut stun = None;
+    let mut rip = None;
+    let mut isakmp = None;
 
     let parse_application = config.stop_after == StopLayer::Application;
     let (wireguard, openvpn) = if parse_application {
@@ -378,6 +399,8 @@ fn parse_udp_transport(l4_bytes: &[u8], config: ParseConfig) -> Result<Transport
         maybe_probe_coap_udp(&udp, app, &mut hints, &mut coap);
         maybe_probe_kerberos_udp(&udp, app, &mut hints, &mut kerberos);
         maybe_probe_stun_udp(&udp, app, &mut hints, &mut stun);
+        maybe_probe_rip_udp(&udp, app, &mut hints, &mut rip);
+        maybe_probe_isakmp_udp(&udp, app, &mut hints, &mut isakmp);
         maybe_probe_llmnr_udp(&udp, app, &mut hints);
         maybe_probe_nbns_udp(&udp, app, &mut hints);
         (
@@ -425,6 +448,8 @@ fn parse_udp_transport(l4_bytes: &[u8], config: ParseConfig) -> Result<Transport
         coap.is_some(),
         kerberos.is_some(),
         stun.is_some(),
+        rip.is_some(),
+        isakmp.is_some(),
         wireguard.is_some(),
         openvpn.is_some(),
         vxlan.is_some(),
@@ -464,6 +489,8 @@ fn parse_udp_transport(l4_bytes: &[u8], config: ParseConfig) -> Result<Transport
         coap,
         kerberos,
         stun,
+        rip,
+        isakmp,
         hints,
         ..TransportParse::default()
     })
@@ -622,6 +649,34 @@ fn maybe_probe_stun_udp(
     if is_udp_port_match(udp, STUN_PORT) && likely_stun_message(payload) {
         push_hint_unique(hints, UdpAppHint::Stun);
         *stun = parse_stun_message(payload).ok();
+    }
+}
+
+fn maybe_probe_rip_udp(
+    udp: &UdpHeader,
+    payload: &[u8],
+    hints: &mut Vec<UdpAppHint>,
+    rip: &mut Option<RipHeader>,
+) {
+    if is_udp_port_match(udp, UDP_PORT_RIP)
+        && let Ok(header) = parse_rip_header(payload)
+    {
+        push_hint_unique(hints, UdpAppHint::Rip);
+        *rip = Some(header);
+    }
+}
+
+fn maybe_probe_isakmp_udp(
+    udp: &UdpHeader,
+    payload: &[u8],
+    hints: &mut Vec<UdpAppHint>,
+    isakmp: &mut Option<IsakmpHeader>,
+) {
+    if is_udp_port_match(udp, UDP_PORT_ISAKMP)
+        && let Ok(header) = parse_isakmp_header(payload)
+    {
+        push_hint_unique(hints, UdpAppHint::Isakmp);
+        *isakmp = Some(header);
     }
 }
 
@@ -1527,6 +1582,48 @@ mod tests {
         let frame = build_ethernet_ipv4_tcp_frame(49152, 80, &[0xde, 0xad, 0xbe, 0xef]);
         let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
         assert!(parsed.http.is_none());
+    }
+
+    #[test]
+    fn parses_ospf_from_ip_payload() {
+        let payload = [
+            0x02, 0x01, 0x00, 0x2c, 0xc0, 0xa8, 0xaa, 0x08, 0x00, 0x00, 0x00, 0x01, 0x27, 0x3b,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ];
+        let frame = build_ethernet_ipv4_l4_frame(89, &payload);
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+        let ospf = parsed.ospf.as_ref().expect("OSPF header");
+
+        assert_eq!(ospf.version, 2);
+        assert_eq!(ospf.message_type, 1);
+        assert_eq!(ospf.router_id, Ipv4Addr::new(192, 168, 170, 8));
+    }
+
+    #[test]
+    fn parses_rip_from_udp_payload() {
+        let frame = build_ethernet_ipv4_udp_frame(520, 520, &[1, 1, 0, 0]);
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+        let rip = parsed.rip.as_ref().expect("RIP header");
+
+        assert_eq!(rip.command, 1);
+        assert_eq!(rip.version, 1);
+        assert!(parsed.udp_hints.contains(&UdpAppHint::Rip));
+    }
+
+    #[test]
+    fn parses_isakmp_from_udp_payload() {
+        let payload = [
+            0x5d, 0x48, 0xbf, 0xee, 0xb7, 0xd5, 0x74, 0xda, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x21, 0x20, 0x22, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xe8,
+        ];
+        let frame = build_ethernet_ipv4_udp_frame(500, 500, &payload);
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+        let isakmp = parsed.isakmp.as_ref().expect("ISAKMP header");
+
+        assert_eq!(isakmp.initiator_spi, 0x5d48_bfee_b7d5_74da);
+        assert_eq!(isakmp.major_version, 2);
+        assert_eq!(isakmp.exchange_type, 0x22);
+        assert!(parsed.udp_hints.contains(&UdpAppHint::Isakmp));
     }
 
     #[test]

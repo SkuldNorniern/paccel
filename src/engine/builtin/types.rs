@@ -9,14 +9,17 @@ use crate::layer::application::dnp3::Dnp3Message;
 use crate::layer::application::dns::DnsMessage;
 use crate::layer::application::ftp::FtpMessage;
 use crate::layer::application::http::HttpMessage;
+use crate::layer::application::isakmp::IsakmpHeader;
 use crate::layer::application::kerberos::KerberosMessage;
 use crate::layer::application::ldap::LdapMessage;
 use crate::layer::application::modbus::ModbusMessage;
 use crate::layer::application::mqtt::MqttMessage;
 use crate::layer::application::nntp::NntpMessage;
 use crate::layer::application::ntp::NtpMessage;
+use crate::layer::application::ospf::OspfHeader;
 use crate::layer::application::quic::QuicLongHeader;
 use crate::layer::application::radius::RadiusMessage;
+use crate::layer::application::rip::RipHeader;
 use crate::layer::application::rtcp::RtcpHeader;
 use crate::layer::application::rtp::RtpHeader;
 use crate::layer::application::sip::SipMessage;
@@ -413,6 +416,8 @@ pub enum UdpAppHint {
     Coap,
     Kerberos,
     Stun,
+    Rip,
+    Isakmp,
     Llmnr,
     Nbns,
     QuicShort,
@@ -438,6 +443,8 @@ impl UdpAppHint {
             Self::Coap => "coap",
             Self::Kerberos => "kerberos",
             Self::Stun => "stun",
+            Self::Rip => "rip",
+            Self::Isakmp => "isakmp",
             Self::Llmnr => "llmnr",
             Self::Nbns => "nbns",
             Self::QuicShort => "quic-short",
@@ -482,6 +489,7 @@ pub struct ParsedPacket {
     pub icmpv6: Option<Icmpv6Header>,
     pub ndp: Option<NdpMessage>,
     pub igmp: Option<IgmpInfo>,
+    pub ospf: Option<OspfHeader>,
     pub sctp: Option<SctpInfo>,
     pub tcp_options: Option<TcpOptionsParsed>,
     pub gre: Option<GreInfo>,
@@ -522,6 +530,8 @@ pub struct ParsedPacket {
     pub coap: Option<CoapMessage>,
     pub kerberos: Option<KerberosMessage>,
     pub stun: Option<StunMessage>,
+    pub rip: Option<RipHeader>,
+    pub isakmp: Option<IsakmpHeader>,
     pub udp_hints: Vec<UdpAppHint>,
     pub warnings: Vec<ParseWarning>,
     pub inner: Option<Box<ParsedPacket>>,
