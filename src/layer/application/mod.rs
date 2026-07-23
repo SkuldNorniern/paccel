@@ -16,5 +16,6 @@ pub mod radius;
 pub mod rtp;
 pub mod sip;
 pub mod snmp;
+pub mod stun;
 pub mod tftp;
 pub mod tls;
