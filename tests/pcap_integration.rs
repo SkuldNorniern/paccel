@@ -1,13 +1,14 @@
 #![allow(clippy::cognitive_complexity, clippy::panic)]
 
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 
 use paccel::engine::{
     BgpMessageType, BuiltinPacketParser, CoapType, Dnp3AppFunctionCode, Dnp3FunctionCode,
     KerberosMessageType, LdapProtocolOp, MqttPacketType, NntpMessage, OpenVpnOpcode, SipMessage,
-    SnmpMessage, SnmpPduType, TftpMessage, TransportSegment, UdpAppHint, iter_capture_frames,
-    parse_capture_frames, parse_pcap_frames,
+    SnmpMessage, SnmpPduType, TftpMessage, TransportSegment, UdpAppHint, WireGuardMessageType,
+    iter_capture_frames, parse_capture_frames, parse_pcap_frames,
 };
+use paccel::layer::application::quic::QuicPacketType;
 
 #[test]
 fn dnp3_fixture_frame_four_matches_tshark() {
@@ -59,6 +60,229 @@ fn bgp_fixture_frame_five_is_notification() {
     let bgp = parsed.bgp.expect("BGP should be present");
 
     assert_eq!(bgp.message_type, BgpMessageType::Notification);
+}
+
+#[test]
+fn quic_multistream_fixture_frame_one_has_expected_dcid() {
+    let bytes = include_bytes!("pcaps/protocol-gaps/quic_multistream.pcapng");
+    let frame = iter_capture_frames(bytes)
+        .expect("pcap should parse")
+        .next()
+        .expect("capture should contain frame 1")
+        .expect("capture frame should parse");
+    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
+        .expect("packet should parse");
+    let quic = parsed.quic.as_ref().expect("QUIC should be present");
+
+    assert_eq!(quic.version, 0xff00_001d);
+    assert_eq!(
+        quic.dcid,
+        vec![0x2e, 0xe7, 0xfa, 0xb7, 0x09, 0xec, 0x0e, 0x70]
+    );
+    assert!(quic.is_initial);
+    assert_eq!(quic.kind, QuicPacketType::Unknown);
+}
+
+#[test]
+fn quic_retry_fixture_frame_one_is_v1_initial() {
+    let bytes = include_bytes!("pcaps/protocol-gaps/quic_retry.pcapng");
+    let frame = iter_capture_frames(bytes)
+        .expect("pcap should parse")
+        .next()
+        .expect("capture should contain frame 1")
+        .expect("capture frame should parse");
+    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
+        .expect("packet should parse");
+    let quic = parsed.quic.as_ref().expect("QUIC should be present");
+
+    assert_eq!(quic.version, 1);
+    assert_eq!(quic.kind, QuicPacketType::Initial);
+    assert_eq!(
+        quic.dcid,
+        vec![0xb4, 0xe8, 0x3a, 0x41, 0xa2, 0x57, 0xc1, 0xe7]
+    );
+}
+
+#[test]
+fn quic_retry_fixture_frame_three_is_retry() {
+    let bytes = include_bytes!("pcaps/protocol-gaps/quic_retry.pcapng");
+    let frame = iter_capture_frames(bytes)
+        .expect("pcap should parse")
+        .nth(2)
+        .expect("capture should contain frame 3")
+        .expect("capture frame should parse");
+    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
+        .expect("packet should parse");
+    let quic = parsed.quic.as_ref().expect("QUIC should be present");
+
+    assert_eq!(quic.kind, QuicPacketType::Retry);
+    assert_eq!(
+        quic.scid,
+        vec![
+            0xc0, 0x6a, 0xaa, 0xc2, 0x07, 0xb0, 0xe0, 0x83, 0xec, 0x50, 0x61, 0x19, 0x62, 0x8d,
+            0x3b, 0xf9, 0xb1, 0x79, 0x2d, 0x70
+        ]
+    );
+}
+
+#[test]
+fn quic_fragmented_handshake_fixture_frame_two_is_retry_shaped() {
+    let bytes = include_bytes!("pcaps/protocol-gaps/quic_fragmented_handshake.pcapng");
+    let frame = iter_capture_frames(bytes)
+        .expect("pcap should parse")
+        .nth(1)
+        .expect("capture should contain frame 2")
+        .expect("capture frame should parse");
+    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
+        .expect("packet should parse");
+    let quic = parsed.quic.as_ref().expect("QUIC should be present");
+
+    assert_eq!(
+        quic.dcid,
+        vec![
+            0x43, 0x94, 0x4e, 0xda, 0x18, 0xbe, 0xb7, 0xe5, 0x48, 0xb3, 0x8d, 0x37, 0x5b, 0xf3,
+            0xc2, 0xa3, 0xbc
+        ]
+    );
+    assert_eq!(
+        quic.scid,
+        vec![
+            0x2e, 0x9a, 0x32, 0xed, 0x45, 0xc9, 0x06, 0x6a, 0xd4, 0xf9, 0xac, 0x32, 0xc1, 0xd2,
+            0x3c, 0x19, 0xe4, 0x80
+        ]
+    );
+}
+
+#[test]
+fn quic_tls_upgrade_fixture_frame_forty_seven_is_v1_initial() {
+    let bytes = include_bytes!("pcaps/protocol-gaps/quic_tls_upgrade.pcapng");
+    let frame = iter_capture_frames(bytes)
+        .expect("pcap should parse")
+        .nth(46)
+        .expect("capture should contain frame 47")
+        .expect("capture frame should parse");
+    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
+        .expect("packet should parse");
+    let ipv6 = parsed.ipv6.as_ref().expect("IPv6 should be present");
+    let quic = parsed.quic.as_ref().expect("QUIC should be present");
+
+    assert_eq!(
+        ipv6.destination,
+        "2606:4700:10::6816:826"
+            .parse::<Ipv6Addr>()
+            .unwrap()
+    );
+    assert_eq!(quic.version, 1);
+    assert_eq!(quic.kind, QuicPacketType::Initial);
+    assert_eq!(
+        quic.dcid,
+        vec![0x20, 0x3f, 0x9e, 0x9f, 0x68, 0x69, 0x82, 0x74]
+    );
+}
+
+#[test]
+fn quic_tls_upgrade_fixture_frame_four_tls_sni() {
+    let bytes = include_bytes!("pcaps/protocol-gaps/quic_tls_upgrade.pcapng");
+    let frame = iter_capture_frames(bytes)
+        .expect("pcap should parse")
+        .nth(3)
+        .expect("capture should contain frame 4")
+        .expect("capture frame should parse");
+    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
+        .expect("packet should parse");
+    let tls = parsed.tls.as_ref().expect("TLS should be present");
+
+    assert_eq!(tls.server_name, Some("cloudflare-quic.com".to_string()));
+}
+
+#[test]
+fn tls13_handshake_fixture_frame_one_is_clienthello() {
+    let bytes = include_bytes!("pcaps/protocol-gaps/tls13_handshake.pcap");
+    let frame = iter_capture_frames(bytes)
+        .expect("pcap should parse")
+        .next()
+        .expect("capture should contain frame 1")
+        .expect("capture frame should parse");
+    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
+        .expect("packet should parse");
+    let tls = parsed.tls.as_ref().expect("TLS should be present");
+
+    assert_eq!(tls.record_version, 0x0301);
+}
+
+#[test]
+fn tls12_sni_fixture_frame_one_has_sni() {
+    let bytes = include_bytes!("pcaps/protocol-gaps/tls12_sni.pcapng");
+    let frame = iter_capture_frames(bytes)
+        .expect("pcap should parse")
+        .next()
+        .expect("capture should contain frame 1")
+        .expect("capture frame should parse");
+    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
+        .expect("packet should parse");
+    let tls = parsed.tls.as_ref().expect("TLS should be present");
+
+    assert_eq!(tls.server_name, Some("example.com".to_string()));
+}
+
+#[test]
+fn wireguard_psk_fixture_frame_one_is_handshake_initiation() {
+    let bytes = include_bytes!("pcaps/protocol-gaps/wireguard_psk.pcap");
+    let frame = iter_capture_frames(bytes)
+        .expect("pcap should parse")
+        .next()
+        .expect("capture should contain frame 1")
+        .expect("capture frame should parse");
+    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
+        .expect("packet should parse");
+    let wireguard = parsed
+        .wireguard
+        .as_ref()
+        .expect("WireGuard should be present");
+
+    assert_eq!(
+        wireguard.message_type,
+        WireGuardMessageType::HandshakeInitiation
+    );
+}
+
+#[test]
+fn wireguard_ping_tcp_fixture_frame_one_is_handshake_initiation() {
+    let bytes = include_bytes!("pcaps/protocol-gaps/wireguard_ping_tcp.pcap");
+    let frame = iter_capture_frames(bytes)
+        .expect("pcap should parse")
+        .next()
+        .expect("capture should contain frame 1")
+        .expect("capture frame should parse");
+    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
+        .expect("packet should parse");
+    let wireguard = parsed
+        .wireguard
+        .as_ref()
+        .expect("WireGuard should be present");
+
+    assert_eq!(
+        wireguard.message_type,
+        WireGuardMessageType::HandshakeInitiation
+    );
+}
+
+#[test]
+fn wireguard_ping_tcp_fixture_frame_three_is_transport_data() {
+    let bytes = include_bytes!("pcaps/protocol-gaps/wireguard_ping_tcp.pcap");
+    let frame = iter_capture_frames(bytes)
+        .expect("pcap should parse")
+        .nth(2)
+        .expect("capture should contain frame 3")
+        .expect("capture frame should parse");
+    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
+        .expect("packet should parse");
+    let wireguard = parsed
+        .wireguard
+        .as_ref()
+        .expect("WireGuard should be present");
+
+    assert_eq!(wireguard.message_type, WireGuardMessageType::TransportData);
 }
 
 #[test]
