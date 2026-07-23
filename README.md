@@ -97,6 +97,39 @@ Flow/state tracking should be composed on the integration side (for example insi
 - No raw datalink/transport send/receive runtime in core parser.
 - No macro-heavy mutable packet construction API in core crate.
 
+## Test fixture provenance
+
+`tests/pcaps/happy-path/*` are small hand-built captures (tens to hundreds of bytes each); no external source.
+
+`tests/pcaps/protocol-gaps/*` are a mix of hand-built captures and real-world captures pulled from public sources for ground-truth testing (byte layouts cross-checked against `tshark`'s own dissectors before writing each parser). Origin of each real capture:
+
+| Fixture | Source |
+|---|---|
+| `ftp_session.cap` | [Wireshark SampleCaptures: `[redacted]`]([redacted]) (trimmed to `tcp.port==21`, reformatted from NetMon to pcapng) |
+| `ikev2_sa_init.pcap` | [Wireshark test suite: `[redacted]`]([redacted]) |
+| `nfs_getattr.pcap` | [Wireshark test suite: `nfs.pcap`]([redacted]) |
+| `ospf_hello.cap` | [Wireshark SampleCaptures: `ospf.cap`]([redacted]) |
+| `pim_hello_register.cap` | [Wireshark SampleCaptures: `[redacted]`]([redacted]) |
+| `quic_fragmented_handshake.pcapng` | [Wireshark test suite: `[redacted]`]([redacted]) |
+| `quic_multistream.pcapng` | [Wireshark test suite: `[redacted]`]([redacted]) |
+| `quic_retry.pcapng` | [Wireshark test suite: `[redacted]`]([redacted]) |
+| `quic_tls_upgrade.pcapng` | [Wireshark test suite: `[redacted]`]([redacted]) |
+| `rip_v1.pcap` | [Wireshark SampleCaptures: `RIP_v1`]([redacted]) |
+| `rtcp_sr_rr.pcap` | [Wireshark SampleCaptures: `[redacted]`]([redacted]) (`tls-1.3/sip.pcap` inside the archive) |
+| `smb2_negotiate.pcapng` | [The Ultimate PCAP by Johannes Weber]([redacted]) (2 frames extracted) |
+| `smtp_session.pcap` | [Wireshark SampleCaptures: `smtp.pcap`]([redacted]) |
+| `ssh_banner.pcapng` | [Wireshark SampleCaptures: `[redacted]`]([redacted]) |
+| `telnet_iac.pcap` | [Wireshark SampleCaptures: `[redacted]`]([redacted]) |
+| `tls12_sni.pcapng` | [Wireshark test suite: `[redacted]`]([redacted]) |
+| `tls13_handshake.pcap` | [Wireshark test suite: `[redacted]`]([redacted]) |
+| `vrrp_advertisement.pcapng` | [The Ultimate PCAP by Johannes Weber]([redacted]) (1 frame extracted) |
+| `wireguard_ping_tcp.pcap` | [Wireshark test suite: `[redacted]`]([redacted]) |
+| `wireguard_psk.pcap` | [Wireshark test suite: `[redacted]`]([redacted]) |
+| `discovery_protocols.pcap` | Local capture from the sibling [`openplay`](https://github.com/SkuldNorniern/openplay) project's own test data (`data/homepods.pcap`, real home-network AirPlay/HomePod discovery traffic; 4 frames extracted) |
+| `bgp_shutdown.pcap`, `coap_cbor.pcap`, `dhcpv6.pcap`, `dnp3_read.pcap`, `kerberos.pcapng`, `ldap_search.pcap`, `modbus.pcap`, `mqtt.pcap`, `nntp.pcap`, `openvpn_tcp_tls-auth.pcapng`, `openvpn_udp_tls-auth.pcapng`, `radius_localhost.pcapng`, `sip-rtp-g711.pcap`, `snmp_usm.pcap`, `tftp_rrq.pcap` | Added in an earlier session; exact source not recorded |
+
+[redacted]
+
 ## License
 
 Apache-2.0 (see `LICENSE`).
