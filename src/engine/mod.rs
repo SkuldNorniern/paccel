@@ -17,9 +17,9 @@ pub use builtin::{
     KerberosMessageType, L2tpInfo, LdapMessage, LdapProtocolOp, ModbusMessage, MplsInfo, MplsLabel,
     MqttMessage, MqttPacketType, NntpMessage, OpenVpnInfo, OpenVpnOpcode, ParseConfig, ParseMode,
     ParseWarning, ParseWarningCode, ParseWarningProtocol, ParseWarningSubcode, ParsedPacket,
-    PppoeInfo, RadiusAttribute, RadiusMessage, RtpHeader, SipMessage, SnmpMessage, SnmpPduType,
-    StopLayer, StunMessage, TcpOptionsParsed, TftpMessage, TransportSegment, UdpAppHint, VxlanInfo,
-    WireGuardInfo, WireGuardMessageType,
+    PppoeInfo, RadiusAttribute, RadiusMessage, RtcpHeader, RtpHeader, SipMessage, SnmpMessage,
+    SnmpPduType, SshBanner, StopLayer, StunMessage, TcpOptionsParsed, TftpMessage,
+    TransportSegment, UdpAppHint, VxlanInfo, WireGuardInfo, WireGuardMessageType,
 };
 pub use constants::{ethertype_name, ip_protocol_name};
 pub use context::{DecodeConfig, DecodeContext, DecodeMode};

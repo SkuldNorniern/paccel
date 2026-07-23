@@ -19,9 +19,11 @@ use crate::layer::application::nntp::{NntpMessage, parse_nntp};
 use crate::layer::application::ntp::{NtpMessage, parse_ntp_message};
 use crate::layer::application::quic::{QuicLongHeader, parse_quic_long_header};
 use crate::layer::application::radius::{RadiusMessage, parse_radius_message};
+use crate::layer::application::rtcp::{RtcpHeader, parse_rtcp};
 use crate::layer::application::rtp::{RtpHeader, parse_rtp};
 use crate::layer::application::sip::{SipMessage, parse_sip};
 use crate::layer::application::snmp::{SnmpMessage, parse_snmp_message};
+use crate::layer::application::ssh::{SshBanner, parse_ssh_banner};
 use crate::layer::application::stun::{StunMessage, parse_stun_message};
 use crate::layer::application::tftp::{TftpMessage, parse_tftp_message};
 use crate::layer::application::tls::{TlsClientHello, parse_tls_client_hello};
@@ -100,6 +102,7 @@ pub(super) struct TransportParse {
     pub tls: Option<TlsClientHello>,
     pub http: Option<HttpMessage>,
     pub sip: Option<SipMessage>,
+    pub rtcp: Option<RtcpHeader>,
     pub rtp: Option<RtpHeader>,
     pub quic: Option<QuicLongHeader>,
     pub bgp: Option<BgpMessage>,
@@ -107,6 +110,7 @@ pub(super) struct TransportParse {
     pub nntp: Option<NntpMessage>,
     pub mqtt: Option<MqttMessage>,
     pub modbus: Option<ModbusMessage>,
+    pub ssh: Option<SshBanner>,
     pub coap: Option<CoapMessage>,
     pub kerberos: Option<KerberosMessage>,
     pub stun: Option<StunMessage>,
@@ -213,12 +217,17 @@ pub(super) fn parse_transport(
                                 parsed.sip = parse_sip(payload).ok();
                             }
                             if parsed.http.is_none() && parsed.sip.is_none() {
-                                classify_tcp_app_by_port(
-                                    source_port,
-                                    destination_port,
-                                    payload,
-                                    &mut parsed,
-                                );
+                                if !payload.is_empty() {
+                                    parsed.ssh = parse_ssh_banner(payload).ok();
+                                }
+                                if parsed.ssh.is_none() {
+                                    classify_tcp_app_by_port(
+                                        source_port,
+                                        destination_port,
+                                        payload,
+                                        &mut parsed,
+                                    );
+                                }
                             }
                         }
                     }
@@ -400,7 +409,13 @@ fn parse_udp_transport(l4_bytes: &[u8], config: ParseConfig) -> Result<Transport
     ]
     .into_iter()
     .any(|matched| matched);
-    let rtp = maybe_probe_rtp_udp(parse_application, app, &mut hints, already_classified);
+    let rtcp = maybe_probe_rtcp_udp(parse_application, app, &mut hints, already_classified);
+    let rtp = maybe_probe_rtp_udp(
+        parse_application,
+        app,
+        &mut hints,
+        already_classified || rtcp.is_some(),
+    );
 
     Ok(TransportParse {
         transport: Some(TransportSegment::Udp(udp)),
@@ -417,6 +432,7 @@ fn parse_udp_transport(l4_bytes: &[u8], config: ParseConfig) -> Result<Transport
         snmp,
         ntp,
         sip,
+        rtcp,
         rtp,
         quic,
         coap,
@@ -453,6 +469,20 @@ fn maybe_probe_rtp_udp(
     }
     let header = parse_rtp(payload).ok()?;
     push_hint_unique(hints, UdpAppHint::Rtp);
+    Some(header)
+}
+
+fn maybe_probe_rtcp_udp(
+    parse_application: bool,
+    payload: &[u8],
+    hints: &mut Vec<UdpAppHint>,
+    already_classified: bool,
+) -> Option<RtcpHeader> {
+    if !parse_application || already_classified {
+        return None;
+    }
+    let header = parse_rtcp(payload).ok()?;
+    push_hint_unique(hints, UdpAppHint::Rtcp);
     Some(header)
 }
 
@@ -1511,6 +1541,30 @@ mod tests {
         assert_eq!(rtp.timestamp, 160);
         assert_eq!(rtp.ssrc, 0x343d_a99b);
         assert!(parsed.udp_hints.contains(&UdpAppHint::Rtp));
+    }
+
+    #[test]
+    fn parses_rtcp_sender_report_as_last_resort_udp_payload() {
+        let payload = [0x81, 0xc8, 0x00, 0x0c, 0x5d, 0x93, 0x15, 0x34];
+        let frame = build_ethernet_ipv4_udp_frame(27_943, 6001, &payload);
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+        let rtcp = parsed.rtcp.as_ref().expect("RTCP header");
+
+        assert!(parsed.udp_hints.contains(&UdpAppHint::Rtcp));
+        assert_eq!(rtcp.packet_type, 200);
+        assert_eq!(rtcp.version, 2);
+        assert_eq!(rtcp.ssrc, 0x5d93_1534);
+    }
+
+    #[test]
+    fn parses_ssh_banner_on_nonstandard_tcp_port() {
+        let payload = b"SSH-2.0-OpenSSH_7.6p1 Ubuntu-4ubuntu0.5\r\n";
+        let frame = build_ethernet_ipv4_tcp_frame(49_152, 29_418, payload);
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+        let ssh = parsed.ssh.as_ref().expect("SSH banner");
+
+        assert_eq!(ssh.protocol_version, "2.0");
+        assert_eq!(ssh.software_version, "OpenSSH_7.6p1");
     }
 
     #[test]

@@ -16,9 +16,11 @@ use crate::layer::application::nntp::NntpMessage;
 use crate::layer::application::ntp::NtpMessage;
 use crate::layer::application::quic::QuicLongHeader;
 use crate::layer::application::radius::RadiusMessage;
+use crate::layer::application::rtcp::RtcpHeader;
 use crate::layer::application::rtp::RtpHeader;
 use crate::layer::application::sip::SipMessage;
 use crate::layer::application::snmp::SnmpMessage;
+use crate::layer::application::ssh::SshBanner;
 use crate::layer::application::stun::StunMessage;
 use crate::layer::application::tftp::TftpMessage;
 use crate::layer::application::tls::TlsClientHello;
@@ -403,6 +405,7 @@ pub enum UdpAppHint {
     WireGuard,
     OpenVpn,
     Sip,
+    Rtcp,
     Rtp,
     Coap,
     Kerberos,
@@ -427,6 +430,7 @@ impl UdpAppHint {
             Self::WireGuard => "wireguard",
             Self::OpenVpn => "openvpn",
             Self::Sip => "sip",
+            Self::Rtcp => "rtcp",
             Self::Rtp => "rtp",
             Self::Coap => "coap",
             Self::Kerberos => "kerberos",
@@ -500,6 +504,7 @@ pub struct ParsedPacket {
     pub tls: Option<TlsClientHello>,
     pub http: Option<HttpMessage>,
     pub sip: Option<SipMessage>,
+    pub rtcp: Option<RtcpHeader>,
     pub rtp: Option<RtpHeader>,
     pub quic: Option<QuicLongHeader>,
     pub bgp: Option<BgpMessage>,
@@ -507,6 +512,7 @@ pub struct ParsedPacket {
     pub nntp: Option<NntpMessage>,
     pub mqtt: Option<MqttMessage>,
     pub modbus: Option<ModbusMessage>,
+    pub ssh: Option<SshBanner>,
     pub coap: Option<CoapMessage>,
     pub kerberos: Option<KerberosMessage>,
     pub stun: Option<StunMessage>,
