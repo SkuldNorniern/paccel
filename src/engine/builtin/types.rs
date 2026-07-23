@@ -9,6 +9,7 @@ use crate::layer::application::dnp3::Dnp3Message;
 use crate::layer::application::dns::DnsMessage;
 use crate::layer::application::ftp::FtpMessage;
 use crate::layer::application::http::HttpMessage;
+use crate::layer::application::imap::ImapMessage;
 use crate::layer::application::isakmp::IsakmpHeader;
 use crate::layer::application::kerberos::KerberosMessage;
 use crate::layer::application::ldap::LdapMessage;
@@ -33,6 +34,7 @@ use crate::layer::application::snmp::SnmpMessage;
 use crate::layer::application::ssdp::SsdpMessage;
 use crate::layer::application::ssh::SshBanner;
 use crate::layer::application::stun::StunMessage;
+use crate::layer::application::syslog::SyslogMessage;
 use crate::layer::application::telnet::TelnetCommand;
 use crate::layer::application::tftp::TftpMessage;
 use crate::layer::application::tls::TlsClientHello;
@@ -429,6 +431,7 @@ pub enum UdpAppHint {
     Rip,
     Isakmp,
     Rpc,
+    Syslog,
     Llmnr,
     Nbns,
     QuicShort,
@@ -460,6 +463,7 @@ impl UdpAppHint {
             Self::Rip => "rip",
             Self::Isakmp => "isakmp",
             Self::Rpc => "rpc",
+            Self::Syslog => "syslog",
             Self::Llmnr => "llmnr",
             Self::Nbns => "nbns",
             Self::QuicShort => "quic-short",
@@ -541,6 +545,7 @@ pub struct ParsedPacket {
     pub bgp: Option<BgpMessage>,
     pub ldap: Option<LdapMessage>,
     pub nntp: Option<NntpMessage>,
+    pub imap: Option<ImapMessage>,
     pub ftp: Option<FtpMessage>,
     pub smb2: Option<Smb2Header>,
     pub smtp: Option<SmtpMessage>,
@@ -554,6 +559,7 @@ pub struct ParsedPacket {
     pub rip: Option<RipHeader>,
     pub isakmp: Option<IsakmpHeader>,
     pub rpc: Option<RpcMessage>,
+    pub syslog: Option<SyslogMessage>,
     pub udp_hints: Vec<UdpAppHint>,
     pub warnings: Vec<ParseWarning>,
     pub inner: Option<Box<ParsedPacket>>,

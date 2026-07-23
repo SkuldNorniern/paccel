@@ -10,6 +10,7 @@ use crate::layer::application::dnp3::{Dnp3Message, parse_dnp3_message};
 use crate::layer::application::dns::{DnsMessage, parse_dns_message};
 use crate::layer::application::ftp::{FtpMessage, parse_ftp};
 use crate::layer::application::http::{HttpMessage, parse_http};
+use crate::layer::application::imap::{ImapMessage, parse_imap_message};
 use crate::layer::application::isakmp::{IsakmpHeader, parse_isakmp_header};
 use crate::layer::application::kerberos::{
     KerberosMessage, parse_kerberos_tcp, parse_kerberos_udp,
@@ -36,6 +37,7 @@ use crate::layer::application::snmp::{SnmpMessage, parse_snmp_message};
 use crate::layer::application::ssdp::{SsdpMessage, parse_ssdp};
 use crate::layer::application::ssh::{SshBanner, parse_ssh_banner};
 use crate::layer::application::stun::{StunMessage, parse_stun_message};
+use crate::layer::application::syslog::{SyslogMessage, parse_syslog_message};
 use crate::layer::application::telnet::{TelnetCommand, parse_telnet_command};
 use crate::layer::application::tftp::{TftpMessage, parse_tftp_message};
 use crate::layer::application::tls::{TlsClientHello, parse_tls_client_hello};
@@ -79,6 +81,7 @@ const UDP_PORT_NAT_PMP: u16 = 5351;
 const UDP_PORT_ISAKMP: u16 = 500;
 const UDP_PORT_RIP: u16 = 520;
 const UDP_PORT_RPC: u16 = 2049;
+const UDP_PORT_SYSLOG: u16 = 514;
 const STUN_PORT: u16 = 3478;
 const UDP_PORT_LLMNR: u16 = 5355;
 const UDP_PORT_NBNS: u16 = 137;
@@ -86,6 +89,7 @@ const DNP3_PORT: u16 = 20_000;
 const TCP_PORT_FTP: u16 = 21;
 const TCP_PORT_SMTP: u16 = 25;
 const TCP_PORT_TELNET: u16 = 23;
+const TCP_PORT_IMAP: u16 = 143;
 const TCP_PORT_BGP: u16 = 179;
 const TCP_PORT_LDAP: u16 = 389;
 const TCP_PORT_LDAPS: u16 = 636;
@@ -137,6 +141,7 @@ pub(super) struct TransportParse {
     pub bgp: Option<BgpMessage>,
     pub ldap: Option<LdapMessage>,
     pub nntp: Option<NntpMessage>,
+    pub imap: Option<ImapMessage>,
     pub ftp: Option<FtpMessage>,
     pub smb2: Option<Smb2Header>,
     pub smtp: Option<SmtpMessage>,
@@ -150,6 +155,7 @@ pub(super) struct TransportParse {
     pub rip: Option<RipHeader>,
     pub isakmp: Option<IsakmpHeader>,
     pub rpc: Option<RpcMessage>,
+    pub syslog: Option<SyslogMessage>,
     pub hints: Vec<UdpAppHint>,
 }
 
@@ -364,6 +370,10 @@ fn classify_tcp_app_by_port(
         parsed.telnet = parse_telnet_command(payload).ok();
         return;
     }
+    if source_port == TCP_PORT_IMAP || destination_port == TCP_PORT_IMAP {
+        parsed.imap = parse_imap_message(payload).ok();
+        return;
+    }
     if source_port == TCP_PORT_BGP || destination_port == TCP_PORT_BGP {
         parsed.bgp = parse_bgp_message(payload).ok();
     }
@@ -432,6 +442,7 @@ fn parse_udp_transport(l4_bytes: &[u8], config: ParseConfig) -> Result<Transport
     let mut rip = None;
     let mut isakmp = None;
     let mut rpc = None;
+    let mut syslog = None;
 
     let parse_application = config.stop_after == StopLayer::Application;
     let (wireguard, openvpn) = if parse_application {
@@ -452,6 +463,7 @@ fn parse_udp_transport(l4_bytes: &[u8], config: ParseConfig) -> Result<Transport
         maybe_probe_rip_udp(&udp, app, &mut hints, &mut rip);
         maybe_probe_isakmp_udp(&udp, app, &mut hints, &mut isakmp);
         maybe_probe_rpc_udp(&udp, app, &mut hints, &mut rpc);
+        maybe_probe_syslog_udp(&udp, app, &mut hints, &mut syslog);
         maybe_probe_llmnr_udp(&udp, app, &mut hints);
         maybe_probe_nbns_udp(&udp, app, &mut hints);
         (
@@ -505,6 +517,7 @@ fn parse_udp_transport(l4_bytes: &[u8], config: ParseConfig) -> Result<Transport
         rip.is_some(),
         isakmp.is_some(),
         rpc.is_some(),
+        syslog.is_some(),
         wireguard.is_some(),
         openvpn.is_some(),
         vxlan.is_some(),
@@ -550,9 +563,25 @@ fn parse_udp_transport(l4_bytes: &[u8], config: ParseConfig) -> Result<Transport
         rip,
         isakmp,
         rpc,
+        syslog,
         hints,
         ..TransportParse::default()
     })
+}
+
+fn maybe_probe_syslog_udp(
+    udp: &UdpHeader,
+    payload: &[u8],
+    hints: &mut Vec<UdpAppHint>,
+    syslog: &mut Option<SyslogMessage>,
+) {
+    if !is_udp_port_match(udp, UDP_PORT_SYSLOG) {
+        return;
+    }
+    if let Ok(message) = parse_syslog_message(payload) {
+        push_hint_unique(hints, UdpAppHint::Syslog);
+        *syslog = Some(message);
+    }
 }
 
 fn maybe_probe_sip_udp(
@@ -1394,9 +1423,10 @@ mod tests {
 
     use crate::engine::builtin::{
         BuiltinPacketParser, Dnp3AppFunctionCode, Dnp3FunctionCode, FlowKey, FtpMessage,
-        NatPmpMessage, OpenVpnOpcode, ParseConfig, ParseWarningCode, PcpHeader, RpcMessage,
-        SipMessage, SmtpMessage, SnmpMessage, SnmpPduType, SsdpMessage, StopLayer, TelnetCommand,
-        TftpMessage, TransportSegment, UdpAppHint, WireGuardMessageType,
+        ImapMessage, NatPmpMessage, OpenVpnOpcode, ParseConfig, ParseWarningCode, PcpHeader,
+        RpcMessage, SipMessage, SmtpMessage, SnmpMessage, SnmpPduType, SsdpMessage, StopLayer,
+        SyslogMessage, TelnetCommand, TftpMessage, TransportSegment, UdpAppHint,
+        WireGuardMessageType,
     };
     use crate::layer::application::http::HttpMessage;
     use crate::layer::network::icmpv6::NdpMessage;
@@ -1870,6 +1900,36 @@ mod tests {
                 args: "anonymous".to_string(),
             })
         );
+    }
+
+    #[test]
+    fn parses_imap_from_tcp_payload() {
+        let payload = b"* OK IMAP4rev1 ready\r\n";
+        let frame = build_ethernet_ipv4_tcp_frame(143, 49_152, payload);
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+
+        assert_eq!(
+            parsed.imap,
+            Some(ImapMessage::Untagged {
+                text: "OK IMAP4rev1 ready".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn parses_syslog_from_udp_payload() {
+        let payload = b"<189>message";
+        let frame = build_ethernet_ipv4_udp_frame(49_152, 514, payload);
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+
+        assert_eq!(
+            parsed.syslog,
+            Some(SyslogMessage {
+                facility: 23,
+                severity: 5,
+            })
+        );
+        assert!(parsed.udp_hints.contains(&UdpAppHint::Syslog));
     }
 
     #[test]
