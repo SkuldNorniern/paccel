@@ -5,9 +5,9 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use paccel::engine::{
     BgpMessageType, BuiltinPacketParser, CoapType, Dnp3AppFunctionCode, Dnp3FunctionCode,
     FtpMessage, KerberosMessageType, LdapProtocolOp, MqttPacketType, NntpMessage, OpenVpnOpcode,
-    SipMessage, SmtpMessage, SnmpMessage, SnmpPduType, SsdpMessage, TelnetCommand, TftpMessage,
-    TransportSegment, UdpAppHint, WireGuardMessageType, iter_capture_frames, parse_capture_frames,
-    parse_pcap_frames,
+    RpcMessage, SipMessage, SmtpMessage, SnmpMessage, SnmpPduType, SsdpMessage, TelnetCommand,
+    TftpMessage, TransportSegment, UdpAppHint, WireGuardMessageType, iter_capture_frames,
+    parse_capture_frames, parse_pcap_frames,
 };
 use paccel::layer::application::quic::QuicPacketType;
 
@@ -21,7 +21,6 @@ fn ssdp_fixture_frame_one_is_msearch_request() {
         .expect("capture frame should parse");
     let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
         .expect("packet should parse");
-
     assert_eq!(
         parsed.ssdp,
         Some(SsdpMessage::Request {
@@ -161,6 +160,77 @@ fn ospf_fixture_frame_one_is_hello() {
     assert_eq!(ospf.packet_length, 44);
     assert_eq!(ospf.router_id, Ipv4Addr::new(192, 168, 170, 8));
     assert_eq!(ospf.area_id, Ipv4Addr::new(0, 0, 0, 1));
+}
+
+#[test]
+fn pim_fixture_frame_one_is_hello() {
+    let bytes = include_bytes!("pcaps/protocol-gaps/pim_hello_register.cap");
+    let frame = iter_capture_frames(bytes)
+        .expect("pcap should parse")
+        .next()
+        .expect("capture should contain frame 1")
+        .expect("capture frame should parse");
+    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
+        .expect("packet should parse");
+    let pim = parsed.pim.as_ref().expect("PIM should be present");
+
+    assert_eq!(pim.version, 2);
+    assert_eq!(pim.message_type, 0);
+}
+
+#[test]
+fn pim_fixture_frame_three_is_register() {
+    let bytes = include_bytes!("pcaps/protocol-gaps/pim_hello_register.cap");
+    let frame = iter_capture_frames(bytes)
+        .expect("pcap should parse")
+        .nth(2)
+        .expect("capture should contain frame 3")
+        .expect("capture frame should parse");
+    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
+        .expect("packet should parse");
+    let pim = parsed.pim.as_ref().expect("PIM should be present");
+
+    assert_eq!(pim.version, 2);
+    assert_eq!(pim.message_type, 1);
+}
+
+#[test]
+fn rpc_fixture_frame_one_is_nfs_getattr_call() {
+    let bytes = include_bytes!("pcaps/protocol-gaps/nfs_getattr.pcap");
+    let frame = iter_capture_frames(bytes)
+        .expect("pcap should parse")
+        .next()
+        .expect("capture should contain frame 1")
+        .expect("capture frame should parse");
+    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
+        .expect("packet should parse");
+
+    assert_eq!(
+        parsed.rpc,
+        Some(RpcMessage::Call {
+            xid: 0x7b55_8aeb,
+            rpc_version: 2,
+            program: 100_003,
+            program_version: 3,
+            procedure: 1,
+        })
+    );
+    assert!(parsed.udp_hints.contains(&UdpAppHint::Rpc));
+}
+
+#[test]
+fn rpc_fixture_frame_two_is_reply() {
+    let bytes = include_bytes!("pcaps/protocol-gaps/nfs_getattr.pcap");
+    let frame = iter_capture_frames(bytes)
+        .expect("pcap should parse")
+        .nth(1)
+        .expect("capture should contain frame 2")
+        .expect("capture frame should parse");
+    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
+        .expect("packet should parse");
+
+    assert_eq!(parsed.rpc, Some(RpcMessage::Reply { xid: 0x7b55_8aeb }));
+    assert!(parsed.udp_hints.contains(&UdpAppHint::Rpc));
 }
 
 #[test]
