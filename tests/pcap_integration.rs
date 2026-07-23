@@ -11,16 +11,48 @@ use paccel::engine::{
 };
 use paccel::layer::application::quic::QuicPacketType;
 
+fn build_ethernet_ipv4_udp_frame(
+    dst_ip: [u8; 4],
+    src_port: u16,
+    dst_port: u16,
+    udp_payload: &[u8],
+) -> Vec<u8> {
+    let udp_len = u16::try_from(8 + udp_payload.len()).expect("UDP payload should fit in a frame");
+    let ip_total_len = 20u16
+        .checked_add(udp_len)
+        .expect("UDP datagram should fit in an IPv4 packet");
+
+    let mut frame = Vec::with_capacity(14 + ip_total_len as usize);
+    frame.extend_from_slice(&[0x02, 0x00, 0x00, 0x00, 0x00, 0x01]);
+    frame.extend_from_slice(&[0x02, 0x00, 0x00, 0x00, 0x00, 0x02]);
+    frame.extend_from_slice(&0x0800u16.to_be_bytes());
+
+    frame.push(0x45);
+    frame.push(0x00);
+    frame.extend_from_slice(&ip_total_len.to_be_bytes());
+    frame.extend_from_slice(&0x1234u16.to_be_bytes());
+    frame.extend_from_slice(&0x4000u16.to_be_bytes());
+    frame.push(64);
+    frame.push(17);
+    frame.extend_from_slice(&[0x00, 0x00]);
+    frame.extend_from_slice(&[192, 0, 2, 1]);
+    frame.extend_from_slice(&dst_ip);
+
+    frame.extend_from_slice(&src_port.to_be_bytes());
+    frame.extend_from_slice(&dst_port.to_be_bytes());
+    frame.extend_from_slice(&udp_len.to_be_bytes());
+    frame.extend_from_slice(&[0x00, 0x00]);
+    frame.extend_from_slice(udp_payload);
+
+    frame
+}
+
 #[test]
 fn ssdp_fixture_frame_one_is_msearch_request() {
-    let bytes = include_bytes!("pcaps/protocol-gaps/discovery_protocols.pcap");
-    let frame = iter_capture_frames(bytes)
-        .expect("pcap should parse")
-        .next()
-        .expect("capture should contain frame 1")
-        .expect("capture frame should parse");
-    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
-        .expect("packet should parse");
+    let payload = b"M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nST: ssdp:all\r\nMAN: \"ssdp:discover\"\r\nMX: 2\r\n\r\n";
+    let frame = build_ethernet_ipv4_udp_frame([239, 255, 255, 250], 44_222, 1900, payload);
+    let parsed = BuiltinPacketParser::parse(&frame).expect("packet should parse");
+
     assert_eq!(
         parsed.ssdp,
         Some(SsdpMessage::Request {
@@ -40,14 +72,9 @@ fn ssdp_fixture_frame_one_is_msearch_request() {
 
 #[test]
 fn nat_pmp_fixture_frame_two_is_external_address_request() {
-    let bytes = include_bytes!("pcaps/protocol-gaps/discovery_protocols.pcap");
-    let frame = iter_capture_frames(bytes)
-        .expect("pcap should parse")
-        .nth(1)
-        .expect("capture should contain frame 2")
-        .expect("capture frame should parse");
-    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
-        .expect("packet should parse");
+    let payload = [0x00, 0x00];
+    let frame = build_ethernet_ipv4_udp_frame([192, 0, 2, 2], 61_908, 5351, &payload);
+    let parsed = BuiltinPacketParser::parse(&frame).expect("packet should parse");
     let nat_pmp = parsed.nat_pmp.expect("NAT-PMP should be present");
 
     assert_eq!(nat_pmp.version, 0);
@@ -57,14 +84,11 @@ fn nat_pmp_fixture_frame_two_is_external_address_request() {
 
 #[test]
 fn nat_pmp_fixture_frame_three_is_map_udp_request() {
-    let bytes = include_bytes!("pcaps/protocol-gaps/discovery_protocols.pcap");
-    let frame = iter_capture_frames(bytes)
-        .expect("pcap should parse")
-        .nth(2)
-        .expect("capture should contain frame 3")
-        .expect("capture frame should parse");
-    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
-        .expect("packet should parse");
+    let payload = [
+        0x00, 0x01, 0x00, 0x00, 0xa2, 0xa9, 0x00, 0x00, 0x00, 0x00, 0x1c, 0x20,
+    ];
+    let frame = build_ethernet_ipv4_udp_frame([192, 0, 2, 2], 61_908, 5351, &payload);
+    let parsed = BuiltinPacketParser::parse(&frame).expect("packet should parse");
     let nat_pmp = parsed.nat_pmp.expect("NAT-PMP should be present");
 
     assert_eq!(nat_pmp.version, 0);
@@ -74,14 +98,12 @@ fn nat_pmp_fixture_frame_three_is_map_udp_request() {
 
 #[test]
 fn pcp_fixture_frame_four_is_announce_request() {
-    let bytes = include_bytes!("pcaps/protocol-gaps/discovery_protocols.pcap");
-    let frame = iter_capture_frames(bytes)
-        .expect("pcap should parse")
-        .nth(3)
-        .expect("capture should contain frame 4")
-        .expect("capture frame should parse");
-    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
-        .expect("packet should parse");
+    let payload = [
+        0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0xff, 0xff, 0xc0, 0x00, 0x02, 0x02,
+    ];
+    let frame = build_ethernet_ipv4_udp_frame([192, 0, 2, 2], 61_909, 5351, &payload);
+    let parsed = BuiltinPacketParser::parse(&frame).expect("packet should parse");
     let pcp = parsed.pcp.expect("PCP should be present");
 
     assert_eq!(pcp.version, 2);
@@ -754,6 +776,46 @@ fn ftp_fixture_frame_seven_is_user_command() {
             args: "anonymous".to_string(),
         })
     );
+}
+
+#[test]
+fn smb1_fixture_frame_one_is_negotiate_request() {
+    let bytes = include_bytes!("pcaps/protocol-gaps/smb1_negotiate.cap");
+    let frame = iter_capture_frames(bytes)
+        .expect("pcap should parse")
+        .next()
+        .expect("capture should contain frame 1")
+        .expect("capture frame should parse");
+    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
+        .expect("packet should parse");
+    let smb1 = parsed.smb1.as_ref().expect("SMB1 should be present");
+
+    assert_eq!(smb1.command, 0x72);
+    assert!(!smb1.is_response);
+    assert_eq!(smb1.tid, 0);
+    assert_eq!(smb1.pid, 0);
+    assert_eq!(smb1.uid, 0);
+    assert_eq!(smb1.mid, 1);
+}
+
+#[test]
+fn smb1_fixture_frame_two_is_negotiate_response() {
+    let bytes = include_bytes!("pcaps/protocol-gaps/smb1_negotiate.cap");
+    let frame = iter_capture_frames(bytes)
+        .expect("pcap should parse")
+        .nth(1)
+        .expect("capture should contain frame 2")
+        .expect("capture frame should parse");
+    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
+        .expect("packet should parse");
+    let smb1 = parsed.smb1.as_ref().expect("SMB1 should be present");
+
+    assert_eq!(smb1.command, 0x72);
+    assert!(smb1.is_response);
+    assert_eq!(smb1.tid, 0);
+    assert_eq!(smb1.pid, 0);
+    assert_eq!(smb1.uid, 0);
+    assert_eq!(smb1.mid, 1);
 }
 
 #[test]
