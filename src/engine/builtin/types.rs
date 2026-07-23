@@ -409,6 +409,7 @@ pub enum UdpAppHint {
     Stun,
     Llmnr,
     Nbns,
+    QuicShort,
 }
 
 impl UdpAppHint {
@@ -432,6 +433,7 @@ impl UdpAppHint {
             Self::Stun => "stun",
             Self::Llmnr => "llmnr",
             Self::Nbns => "nbns",
+            Self::QuicShort => "quic-short",
         }
     }
 }
