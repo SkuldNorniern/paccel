@@ -366,6 +366,18 @@ fn parse_udp_transport(l4_bytes: &[u8], config: ParseConfig) -> Result<Transport
         && app[0] & 0x80 != 0)
         .then(|| parse_quic_long_header(app).ok())
         .flatten();
+    let quic_short = parse_application
+        && wireguard.is_none()
+        && openvpn.is_none()
+        && vxlan.is_none()
+        && geneve.is_none()
+        && l2tp.is_none()
+        && quic.is_none()
+        && !app.is_empty()
+        && app[0] & 0xc0 == 0x40;
+    if quic_short {
+        push_hint_unique(&mut hints, UdpAppHint::QuicShort);
+    }
     let already_classified = [
         dns.is_some(),
         dhcp.is_some(),
@@ -384,6 +396,7 @@ fn parse_udp_transport(l4_bytes: &[u8], config: ParseConfig) -> Result<Transport
         geneve.is_some(),
         l2tp.is_some(),
         quic.is_some(),
+        quic_short,
     ]
     .into_iter()
     .any(|matched| matched);
@@ -1513,6 +1526,15 @@ mod tests {
         assert_eq!(quic.version, 1);
         assert_eq!(quic.dcid, [0x11, 0x22, 0x33, 0x44]);
         assert!(quic.scid.is_empty());
+    }
+
+    #[test]
+    fn classifies_quic_short_header_as_hint_only() {
+        let frame = build_ethernet_ipv4_udp_frame(49152, 443, &[0x40]);
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+
+        assert!(parsed.udp_hints.contains(&UdpAppHint::QuicShort));
+        assert!(parsed.quic.is_none());
     }
 
     #[test]
