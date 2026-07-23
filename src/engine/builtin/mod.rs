@@ -33,6 +33,7 @@ pub use crate::layer::application::rpc::RpcMessage;
 pub use crate::layer::application::rtcp::RtcpHeader;
 pub use crate::layer::application::rtp::RtpHeader;
 pub use crate::layer::application::sip::SipMessage;
+pub use crate::layer::application::smb1::Smb1Header;
 pub use crate::layer::application::smb2::Smb2Header;
 pub use crate::layer::application::smtp::SmtpMessage;
 pub use crate::layer::application::snmp::{SnmpMessage, SnmpPduType};
@@ -762,6 +763,7 @@ fn apply_transport_parse(parsed: &mut ParsedPacket, transport_parse: transport::
     parsed.nntp = transport_parse.nntp;
     parsed.imap = transport_parse.imap;
     parsed.ftp = transport_parse.ftp;
+    parsed.smb1 = transport_parse.smb1;
     parsed.smb2 = transport_parse.smb2;
     parsed.smtp = transport_parse.smtp;
     parsed.telnet = transport_parse.telnet;
