@@ -4,9 +4,10 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 
 use paccel::engine::{
     BgpMessageType, BuiltinPacketParser, CoapType, Dnp3AppFunctionCode, Dnp3FunctionCode,
-    KerberosMessageType, LdapProtocolOp, MqttPacketType, NntpMessage, OpenVpnOpcode, SipMessage,
-    SnmpMessage, SnmpPduType, TftpMessage, TransportSegment, UdpAppHint, WireGuardMessageType,
-    iter_capture_frames, parse_capture_frames, parse_pcap_frames,
+    FtpMessage, KerberosMessageType, LdapProtocolOp, MqttPacketType, NntpMessage, OpenVpnOpcode,
+    SipMessage, SmtpMessage, SnmpMessage, SnmpPduType, TelnetCommand, TftpMessage,
+    TransportSegment, UdpAppHint, WireGuardMessageType, iter_capture_frames, parse_capture_frames,
+    parse_pcap_frames,
 };
 use paccel::layer::application::quic::QuicPacketType;
 
@@ -333,6 +334,110 @@ fn nntp_fixture_frame_four_matches_tshark() {
         parsed.nntp,
         Some(NntpMessage::Response { code: 200, .. })
     ));
+}
+
+#[test]
+fn ftp_fixture_frame_six_is_banner_response() {
+    let bytes = include_bytes!("pcaps/protocol-gaps/ftp_session.cap");
+    let frame = iter_capture_frames(bytes)
+        .expect("pcap should parse")
+        .nth(5)
+        .expect("capture should contain frame 6")
+        .expect("capture frame should parse");
+    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
+        .expect("packet should parse");
+    let ftp = parsed.inner.as_deref().and_then(|inner| inner.ftp.as_ref());
+
+    assert_eq!(
+        ftp,
+        Some(&FtpMessage::Response {
+            code: 220,
+            text: "6bone.informatik.uni-leipzig.de FTP server (NetBSD-ftpd 20041119) ready."
+                .to_string(),
+        })
+    );
+}
+
+#[test]
+fn ftp_fixture_frame_seven_is_user_command() {
+    let bytes = include_bytes!("pcaps/protocol-gaps/ftp_session.cap");
+    let frame = iter_capture_frames(bytes)
+        .expect("pcap should parse")
+        .nth(6)
+        .expect("capture should contain frame 7")
+        .expect("capture frame should parse");
+    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
+        .expect("packet should parse");
+    let ftp = parsed.inner.as_deref().and_then(|inner| inner.ftp.as_ref());
+
+    assert_eq!(
+        ftp,
+        Some(&FtpMessage::Command {
+            verb: "USER".to_string(),
+            args: "anonymous".to_string(),
+        })
+    );
+}
+
+#[test]
+fn smtp_fixture_frame_six_is_banner_response() {
+    let bytes = include_bytes!("pcaps/protocol-gaps/smtp_session.pcap");
+    let frame = iter_capture_frames(bytes)
+        .expect("pcap should parse")
+        .nth(5)
+        .expect("capture should contain frame 6")
+        .expect("capture frame should parse");
+    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
+        .expect("packet should parse");
+
+    assert_eq!(
+        parsed.smtp,
+        Some(SmtpMessage::Response {
+            code: 220,
+            text: "xc90.websitewelcome.com ESMTP Exim 4.69 #1 Mon, 05 Oct 2009 01:05:54 -0500 "
+                .to_string(),
+        })
+    );
+}
+
+#[test]
+fn smtp_fixture_frame_seven_is_ehlo_command() {
+    let bytes = include_bytes!("pcaps/protocol-gaps/smtp_session.pcap");
+    let frame = iter_capture_frames(bytes)
+        .expect("pcap should parse")
+        .nth(6)
+        .expect("capture should contain frame 7")
+        .expect("capture frame should parse");
+    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
+        .expect("packet should parse");
+
+    assert_eq!(
+        parsed.smtp,
+        Some(SmtpMessage::Command {
+            verb: "EHLO".to_string(),
+            args: "GP".to_string(),
+        })
+    );
+}
+
+#[test]
+fn telnet_fixture_frame_four_is_do_suppress_go_ahead() {
+    let bytes = include_bytes!("pcaps/protocol-gaps/telnet_iac.pcap");
+    let frame = iter_capture_frames(bytes)
+        .expect("pcap should parse")
+        .nth(3)
+        .expect("capture should contain frame 4")
+        .expect("capture frame should parse");
+    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
+        .expect("packet should parse");
+
+    assert_eq!(
+        parsed.telnet,
+        Some(TelnetCommand {
+            command: 0xfd,
+            option: 0x03,
+        })
+    );
 }
 
 #[test]
