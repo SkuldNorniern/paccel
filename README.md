@@ -16,11 +16,11 @@ The goal is to become a strong parsing alternative for Fluere workloads (not a f
 
 | Layer / capability | Support |
 |---|---|
-| Link | Ethernet II; VLAN 802.1Q; QinQ 802.1ad; Linux SLL/SLL2; 802.11 with radiotap; ARP; PPPoE with PPP-in-PPPoE; MPLS; LLDP; STP |
-| Network | IPv4 with options; IPv6 with extension headers; ICMP with echo; ICMPv6 with NDP; IGMP; OSPF; PIM |
+| Link | Ethernet II; VLAN 802.1Q; QinQ 802.1ad; Linux SLL/SLL2; 802.11 with radiotap; ARP; PPPoE with PPP-in-PPPoE; MPLS; LLDP; STP; CDP; LACP |
+| Network | IPv4 with options; IPv6 with extension headers; ICMP with echo; ICMPv6 with NDP; IGMP; OSPF; PIM; EIGRP; VRRP |
 | Transport | TCP with options; UDP; SCTP; GRE; AH; ESP; L2TP |
 | Tunnel (recursive inner decode) | GRE; VXLAN; GENEVE; MPLS; IP-in-IP |
-| Application (full parse) | DNS (records + EDNS), mDNS, DHCP, DHCPv6, NTP, TLS ClientHello (SNI/ALPN), HTTP/1.x, QUIC (version-aware long-header packet types v1/v2), BGP, CoAP, DNP3, FTP, IKE/ISAKMP (v1/v2), Kerberos (UDP/TCP), LDAP, Modbus/TCP, MQTT, NNTP, ONC-RPC (NFS classification), PCP, RADIUS, RIP, RTCP, RTP, SIP, SMTP, SNMP, SSDP, SSH (banner), STUN, TFTP, Telnet (IAC negotiation) — plus OSPF and PIM (see Network row) |
+| Application (full parse) | DNS (records + EDNS), mDNS, DHCP, DHCPv6, NTP, TLS ClientHello (SNI/ALPN), HTTP/1.x, QUIC (version-aware long-header packet types v1/v2), BGP, CoAP, DNP3, FTP, HSRP, IKE/ISAKMP (v1/v2), IMAP, Kerberos (UDP/TCP), LDAP, Modbus/TCP, MQTT, NNTP, ONC-RPC (NFS classification), PCP, RADIUS, RIP, RTCP, RTP, SIP, SMB1/CIFS, SMB2, SMTP, SNMP, SSDP, SSH (banner), STUN, Syslog, TFTP, Telnet (IAC negotiation) — plus OSPF, PIM, EIGRP, VRRP, CDP, LACP (see Link/Network rows) |
 | Application (port/heuristic classification only) | WireGuard, OpenVPN, L2TP, QUIC short header (1-RTT), LLMNR, NBNS, NAT-PMP |
 | Capture formats | pcap and pcapng (linktype-aware: Ethernet, SLL, SLL2, NULL, RAW/IPv4/IPv6, FDDI/SNAP, and 802.11) |
 | Reassembly | IPv4/IPv6 fragments; TCP streams (opt-in) |
@@ -105,7 +105,7 @@ Flow/state tracking should be composed on the integration side (for example insi
 
 | Fixture | Source |
 |---|---|
-| `cdp_device_id.pcap` | [Wireshark SampleCaptures: `cdp.pcap`]([redacted]) |
+| `cdp_device_id.pcap` | Hand-built with [scapy](https://scapy.net/) (`scapy.contrib.cdp`); no external capture |
 | `eigrp_hello.cap` | [Wireshark SampleCaptures: `[redacted]`]([redacted]) |
 | `ftp_session.cap` | [Wireshark SampleCaptures: `[redacted]`]([redacted]) (trimmed to `tcp.port==21`, reformatted from NetMon to pcapng) |
 | `hsrp_hello.pcap` | [Wireshark SampleCaptures: `hsrp.pcap`]([redacted]) |
