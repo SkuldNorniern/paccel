@@ -19,6 +19,31 @@ pub struct QuicLongHeader {
     pub fixed_bit: bool,
     pub dcid: Vec<u8>,
     pub scid: Vec<u8>,
+    /// Initial only. `None` for every other packet type.
+    pub token: Option<Vec<u8>>,
+    /// Declared length (bytes) of the packet-number-plus-payload region.
+    /// Initial/0-RTT/Handshake only.
+    pub length: Option<u64>,
+    /// Byte offset into the original `payload` slice where the
+    /// (still header-protected) packet number begins. Initial/0-RTT/Handshake
+    /// only; needed to locate the PN once header protection is removed.
+    pub packet_number_offset: Option<usize>,
+    pub retry_token: Option<Vec<u8>>,
+    pub retry_integrity_tag: Option<[u8; 16]>,
+}
+
+/// RFC 9000 sec 16 variable-length integer: top 2 bits of the first byte pick
+/// the encoding length (1/2/4/8 bytes), remaining bits (of all length bytes)
+/// are the value.
+pub fn decode_varint(payload: &[u8]) -> Option<(u64, usize)> {
+    let first = *payload.first()?;
+    let len = 1usize << (first >> 6);
+    let bytes = payload.get(..len)?;
+    let mut value = u64::from(bytes[0] & 0x3f);
+    for &byte in &bytes[1..] {
+        value = (value << 8) | u64::from(byte);
+    }
+    Some((value, len))
 }
 
 pub fn quic_version_name(version: u32) -> &'static str {
@@ -103,6 +128,58 @@ pub fn parse_quic_long_header(payload: &[u8]) -> Result<QuicLongHeader, LayerErr
 
     let packet_type = (first_byte >> 4) & 0x03;
     let kind = quic_packet_type(version, packet_type);
+
+    let mut token = None;
+    let mut length = None;
+    let mut packet_number_offset = None;
+    let mut retry_token = None;
+    let mut retry_integrity_tag = None;
+
+    if known_version {
+        match kind {
+            QuicPacketType::Initial => {
+                let (token_len, token_len_size) =
+                    decode_varint(payload.get(scid_end..).ok_or(LayerError::InvalidLength)?)
+                        .ok_or(LayerError::InvalidLength)?;
+                let token_start = scid_end + token_len_size;
+                let token_end = token_start
+                    .checked_add(usize::try_from(token_len).map_err(|_| LayerError::InvalidLength)?)
+                    .ok_or(LayerError::InvalidLength)?;
+                token = Some(
+                    payload
+                        .get(token_start..token_end)
+                        .ok_or(LayerError::InvalidLength)?
+                        .to_vec(),
+                );
+                let (declared_length, length_size) =
+                    decode_varint(payload.get(token_end..).ok_or(LayerError::InvalidLength)?)
+                        .ok_or(LayerError::InvalidLength)?;
+                length = Some(declared_length);
+                packet_number_offset = Some(token_end + length_size);
+            }
+            QuicPacketType::ZeroRtt | QuicPacketType::Handshake => {
+                let (declared_length, length_size) =
+                    decode_varint(payload.get(scid_end..).ok_or(LayerError::InvalidLength)?)
+                        .ok_or(LayerError::InvalidLength)?;
+                length = Some(declared_length);
+                packet_number_offset = Some(scid_end + length_size);
+            }
+            QuicPacketType::Retry => {
+                const INTEGRITY_TAG_LEN: usize = 16;
+                let tag_start = payload
+                    .len()
+                    .checked_sub(INTEGRITY_TAG_LEN)
+                    .filter(|start| *start >= scid_end)
+                    .ok_or(LayerError::InvalidLength)?;
+                retry_token = Some(payload[scid_end..tag_start].to_vec());
+                let mut tag = [0u8; INTEGRITY_TAG_LEN];
+                tag.copy_from_slice(&payload[tag_start..]);
+                retry_integrity_tag = Some(tag);
+            }
+            QuicPacketType::Unknown => {}
+        }
+    }
+
     Ok(QuicLongHeader {
         version,
         packet_type,
@@ -112,6 +189,11 @@ pub fn parse_quic_long_header(payload: &[u8]) -> Result<QuicLongHeader, LayerErr
         fixed_bit,
         dcid,
         scid,
+        token,
+        length,
+        packet_number_offset,
+        retry_token,
+        retry_integrity_tag,
     })
 }
 
@@ -121,17 +203,27 @@ mod tests {
 
     use super::{QuicPacketType, parse_quic_long_header, quic_version_name};
 
+    // token_length=0 (0x00), length=1 (0x01), 1 byte of (still-protected) packet number.
+    const INITIAL_TAIL: [u8; 3] = [0x00, 0x01, 0x00];
+
     #[test]
     fn classifies_v1_initial_and_version_name() {
-        let header = parse_quic_long_header(&[0xc0, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00]).unwrap();
+        let mut payload = vec![0xc0, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00];
+        payload.extend(INITIAL_TAIL);
+        let header = parse_quic_long_header(&payload).unwrap();
 
         assert_eq!(header.kind, QuicPacketType::Initial);
         assert_eq!(quic_version_name(1), "v1");
+        assert_eq!(header.token, Some(Vec::new()));
+        assert_eq!(header.length, Some(1));
+        assert_eq!(header.packet_number_offset, Some(payload.len() - 1));
     }
 
     #[test]
     fn classifies_v2_remapped_packet_type() {
-        let header = parse_quic_long_header(&[0xd0, 0x6b, 0x33, 0x43, 0xcf, 0x00, 0x00]).unwrap();
+        let mut payload = vec![0xd0, 0x6b, 0x33, 0x43, 0xcf, 0x00, 0x00];
+        payload.extend(INITIAL_TAIL);
+        let header = parse_quic_long_header(&payload).unwrap();
 
         assert_eq!(header.packet_type, 0b01);
         assert_eq!(header.kind, QuicPacketType::Initial);
@@ -140,7 +232,9 @@ mod tests {
 
     #[test]
     fn classifies_v2_draft_codepoint_with_same_layout_as_v2() {
-        let header = parse_quic_long_header(&[0xd0, 0x70, 0x9a, 0x50, 0xc4, 0x00, 0x00]).unwrap();
+        let mut payload = vec![0xd0, 0x70, 0x9a, 0x50, 0xc4, 0x00, 0x00];
+        payload.extend(INITIAL_TAIL);
+        let header = parse_quic_long_header(&payload).unwrap();
 
         assert_eq!(header.kind, QuicPacketType::Initial);
         assert!(header.is_initial);
@@ -148,10 +242,35 @@ mod tests {
 
     #[test]
     fn does_not_reject_a_cleared_fixed_bit() {
-        let header = parse_quic_long_header(&[0x80, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00]).unwrap();
+        let mut payload = vec![0x80, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00];
+        payload.extend(INITIAL_TAIL);
+        let header = parse_quic_long_header(&payload).unwrap();
 
         assert!(!header.fixed_bit);
         assert_eq!(header.kind, QuicPacketType::Initial);
+    }
+
+    #[test]
+    fn parses_handshake_length_and_pn_offset() {
+        // Handshake has no token field, just length then PN.
+        let payload = [0xe0, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x02, 0x00, 0x00];
+        let header = parse_quic_long_header(&payload).unwrap();
+
+        assert_eq!(header.kind, QuicPacketType::Handshake);
+        assert_eq!(header.length, Some(2));
+        assert_eq!(header.packet_number_offset, Some(8));
+    }
+
+    #[test]
+    fn parses_retry_token_and_integrity_tag() {
+        let mut payload = vec![0xf0, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00];
+        payload.extend([0xaa, 0xbb, 0xcc]); // retry token
+        payload.extend([0u8; 16]); // integrity tag
+        let header = parse_quic_long_header(&payload).unwrap();
+
+        assert_eq!(header.kind, QuicPacketType::Retry);
+        assert_eq!(header.retry_token, Some(vec![0xaa, 0xbb, 0xcc]));
+        assert_eq!(header.retry_integrity_tag, Some([0u8; 16]));
     }
 
     #[test]
