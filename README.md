@@ -4,6 +4,8 @@ Paccel is an in-progress Rust packet parsing engine focused on practical protoco
 
 The goal is to become a strong parsing alternative for Fluere workloads (not a full Wireshark clone).
 
+Requires Rust 1.88+ (edition 2024, let chains).
+
 ## Current status
 
 - parser engine scaffolding is in place (`engine/*`)
@@ -33,6 +35,8 @@ The parser never panics on malformed input; it is fuzz-, property-, and differen
 - tshark corpus scaffolding exists; parity automation is in place, but tshark-based differential coverage is still being expanded
 - baseline pcap-vs-scapy parity test exists, but coverage is still small
 - still uses intermediate allocations in parts of hot path
+- QUIC support is wire-metadata only: version, long-header packet type (v1/v2-aware), and per-packet DCID/SCID. No Version Negotiation list parsing, no Initial token/Retry integrity tag, no coalesced-packet splitting, no header protection removal or decryption, no CRYPTO/STREAM frame parsing, no connection-ID state tracking across packets (so short-header/1-RTT classification is a low-confidence heuristic, not authoritative)
+- no GTP or Diameter support yet (no ground-truth test data available)
 
 ## Quick usage
 
@@ -85,7 +89,7 @@ Flow/state tracking should be composed on the integration side (for example insi
 | Linux cooked capture (SLL/SLL2) | yes | yes |
 | Typed protocol/ethertype name helpers | yes | yes |
 | One-shot structured parse output with warnings | limited | yes |
-| Application-layer protocol parsing (20 protocols, see table above) | no (link/network/transport only) | yes |
+| Application-layer protocol parsing (40+ protocols, see table above) | no (link/network/transport only) | yes |
 | Tunnel metadata in one parse pass (MPLS/VXLAN/GENEVE/AH/ESP/WireGuard) | partial | yes |
 | Strict/permissive parser mode | no | yes |
 | Built-in raw send/receive transport stack | yes | no (out of scope) |
