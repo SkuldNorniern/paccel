@@ -99,6 +99,8 @@ Flow/state tracking should be composed on the integration side (for example insi
 
 ## Test fixture provenance
 
+**None of this affects the published crate.** `tests/pcaps/` and `fuzz/` are excluded from the packaged crate (see `exclude` in `Cargo.toml`) — `cargo package --list` confirms zero binary fixtures ship. Everything under `src/` is original, written from RFCs/specs and verified against `tshark`'s output, not derived from Wireshark's own (GPLv2) source code. Apache-2.0 in `LICENSE` covers the crate as published; the third-party test data below exists only in this git repository, for local test use, under its own license.
+
 `tests/pcaps/happy-path/*` are small hand-built captures (tens to hundreds of bytes each); no external source.
 
 `tests/pcaps/protocol-gaps/*` are a mix of hand-built captures and real-world captures pulled from public sources for ground-truth testing (byte layouts cross-checked against `tshark`'s own dissectors before writing each parser). Origin of each real capture:
