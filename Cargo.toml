@@ -2,6 +2,13 @@
 name = "paccel"
 version = "0.1.0"
 edition = "2024"
+authors = ["Eira"]
+description = "Zero-dependency Rust packet parsing engine for pcap/pcapng capture and live traffic classification"
+license = "Apache-2.0"
+readme = "README.md"
+repository = "https://github.com/SkuldNorniern/paccel"
+keywords = ["packet", "pcap", "network", "parser", "protocol"]
+categories = ["network-programming", "parser-implementations"]
 exclude = ["tests/pcaps/", "fuzz/"]
 
 [dependencies]
