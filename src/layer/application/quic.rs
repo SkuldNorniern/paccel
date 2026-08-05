@@ -32,6 +32,12 @@ pub fn quic_version_name(version: u32) -> &'static str {
     }
 }
 
+const MAX_V1_V2_CID_LEN: usize = 20;
+
+fn is_v1_or_v2_family(version: u32) -> bool {
+    matches!(version, 0x0000_0001 | 0x6b33_43cf | 0x709a_50c4)
+}
+
 fn quic_packet_type(version: u32, packet_type: u8) -> QuicPacketType {
     match version {
         0x0000_0001 => match packet_type {
@@ -67,7 +73,12 @@ pub fn parse_quic_long_header(payload: &[u8]) -> Result<QuicLongHeader, LayerErr
     // RFC 9287 allows negotiating away the fixed bit; record, don't reject on it.
     let fixed_bit = first_byte & 0x40 != 0;
 
+    let known_version = is_v1_or_v2_family(version);
+
     let dcid_len = usize::from(payload[5]);
+    if known_version && dcid_len > MAX_V1_V2_CID_LEN {
+        return Err(LayerError::InvalidHeader);
+    }
     let dcid_start = 6usize;
     let dcid_end = dcid_start
         .checked_add(dcid_len)
@@ -78,6 +89,9 @@ pub fn parse_quic_long_header(payload: &[u8]) -> Result<QuicLongHeader, LayerErr
         .to_vec();
 
     let scid_len = usize::from(*payload.get(dcid_end).ok_or(LayerError::InvalidLength)?);
+    if known_version && scid_len > MAX_V1_V2_CID_LEN {
+        return Err(LayerError::InvalidHeader);
+    }
     let scid_start = dcid_end + 1;
     let scid_end = scid_start
         .checked_add(scid_len)
@@ -103,6 +117,8 @@ pub fn parse_quic_long_header(payload: &[u8]) -> Result<QuicLongHeader, LayerErr
 
 #[cfg(test)]
 mod tests {
+    use std::iter::repeat_n;
+
     use super::{QuicPacketType, parse_quic_long_header, quic_version_name};
 
     #[test]
@@ -136,6 +152,17 @@ mod tests {
 
         assert!(!header.fixed_bit);
         assert_eq!(header.kind, QuicPacketType::Initial);
+    }
+
+    #[test]
+    fn rejects_oversized_dcid_for_known_versions_only() {
+        let mut oversized = vec![0xc0, 0x00, 0x00, 0x00, 0x01, 21];
+        oversized.extend(repeat_n(0u8, 21));
+        assert!(parse_quic_long_header(&oversized).is_err());
+
+        let mut unknown_version = vec![0xc0, 0xff, 0x00, 0x00, 0x1d, 21];
+        unknown_version.extend(repeat_n(0u8, 22));
+        assert!(parse_quic_long_header(&unknown_version).is_ok());
     }
 
     #[test]
