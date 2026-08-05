@@ -438,7 +438,7 @@ fn quic_multistream_fixture_frame_one_has_expected_dcid() {
         quic.dcid,
         vec![0x2e, 0xe7, 0xfa, 0xb7, 0x09, 0xec, 0x0e, 0x70]
     );
-    assert!(quic.is_initial);
+    assert!(!quic.is_initial);
     assert_eq!(quic.kind, QuicPacketType::Unknown);
 }
 

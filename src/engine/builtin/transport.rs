@@ -504,6 +504,7 @@ fn parse_udp_transport(l4_bytes: &[u8], config: ParseConfig) -> Result<Transport
     let vxlan = maybe_parse_vxlan(&udp, app);
     let geneve = maybe_parse_geneve(&udp, app);
     let l2tp = maybe_parse_l2tp(&udp, app, &mut hints);
+    // Fixed bit required here (unlike parse_quic_long_header) to avoid colliding with RTP v2's version bits.
     let quic = (parse_application
         && wireguard.is_none()
         && openvpn.is_none()
@@ -511,7 +512,7 @@ fn parse_udp_transport(l4_bytes: &[u8], config: ParseConfig) -> Result<Transport
         && geneve.is_none()
         && l2tp.is_none()
         && app.len() >= 7
-        && app[0] & 0x80 != 0)
+        && app[0] & 0xc0 == 0xc0)
         .then(|| parse_quic_long_header(app).ok())
         .flatten();
     let quic_short = parse_application
