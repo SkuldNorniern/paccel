@@ -2,6 +2,7 @@
 name = "paccel"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.88"
 authors = ["Eira"]
 description = "Zero-dependency Rust packet parsing engine for pcap/pcapng capture and live traffic classification"
 license = "Apache-2.0"
