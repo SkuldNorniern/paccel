@@ -16,6 +16,7 @@ pub struct QuicLongHeader {
     pub kind: QuicPacketType,
     pub is_initial: bool,
     pub is_version_negotiation: bool,
+    pub fixed_bit: bool,
     pub dcid: Vec<u8>,
     pub scid: Vec<u8>,
 }
@@ -40,8 +41,8 @@ fn quic_packet_type(version: u32, packet_type: u8) -> QuicPacketType {
             0b11 => QuicPacketType::Retry,
             _ => QuicPacketType::Unknown,
         },
-        // RFC 9369 sec 3.2 remaps the long-header packet types for QUIC v2.
-        0x6b33_43cf => match packet_type {
+        // RFC 9369 sec 3.2 remaps v2's packet types; 0x709a50c4 is the pre-RFC draft codepoint, same layout.
+        0x6b33_43cf | 0x709a_50c4 => match packet_type {
             0b00 => QuicPacketType::Retry,
             0b01 => QuicPacketType::Initial,
             0b10 => QuicPacketType::ZeroRtt,
@@ -63,9 +64,8 @@ pub fn parse_quic_long_header(payload: &[u8]) -> Result<QuicLongHeader, LayerErr
     }
 
     let version = u32::from_be_bytes([payload[1], payload[2], payload[3], payload[4]]);
-    if version != 0 && first_byte & 0x40 == 0 {
-        return Err(LayerError::InvalidHeader);
-    }
+    // RFC 9287 allows negotiating away the fixed bit; record, don't reject on it.
+    let fixed_bit = first_byte & 0x40 != 0;
 
     let dcid_len = usize::from(payload[5]);
     let dcid_start = 6usize;
@@ -93,8 +93,9 @@ pub fn parse_quic_long_header(payload: &[u8]) -> Result<QuicLongHeader, LayerErr
         version,
         packet_type,
         kind,
-        is_initial: version != 0 && packet_type == 0,
+        is_initial: kind == QuicPacketType::Initial,
         is_version_negotiation: version == 0,
+        fixed_bit,
         dcid,
         scid,
     })
@@ -118,6 +119,23 @@ mod tests {
 
         assert_eq!(header.packet_type, 0b01);
         assert_eq!(header.kind, QuicPacketType::Initial);
+        assert!(header.is_initial);
+    }
+
+    #[test]
+    fn classifies_v2_draft_codepoint_with_same_layout_as_v2() {
+        let header = parse_quic_long_header(&[0xd0, 0x70, 0x9a, 0x50, 0xc4, 0x00, 0x00]).unwrap();
+
+        assert_eq!(header.kind, QuicPacketType::Initial);
+        assert!(header.is_initial);
+    }
+
+    #[test]
+    fn does_not_reject_a_cleared_fixed_bit() {
+        let header = parse_quic_long_header(&[0x80, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00]).unwrap();
+
+        assert!(!header.fixed_bit);
+        assert_eq!(header.kind, QuicPacketType::Initial);
     }
 
     #[test]
@@ -125,6 +143,7 @@ mod tests {
         let header = parse_quic_long_header(&[0xc0, 0x1a, 0x2a, 0x3a, 0x4a, 0x00, 0x00]).unwrap();
 
         assert_eq!(quic_version_name(header.version), "greasing");
+        assert!(!header.is_initial);
         assert_eq!(header.kind, QuicPacketType::Unknown);
     }
 }
