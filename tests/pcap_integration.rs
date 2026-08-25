@@ -140,6 +140,53 @@ fn build_ber_tlv(tag: u8, content: &[u8]) -> Vec<u8> {
     tlv
 }
 
+fn build_smb_direct_tcp_message(message: &[u8]) -> Vec<u8> {
+    let message_len = u32::try_from(message.len()).expect("SMB message length should fit in u32");
+    assert!(
+        message_len <= 0x00ff_ffff,
+        "SMB message should fit in the direct TCP length field"
+    );
+    let encoded_len = message_len.to_be_bytes();
+    let mut payload = vec![0x00, encoded_len[1], encoded_len[2], encoded_len[3]];
+    payload.extend_from_slice(message);
+    payload
+}
+
+fn build_smb1_negotiate_message(is_response: bool) -> Vec<u8> {
+    let mut message = vec![0; 32];
+    message[..4].copy_from_slice(&[0xff, b'S', b'M', b'B']);
+    message[4] = 0x72;
+    message[9] = if is_response { 0x98 } else { 0x18 };
+    message[10..12].copy_from_slice(&0x0001u16.to_le_bytes());
+    message[12..14].copy_from_slice(&0x0002u16.to_le_bytes());
+    message[24..26].copy_from_slice(&0u16.to_le_bytes());
+    message[26..28].copy_from_slice(&0x3141u16.to_le_bytes());
+    message[28..30].copy_from_slice(&0u16.to_le_bytes());
+    message[30..32].copy_from_slice(&0x2718u16.to_le_bytes());
+    message.push(0);
+    message.extend_from_slice(&0u16.to_le_bytes());
+    assert_eq!(message.len(), 35);
+    build_smb_direct_tcp_message(&message)
+}
+
+fn build_smb2_negotiate_message(is_response: bool, message_id: u64) -> Vec<u8> {
+    let mut header = vec![0; 64];
+    header[..4].copy_from_slice(&[0xfe, b'S', b'M', b'B']);
+    header[4..6].copy_from_slice(&64u16.to_le_bytes());
+    header[6..8].copy_from_slice(&1u16.to_le_bytes());
+    header[12..14].copy_from_slice(&0u16.to_le_bytes());
+    header[14..16].copy_from_slice(&7u16.to_le_bytes());
+    if is_response {
+        header[16..20].copy_from_slice(&1u32.to_le_bytes());
+    } else {
+        header[32..36].copy_from_slice(&0x1357_2468u32.to_le_bytes());
+    }
+    header[24..32].copy_from_slice(&message_id.to_le_bytes());
+    header[36..40].copy_from_slice(&0u32.to_le_bytes());
+    header[40..48].copy_from_slice(&0u64.to_le_bytes());
+    build_smb_direct_tcp_message(&header)
+}
+
 fn build_bgp_message(message_type: u8, body: &[u8]) -> Vec<u8> {
     let length =
         u16::try_from(19 + body.len()).expect("BGP message should fit in its length field");
@@ -950,118 +997,84 @@ fn syslog_synthetic_frame_two_has_expected_facility_severity() {
 }
 
 #[test]
-fn imap_fixture_frame_four_is_greeting() {
-    let bytes = include_bytes!("pcaps/protocol-gaps/imap_banner.cap");
-    let frame = iter_capture_frames(bytes)
-        .expect("pcap should parse")
-        .nth(3)
-        .expect("capture should contain frame 4")
-        .expect("capture frame should parse");
-    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
-        .expect("packet should parse");
+fn imap_synthetic_frame_four_is_greeting() {
+    let payload = b"* OK Aurora IMAP service ready\r\n";
+    let frame = build_ethernet_ipv4_tcp_frame([198, 51, 100, 44], 143, 41_143, payload);
+    let parsed = BuiltinPacketParser::parse(&frame).expect("packet should parse");
 
     assert_eq!(
         parsed.imap,
         Some(ImapMessage::Untagged {
-            text: "OK Microsoft Exchange IMAP4rev1 server version 5.5.2650.23 (umr-mail02) ready"
-                .to_string(),
+            text: "OK Aurora IMAP service ready".to_string(),
         })
     );
 }
 
 #[test]
-fn ftp_fixture_frame_six_is_banner_response() {
-    let bytes = include_bytes!("pcaps/protocol-gaps/ftp_session.cap");
-    let frame = iter_capture_frames(bytes)
-        .expect("pcap should parse")
-        .nth(5)
-        .expect("capture should contain frame 6")
-        .expect("capture frame should parse");
-    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
-        .expect("packet should parse");
-    let ftp = parsed.inner.as_deref().and_then(|inner| inner.ftp.as_ref());
+fn ftp_synthetic_frame_six_is_banner_response() {
+    let payload = b"220 Polaris file service ready.\r\n";
+    let frame = build_ethernet_ipv4_tcp_frame([198, 51, 100, 45], 21, 42_021, payload);
+    let parsed = BuiltinPacketParser::parse(&frame).expect("packet should parse");
 
     assert_eq!(
-        ftp,
-        Some(&FtpMessage::Response {
+        parsed.ftp,
+        Some(FtpMessage::Response {
             code: 220,
-            text: "6bone.informatik.uni-leipzig.de FTP server (NetBSD-ftpd 20041119) ready."
-                .to_string(),
+            text: "Polaris file service ready.".to_string(),
         })
     );
 }
 
 #[test]
-fn ftp_fixture_frame_seven_is_user_command() {
-    let bytes = include_bytes!("pcaps/protocol-gaps/ftp_session.cap");
-    let frame = iter_capture_frames(bytes)
-        .expect("pcap should parse")
-        .nth(6)
-        .expect("capture should contain frame 7")
-        .expect("capture frame should parse");
-    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
-        .expect("packet should parse");
-    let ftp = parsed.inner.as_deref().and_then(|inner| inner.ftp.as_ref());
+fn ftp_synthetic_frame_seven_is_user_command() {
+    let payload = b"USER starlight\r\n";
+    let frame = build_ethernet_ipv4_tcp_frame([198, 51, 100, 45], 42_021, 21, payload);
+    let parsed = BuiltinPacketParser::parse(&frame).expect("packet should parse");
 
     assert_eq!(
-        ftp,
-        Some(&FtpMessage::Command {
+        parsed.ftp,
+        Some(FtpMessage::Command {
             verb: "USER".to_string(),
-            args: "anonymous".to_string(),
+            args: "starlight".to_string(),
         })
     );
 }
 
 #[test]
-fn smb1_fixture_frame_one_is_negotiate_request() {
-    let bytes = include_bytes!("pcaps/protocol-gaps/smb1_negotiate.cap");
-    let frame = iter_capture_frames(bytes)
-        .expect("pcap should parse")
-        .next()
-        .expect("capture should contain frame 1")
-        .expect("capture frame should parse");
-    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
-        .expect("packet should parse");
+fn smb1_synthetic_frame_one_is_negotiate_request() {
+    let payload = build_smb1_negotiate_message(false);
+    let frame = build_ethernet_ipv4_tcp_frame([198, 51, 100, 46], 42_445, 445, &payload);
+    let parsed = BuiltinPacketParser::parse(&frame).expect("packet should parse");
     let smb1 = parsed.smb1.as_ref().expect("SMB1 should be present");
 
     assert_eq!(smb1.command, 0x72);
     assert!(!smb1.is_response);
     assert_eq!(smb1.tid, 0);
-    assert_eq!(smb1.pid, 0);
+    assert_eq!(smb1.pid, 0x3141);
     assert_eq!(smb1.uid, 0);
-    assert_eq!(smb1.mid, 1);
+    assert_eq!(smb1.mid, 0x2718);
 }
 
 #[test]
-fn smb1_fixture_frame_two_is_negotiate_response() {
-    let bytes = include_bytes!("pcaps/protocol-gaps/smb1_negotiate.cap");
-    let frame = iter_capture_frames(bytes)
-        .expect("pcap should parse")
-        .nth(1)
-        .expect("capture should contain frame 2")
-        .expect("capture frame should parse");
-    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
-        .expect("packet should parse");
+fn smb1_synthetic_frame_two_is_negotiate_response() {
+    let payload = build_smb1_negotiate_message(true);
+    let frame = build_ethernet_ipv4_tcp_frame([198, 51, 100, 46], 445, 42_445, &payload);
+    let parsed = BuiltinPacketParser::parse(&frame).expect("packet should parse");
     let smb1 = parsed.smb1.as_ref().expect("SMB1 should be present");
 
     assert_eq!(smb1.command, 0x72);
     assert!(smb1.is_response);
     assert_eq!(smb1.tid, 0);
-    assert_eq!(smb1.pid, 0);
+    assert_eq!(smb1.pid, 0x3141);
     assert_eq!(smb1.uid, 0);
-    assert_eq!(smb1.mid, 1);
+    assert_eq!(smb1.mid, 0x2718);
 }
 
 #[test]
-fn smb2_fixture_frame_one_is_negotiate_response() {
-    let bytes = include_bytes!("pcaps/protocol-gaps/smb2_negotiate.pcapng");
-    let frame = iter_capture_frames(bytes)
-        .expect("pcap should parse")
-        .next()
-        .expect("capture should contain frame 1")
-        .expect("capture frame should parse");
-    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
-        .expect("packet should parse");
+fn smb2_synthetic_frame_one_is_negotiate_response() {
+    let payload = build_smb2_negotiate_message(true, 0);
+    let frame = build_ethernet_ipv4_tcp_frame([198, 51, 100, 47], 445, 43_445, &payload);
+    let parsed = BuiltinPacketParser::parse(&frame).expect("packet should parse");
     let smb2 = parsed.smb2.as_ref().expect("SMB2 should be present");
 
     assert_eq!(smb2.command, 0);
@@ -1072,15 +1085,10 @@ fn smb2_fixture_frame_one_is_negotiate_response() {
 }
 
 #[test]
-fn smb2_fixture_frame_two_is_negotiate_request() {
-    let bytes = include_bytes!("pcaps/protocol-gaps/smb2_negotiate.pcapng");
-    let frame = iter_capture_frames(bytes)
-        .expect("pcap should parse")
-        .nth(1)
-        .expect("capture should contain frame 2")
-        .expect("capture frame should parse");
-    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
-        .expect("packet should parse");
+fn smb2_synthetic_frame_two_is_negotiate_request() {
+    let payload = build_smb2_negotiate_message(false, 1);
+    let frame = build_ethernet_ipv4_tcp_frame([198, 51, 100, 47], 43_445, 445, &payload);
+    let parsed = BuiltinPacketParser::parse(&frame).expect("packet should parse");
     let smb2 = parsed.smb2.as_ref().expect("SMB2 should be present");
 
     assert_eq!(smb2.command, 0);
@@ -1091,56 +1099,40 @@ fn smb2_fixture_frame_two_is_negotiate_request() {
 }
 
 #[test]
-fn smtp_fixture_frame_six_is_banner_response() {
-    let bytes = include_bytes!("pcaps/protocol-gaps/smtp_session.pcap");
-    let frame = iter_capture_frames(bytes)
-        .expect("pcap should parse")
-        .nth(5)
-        .expect("capture should contain frame 6")
-        .expect("capture frame should parse");
-    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
-        .expect("packet should parse");
+fn smtp_synthetic_frame_six_is_banner_response() {
+    let payload = b"220 mail.orbit.example ESMTP Paccel relay ready\r\n";
+    let frame = build_ethernet_ipv4_tcp_frame([198, 51, 100, 48], 25, 42_025, payload);
+    let parsed = BuiltinPacketParser::parse(&frame).expect("packet should parse");
 
     assert_eq!(
         parsed.smtp,
         Some(SmtpMessage::Response {
             code: 220,
-            text: "xc90.websitewelcome.com ESMTP Exim 4.69 #1 Mon, 05 Oct 2009 01:05:54 -0500 "
-                .to_string(),
+            text: "mail.orbit.example ESMTP Paccel relay ready".to_string(),
         })
     );
 }
 
 #[test]
-fn smtp_fixture_frame_seven_is_ehlo_command() {
-    let bytes = include_bytes!("pcaps/protocol-gaps/smtp_session.pcap");
-    let frame = iter_capture_frames(bytes)
-        .expect("pcap should parse")
-        .nth(6)
-        .expect("capture should contain frame 7")
-        .expect("capture frame should parse");
-    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
-        .expect("packet should parse");
+fn smtp_synthetic_frame_seven_is_ehlo_command() {
+    let payload = b"EHLO voyager.client.example\r\n";
+    let frame = build_ethernet_ipv4_tcp_frame([198, 51, 100, 48], 42_025, 25, payload);
+    let parsed = BuiltinPacketParser::parse(&frame).expect("packet should parse");
 
     assert_eq!(
         parsed.smtp,
         Some(SmtpMessage::Command {
             verb: "EHLO".to_string(),
-            args: "GP".to_string(),
+            args: "voyager.client.example".to_string(),
         })
     );
 }
 
 #[test]
-fn telnet_fixture_frame_four_is_do_suppress_go_ahead() {
-    let bytes = include_bytes!("pcaps/protocol-gaps/telnet_iac.pcap");
-    let frame = iter_capture_frames(bytes)
-        .expect("pcap should parse")
-        .nth(3)
-        .expect("capture should contain frame 4")
-        .expect("capture frame should parse");
-    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
-        .expect("packet should parse");
+fn telnet_synthetic_frame_four_is_do_suppress_go_ahead() {
+    let payload = [0xff, 0xfd, 0x03];
+    let frame = build_ethernet_ipv4_tcp_frame([198, 51, 100, 49], 42_023, 23, &payload);
+    let parsed = BuiltinPacketParser::parse(&frame).expect("packet should parse");
 
     assert_eq!(
         parsed.telnet,
@@ -1191,15 +1183,14 @@ fn modbus_synthetic_frame_two_matches_tshark() {
 }
 
 #[test]
-fn kerberos_udp_fixture_frame_one_is_as_req() {
-    let bytes = include_bytes!("pcaps/protocol-gaps/kerberos.pcapng");
-    let frame = iter_capture_frames(bytes)
-        .expect("pcap should parse")
-        .next()
-        .expect("capture should contain frame 1")
-        .expect("capture frame should parse");
-    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
-        .expect("packet should parse");
+fn kerberos_udp_synthetic_frame_one_is_as_req() {
+    let sequence = build_ber_tlv(0x30, &[]);
+    assert_eq!(sequence.len(), 2);
+    let payload = build_ber_tlv(0x6a, &sequence);
+    assert_eq!(payload, [0x6a, 0x02, 0x30, 0x00]);
+
+    let frame = build_ethernet_ipv4_udp_frame([198, 51, 100, 52], 42_088, 88, &payload);
+    let parsed = BuiltinPacketParser::parse(&frame).expect("packet should parse");
     let kerberos = parsed.kerberos.expect("Kerberos should be present");
 
     assert_eq!(kerberos.message_type, KerberosMessageType::AsReq);
@@ -1207,15 +1198,19 @@ fn kerberos_udp_fixture_frame_one_is_as_req() {
 }
 
 #[test]
-fn kerberos_tcp_fixture_frame_five_is_tgs_req() {
-    let bytes = include_bytes!("pcaps/protocol-gaps/kerberos.pcapng");
-    let frame = iter_capture_frames(bytes)
-        .expect("pcap should parse")
-        .nth(4)
-        .expect("capture should contain frame 5")
-        .expect("capture frame should parse");
-    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
-        .expect("packet should parse");
+fn kerberos_tcp_synthetic_frame_five_is_tgs_req() {
+    let sequence = build_ber_tlv(0x30, &[]);
+    assert_eq!(sequence.len(), 2);
+    let message = build_ber_tlv(0x6c, &sequence);
+    assert_eq!(message, [0x6c, 0x02, 0x30, 0x00]);
+
+    let message_len = u32::try_from(message.len()).expect("Kerberos message length should fit");
+    let mut payload = message_len.to_be_bytes().to_vec();
+    payload.extend_from_slice(&message);
+    assert_eq!(payload.len(), 8);
+
+    let frame = build_ethernet_ipv4_tcp_frame([198, 51, 100, 52], 42_088, 88, &payload);
+    let parsed = BuiltinPacketParser::parse(&frame).expect("packet should parse");
     let kerberos = parsed.kerberos.expect("Kerberos should be present");
 
     assert_eq!(kerberos.message_type, KerberosMessageType::TgsReq);
