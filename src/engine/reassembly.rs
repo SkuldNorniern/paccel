@@ -203,6 +203,13 @@ impl IpFragmentReassembler {
             state.bytes.resize(end, 0);
             state.received.resize(end, false);
         }
+        if state
+            .received
+            .get(offset..end)
+            .is_some_and(|coverage| coverage.contains(&true))
+        {
+            return FragmentResult::Drop;
+        }
         if let (Some(destination), Some(coverage)) = (
             state.bytes.get_mut(offset..end),
             state.received.get_mut(offset..end),
@@ -575,6 +582,34 @@ mod tests {
         );
         assert_eq!(
             reassembler.offer_ipv4(&ipv4_header(1, true), &payload[8..16]),
+            Some(payload.to_vec())
+        );
+    }
+
+    #[test]
+    fn ipv4_overlapping_fragments_drop_datagram() {
+        let mut reassembler = IpFragmentReassembler::new();
+        assert_eq!(
+            reassembler.offer_ipv4(&ipv4_header(0, true), b"abcdefghijklmnop"),
+            None
+        );
+        assert_eq!(
+            reassembler.offer_ipv4(&ipv4_header(1, false), b"overlap!tail!!!!"),
+            None
+        );
+        assert!(reassembler.datagrams.is_empty());
+    }
+
+    #[test]
+    fn ipv4_adjacent_fragments_reassemble() {
+        let payload = b"abcdefghABCDEFGH";
+        let mut reassembler = IpFragmentReassembler::new();
+        assert_eq!(
+            reassembler.offer_ipv4(&ipv4_header(0, true), &payload[..8]),
+            None
+        );
+        assert_eq!(
+            reassembler.offer_ipv4(&ipv4_header(1, false), &payload[8..]),
             Some(payload.to_vec())
         );
     }
