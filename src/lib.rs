@@ -1,4 +1,6 @@
 pub mod engine;
+#[cfg(feature = "fingerprint")]
+pub mod fingerprint;
 pub mod layer;
 pub mod packet;
 

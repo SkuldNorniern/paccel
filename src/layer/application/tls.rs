@@ -12,6 +12,9 @@ pub struct TlsClientHello {
     pub server_name: Option<String>,
     pub alpn: Vec<String>,
     pub supported_versions: Vec<u16>,
+    pub supported_groups: Vec<u16>,
+    pub ec_point_formats: Vec<u8>,
+    pub signature_algorithms: Vec<u16>,
     /// Extension type IDs in wire order, unfiltered (including any GREASE
     /// values) - JA3/JA4-style fingerprinting needs the raw order/set, and
     /// decides its own GREASE-filtering policy on top of this.
@@ -86,6 +89,9 @@ pub fn parse_tls_client_hello(payload: &[u8]) -> Result<TlsClientHello, LayerErr
         server_name: None,
         alpn: Vec::new(),
         supported_versions: Vec::new(),
+        supported_groups: Vec::new(),
+        ec_point_formats: Vec::new(),
+        signature_algorithms: Vec::new(),
         extension_types: Vec::new(),
     };
     parse_extensions(extensions, &mut parsed);
@@ -215,6 +221,9 @@ fn parse_extensions(extensions: &[u8], parsed: &mut TlsClientHello) {
         let data = &extensions[header_end..data_end];
         let valid = match extension_type {
             0 => parse_server_name(data, parsed),
+            10 => parse_u16_list(data, &mut parsed.supported_groups),
+            11 => parse_u8_list(data, &mut parsed.ec_point_formats),
+            13 => parse_u16_list(data, &mut parsed.signature_algorithms),
             16 => parse_alpn(data, parsed),
             43 => parse_supported_versions(data, parsed),
             _ => true,
@@ -224,6 +233,35 @@ fn parse_extensions(extensions: &[u8], parsed: &mut TlsClientHello) {
         }
         offset = data_end;
     }
+}
+
+fn parse_u16_list(data: &[u8], values: &mut Vec<u16>) -> bool {
+    let Some(length_bytes) = data.get(..2) else {
+        return false;
+    };
+    let list_length = usize::from(u16::from_be_bytes([length_bytes[0], length_bytes[1]]));
+    let Some(list) = data.get(2..2usize.saturating_add(list_length)) else {
+        return false;
+    };
+    if list_length % 2 != 0 {
+        return false;
+    }
+    values.extend(
+        list.chunks_exact(2)
+            .map(|value| u16::from_be_bytes([value[0], value[1]])),
+    );
+    true
+}
+
+fn parse_u8_list(data: &[u8], values: &mut Vec<u8>) -> bool {
+    let Some((&list_length, rest)) = data.split_first() else {
+        return false;
+    };
+    let Some(list) = rest.get(..usize::from(list_length)) else {
+        return false;
+    };
+    values.extend_from_slice(list);
+    true
 }
 
 fn parse_server_name(data: &[u8], parsed: &mut TlsClientHello) -> bool {
@@ -333,4 +371,62 @@ fn take<'a>(data: &'a [u8], offset: &mut usize, length: usize) -> Result<&'a [u8
     let value = data.get(*offset..end).ok_or(LayerError::InvalidLength)?;
     *offset = end;
     Ok(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn client_hello() -> TlsClientHello {
+        TlsClientHello {
+            record_version: 0,
+            handshake_version: 0,
+            cipher_suites: Vec::new(),
+            server_name: None,
+            alpn: Vec::new(),
+            supported_versions: Vec::new(),
+            supported_groups: Vec::new(),
+            ec_point_formats: Vec::new(),
+            signature_algorithms: Vec::new(),
+            extension_types: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn parses_fingerprint_extension_fields_in_wire_order() {
+        let extensions = [
+            0x00, 0x0a, 0x00, 0x08, 0x00, 0x06, 0x00, 0x17, 0x0a, 0x0a, 0x00, 0x18, 0x00, 0x0b,
+            0x00, 0x03, 0x02, 0x00, 0x01, 0x00, 0x0d, 0x00, 0x08, 0x00, 0x06, 0x08, 0x04, 0x04,
+            0x03, 0x08, 0x05,
+        ];
+        let mut hello = client_hello();
+
+        parse_extensions(&extensions, &mut hello);
+
+        assert_eq!(hello.extension_types, vec![10, 11, 13]);
+        assert_eq!(hello.supported_groups, vec![23, 0x0a0a, 24]);
+        assert_eq!(hello.ec_point_formats, vec![0, 1]);
+        assert_eq!(hello.signature_algorithms, vec![0x0804, 0x0403, 0x0805]);
+    }
+
+    #[test]
+    fn rejects_truncated_fingerprint_extension_lists_without_appending() {
+        let mut hello = client_hello();
+
+        assert!(!parse_u16_list(
+            &[0x00, 0x04, 0x00, 0x17],
+            &mut hello.supported_groups
+        ));
+        assert!(!parse_u16_list(
+            &[0x00, 0x03, 0x00, 0x17, 0x00],
+            &mut hello.signature_algorithms
+        ));
+        assert!(!parse_u8_list(
+            &[0x03, 0x00, 0x01],
+            &mut hello.ec_point_formats
+        ));
+        assert!(hello.supported_groups.is_empty());
+        assert!(hello.signature_algorithms.is_empty());
+        assert!(hello.ec_point_formats.is_empty());
+    }
 }
