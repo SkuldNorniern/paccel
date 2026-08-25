@@ -32,6 +32,10 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
       - name: Clippy (quic-decrypt)
         run: cargo clippy --all-targets --features quic-decrypt -- -D warnings
+      - name: Clippy (fingerprint)
+        run: cargo clippy --all-targets --features fingerprint -- -D warnings
+      - name: Clippy (all features)
+        run: cargo clippy --all-targets --all-features -- -D warnings
 
   test-msrv:
     name: test (MSRV 1.88)
@@ -45,6 +49,10 @@ jobs:
         run: cargo +1.88.0 test --all-targets
       - name: Test (quic-decrypt)
         run: cargo +1.88.0 test --all-targets --features quic-decrypt
+      - name: Test (fingerprint)
+        run: cargo +1.88.0 test --all-targets --features fingerprint
+      - name: Test (all features)
+        run: cargo +1.88.0 test --all-targets --all-features
 
   test-latest:
     name: test (stable)
@@ -58,6 +66,10 @@ jobs:
         run: cargo test --all-targets
       - name: Test (quic-decrypt)
         run: cargo test --all-targets --features quic-decrypt
+      - name: Test (fingerprint)
+        run: cargo test --all-targets --features fingerprint
+      - name: Test (all features)
+        run: cargo test --all-targets --all-features
 
   fuzz-smoke:
     name: fuzz smoke
