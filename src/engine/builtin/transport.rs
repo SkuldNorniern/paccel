@@ -38,12 +38,14 @@ use crate::layer::application::smb2::{Smb2Header, parse_smb2_message};
 use crate::layer::application::smtp::{SmtpMessage, parse_smtp};
 use crate::layer::application::snmp::{SnmpMessage, parse_snmp_message};
 use crate::layer::application::ssdp::{SsdpMessage, parse_ssdp};
-use crate::layer::application::ssh::{SshBanner, parse_ssh_banner};
+use crate::layer::application::ssh::{SshBanner, SshKexInit, parse_ssh_banner, parse_ssh_kex_init};
 use crate::layer::application::stun::{StunMessage, parse_stun_message};
 use crate::layer::application::syslog::{SyslogMessage, parse_syslog_message};
 use crate::layer::application::telnet::{TelnetCommand, parse_telnet_command};
 use crate::layer::application::tftp::{TftpMessage, parse_tftp_message};
-use crate::layer::application::tls::{TlsClientHello, parse_tls_client_hello};
+use crate::layer::application::tls::{
+    TlsClientHello, TlsServerHello, parse_tls_client_hello, parse_tls_server_hello,
+};
 use crate::layer::application::vrrp::{VrrpHeader, parse_vrrp_header};
 use crate::layer::network::icmp::IcmpHeader;
 use crate::layer::network::icmpv6::{Icmpv6Header, NdpMessage, parse_ndp};
@@ -135,6 +137,7 @@ pub(super) struct TransportParse {
     pub snmp: Option<SnmpMessage>,
     pub ntp: Option<NtpMessage>,
     pub tls: Option<TlsClientHello>,
+    pub tls_server_hello: Option<TlsServerHello>,
     pub http: Option<HttpMessage>,
     pub ssdp: Option<SsdpMessage>,
     pub nat_pmp: Option<NatPmpMessage>,
@@ -155,6 +158,7 @@ pub(super) struct TransportParse {
     pub mqtt: Option<MqttMessage>,
     pub modbus: Option<ModbusMessage>,
     pub ssh: Option<SshBanner>,
+    pub ssh_kex_init: Option<SshKexInit>,
     pub coap: Option<CoapMessage>,
     pub kerberos: Option<KerberosMessage>,
     pub stun: Option<StunMessage>,
@@ -283,30 +287,12 @@ pub(super) fn parse_transport(
                     parsed.openvpn =
                         maybe_classify_openvpn_tcp(source_port, destination_port, payload);
                     if parsed.openvpn.is_none() {
-                        parsed.tls = (payload.len() >= 5 && payload[0] == 22)
-                            .then(|| parse_tls_client_hello(payload).ok())
-                            .flatten();
-                        if parsed.tls.is_none() {
-                            parsed.http = parse_http(payload).ok();
-                            if parsed.http.is_none()
-                                && (source_port == UDP_PORT_SIP || destination_port == UDP_PORT_SIP)
-                            {
-                                parsed.sip = parse_sip(payload).ok();
-                            }
-                            if parsed.http.is_none() && parsed.sip.is_none() {
-                                if !payload.is_empty() {
-                                    parsed.ssh = parse_ssh_banner(payload).ok();
-                                }
-                                if parsed.ssh.is_none() {
-                                    classify_tcp_app_by_port(
-                                        source_port,
-                                        destination_port,
-                                        payload,
-                                        &mut parsed,
-                                    );
-                                }
-                            }
-                        }
+                        classify_tcp_application(
+                            &mut parsed,
+                            source_port,
+                            destination_port,
+                            payload,
+                        );
                     }
                 }
             }
@@ -359,6 +345,40 @@ pub(super) fn parse_transport(
             Ok(TransportParse::with_esp(esp))
         }
         _ => Ok(TransportParse::default()),
+    }
+}
+
+fn classify_tcp_application(
+    parsed: &mut TransportParse,
+    source_port: u16,
+    destination_port: u16,
+    payload: &[u8],
+) {
+    let is_tls_handshake_record = payload.len() >= 5 && payload[0] == 22;
+    parsed.tls = is_tls_handshake_record
+        .then(|| parse_tls_client_hello(payload).ok())
+        .flatten();
+    if parsed.tls.is_none() && is_tls_handshake_record {
+        parsed.tls_server_hello = parse_tls_server_hello(payload).ok();
+    }
+    if parsed.tls.is_none() && parsed.tls_server_hello.is_none() {
+        parsed.http = parse_http(payload).ok();
+        if parsed.http.is_none()
+            && (source_port == UDP_PORT_SIP || destination_port == UDP_PORT_SIP)
+        {
+            parsed.sip = parse_sip(payload).ok();
+        }
+        if parsed.http.is_none() && parsed.sip.is_none() {
+            if !payload.is_empty() {
+                parsed.ssh = parse_ssh_banner(payload).ok();
+            }
+            if parsed.ssh.is_none() {
+                parsed.ssh_kex_init = parse_ssh_kex_init(payload).ok();
+            }
+            if parsed.ssh.is_none() && parsed.ssh_kex_init.is_none() {
+                classify_tcp_app_by_port(source_port, destination_port, payload, parsed);
+            }
+        }
     }
 }
 
