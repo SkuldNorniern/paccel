@@ -1,5 +1,13 @@
 use crate::layer::LayerError;
 
+#[cfg(feature = "quic-decrypt")]
+pub mod decrypt;
+
+#[cfg(feature = "quic-decrypt")]
+pub use decrypt::{
+    DecryptedInitial, decrypt_initial_client_hello, decrypt_initial_packet, extract_crypto_stream,
+};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QuicPacketType {
     Initial,
@@ -59,7 +67,7 @@ pub fn quic_version_name(version: u32) -> &'static str {
 
 const MAX_V1_V2_CID_LEN: usize = 20;
 
-fn is_v1_or_v2_family(version: u32) -> bool {
+pub(crate) fn is_v1_or_v2_family(version: u32) -> bool {
     matches!(version, 0x0000_0001 | 0x6b33_43cf | 0x709a_50c4)
 }
 
