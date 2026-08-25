@@ -9,6 +9,8 @@ use paccel::engine::{
     TelnetCommand, TftpMessage, TransportSegment, UdpAppHint, WireGuardMessageType,
     iter_capture_frames, parse_capture_frames, parse_pcap_frames,
 };
+#[cfg(feature = "fingerprint")]
+use paccel::fingerprint;
 use paccel::layer::application::quic::QuicPacketType;
 
 fn build_ethernet_ipv4_udp_frame(
@@ -624,6 +626,28 @@ fn tls12_sni_fixture_frame_two_is_server_hello() {
     assert_eq!(server_hello.extension_types, vec![65281, 0, 11, 16, 23]);
 }
 
+#[cfg(feature = "fingerprint")]
+#[test]
+fn tls12_sni_fixture_frame_two_has_expected_ja3s() {
+    let bytes = include_bytes!("pcaps/protocol-gaps/tls12_sni.pcapng");
+    let frame = iter_capture_frames(bytes)
+        .expect("pcap should parse")
+        .nth(1)
+        .expect("capture should contain frame 2")
+        .expect("capture frame should parse");
+    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
+        .expect("packet should parse");
+    let server_hello = parsed
+        .tls_server_hello
+        .as_ref()
+        .expect("ServerHello should be present");
+
+    assert_eq!(
+        fingerprint::ja3s_hash(server_hello),
+        "5d79edf64e03689ff559a54e9d9487bc"
+    );
+}
+
 #[test]
 fn wireguard_psk_fixture_frame_one_is_handshake_initiation() {
     let bytes = include_bytes!("pcaps/protocol-gaps/wireguard_psk.pcap");
@@ -1154,6 +1178,25 @@ fn ssh_banner_fixture_frame_eight_is_client_kexinit() {
         kex.mac_algorithms_client_to_server,
         vec!["hmac-sha2-256".to_string()]
     );
+}
+
+#[cfg(feature = "fingerprint")]
+#[test]
+fn ssh_banner_fixture_frame_eight_has_expected_hassh() {
+    let bytes = include_bytes!("pcaps/protocol-gaps/ssh_banner.pcapng");
+    let frame = iter_capture_frames(bytes)
+        .expect("pcapng should parse")
+        .nth(7)
+        .expect("capture should contain frame 8")
+        .expect("capture frame should parse");
+    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
+        .expect("packet should parse");
+    let kex = parsed
+        .ssh_kex_init
+        .as_ref()
+        .expect("SSH KEXINIT should be present");
+
+    assert_eq!(fingerprint::hassh(kex), "bf34b97113a976f3eb1a7f7f86ad9d3a");
 }
 
 #[test]

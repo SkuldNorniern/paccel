@@ -1,4 +1,7 @@
-use crate::layer::application::tls::TlsClientHello;
+use crate::layer::application::{
+    ssh::SshKexInit,
+    tls::{TlsClientHello, TlsServerHello},
+};
 use md5::{Digest as _, Md5};
 use sha2::Sha256;
 
@@ -43,6 +46,47 @@ pub fn ja3_string(hello: &TlsClientHello) -> String {
 
 pub fn ja3_hash(hello: &TlsClientHello) -> String {
     lowercase_hex(&Md5::digest(ja3_string(hello).as_bytes()))
+}
+
+pub fn ja3s_string(hello: &TlsServerHello) -> String {
+    let extensions = join_decimal_u16(hello.extension_types.iter().copied());
+
+    format!(
+        "{},{},{extensions}",
+        hello.handshake_version, hello.cipher_suite
+    )
+}
+
+pub fn ja3s_hash(hello: &TlsServerHello) -> String {
+    lowercase_hex(&Md5::digest(ja3s_string(hello).as_bytes()))
+}
+
+pub fn hassh_algorithms_string(kex: &SshKexInit) -> String {
+    format!(
+        "{};{};{};{}",
+        kex.kex_algorithms.join(","),
+        kex.encryption_algorithms_client_to_server.join(","),
+        kex.mac_algorithms_client_to_server.join(","),
+        kex.compression_algorithms_client_to_server.join(",")
+    )
+}
+
+pub fn hassh(kex: &SshKexInit) -> String {
+    lowercase_hex(&Md5::digest(hassh_algorithms_string(kex).as_bytes()))
+}
+
+pub fn hassh_server_algorithms_string(kex: &SshKexInit) -> String {
+    format!(
+        "{};{};{};{}",
+        kex.kex_algorithms.join(","),
+        kex.encryption_algorithms_server_to_client.join(","),
+        kex.mac_algorithms_server_to_client.join(","),
+        kex.compression_algorithms_server_to_client.join(",")
+    )
+}
+
+pub fn hassh_server(kex: &SshKexInit) -> String {
+    lowercase_hex(&Md5::digest(hassh_server_algorithms_string(kex).as_bytes()))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -225,6 +269,72 @@ mod tests {
 
         assert_eq!(ja3_string(&hello), "769,4-5-10-9-100-98-3-6-19-18-99,,,");
         assert_eq!(ja3_hash(&hello), "de350869b8c85de67a350c8d186f11e6");
+    }
+
+    #[test]
+    fn ja3s_reference_vector() {
+        let hello = TlsServerHello {
+            record_version: 0,
+            handshake_version: 771,
+            cipher_suite: 49199,
+            alpn: None,
+            supported_version: None,
+            extension_types: vec![65281, 0, 11, 16, 23],
+        };
+
+        assert_eq!(ja3s_string(&hello), "771,49199,65281-0-11-16-23");
+        assert_eq!(ja3s_hash(&hello), "5d79edf64e03689ff559a54e9d9487bc");
+    }
+
+    #[test]
+    fn hassh_reference_vector() {
+        let kex = SshKexInit {
+            kex_algorithms: vec!["curve25519-sha256".to_string(), "ext-info-c".to_string()],
+            server_host_key_algorithms: Vec::new(),
+            encryption_algorithms_client_to_server: vec!["aes128-gcm@openssh.com".to_string()],
+            encryption_algorithms_server_to_client: Vec::new(),
+            mac_algorithms_client_to_server: vec!["hmac-sha2-256".to_string()],
+            mac_algorithms_server_to_client: Vec::new(),
+            compression_algorithms_client_to_server: vec![
+                "none".to_string(),
+                "zlib@openssh.com".to_string(),
+                "zlib".to_string(),
+            ],
+            compression_algorithms_server_to_client: Vec::new(),
+        };
+
+        assert_eq!(
+            hassh_algorithms_string(&kex),
+            "curve25519-sha256,ext-info-c;aes128-gcm@openssh.com;hmac-sha2-256;none,zlib@openssh.com,zlib"
+        );
+        assert_eq!(hassh(&kex), "bf34b97113a976f3eb1a7f7f86ad9d3a");
+    }
+
+    #[test]
+    fn hassh_server_reference_vector() {
+        let kex = SshKexInit {
+            kex_algorithms: vec!["curve25519-sha256".to_string()],
+            server_host_key_algorithms: Vec::new(),
+            encryption_algorithms_client_to_server: Vec::new(),
+            encryption_algorithms_server_to_client: vec![
+                "aes128-gcm@openssh.com".to_string(),
+                "aes256-gcm@openssh.com".to_string(),
+                "aes256-ctr".to_string(),
+                "aes192-ctr".to_string(),
+                "aes128-ctr".to_string(),
+                "chacha20-poly1305@openssh.com".to_string(),
+            ],
+            mac_algorithms_client_to_server: Vec::new(),
+            mac_algorithms_server_to_client: vec!["hmac-sha2-256".to_string()],
+            compression_algorithms_client_to_server: Vec::new(),
+            compression_algorithms_server_to_client: vec!["none".to_string()],
+        };
+
+        assert_eq!(
+            hassh_server_algorithms_string(&kex),
+            "curve25519-sha256;aes128-gcm@openssh.com,aes256-gcm@openssh.com,aes256-ctr,aes192-ctr,aes128-ctr,chacha20-poly1305@openssh.com;hmac-sha2-256;none"
+        );
+        assert_eq!(hassh_server(&kex), "213537e42e69a72c32c68fabc65c572f");
     }
 
     #[test]
