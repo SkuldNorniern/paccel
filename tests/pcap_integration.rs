@@ -13,6 +13,76 @@ use paccel::engine::{
 use paccel::fingerprint;
 use paccel::layer::application::quic::QuicPacketType;
 
+const SYNTHETIC_SOURCE_IP: [u8; 4] = [192, 0, 2, 1];
+
+fn internet_checksum(data: &[u8]) -> u16 {
+    let mut sum = 0u32;
+    let mut chunks = data.chunks_exact(2);
+    for chunk in &mut chunks {
+        sum += u32::from(u16::from_be_bytes([chunk[0], chunk[1]]));
+    }
+    if let Some(&byte) = chunks.remainder().first() {
+        sum += u32::from(byte) << 8;
+    }
+    while sum >> 16 != 0 {
+        sum = (sum & 0xffff) + (sum >> 16);
+    }
+    !u16::try_from(sum).expect("folded checksum should fit in 16 bits")
+}
+
+fn build_ethernet_frame(
+    dst_mac: [u8; 6],
+    src_mac: [u8; 6],
+    ethertype_or_length: u16,
+    payload: &[u8],
+) -> Vec<u8> {
+    let mut frame = Vec::with_capacity(14 + payload.len());
+    frame.extend_from_slice(&dst_mac);
+    frame.extend_from_slice(&src_mac);
+    frame.extend_from_slice(&ethertype_or_length.to_be_bytes());
+    frame.extend_from_slice(payload);
+    if frame.len() < 60 {
+        frame.resize(60, 0);
+    }
+    frame
+}
+
+fn build_ethernet_ipv4_frame(
+    dst_ip: [u8; 4],
+    ip_protocol: u8,
+    ttl: u8,
+    ip_payload: &[u8],
+) -> Vec<u8> {
+    let ip_total_len =
+        u16::try_from(20 + ip_payload.len()).expect("payload should fit in an IPv4 packet");
+    let mut ip_packet = Vec::with_capacity(usize::from(ip_total_len));
+    ip_packet.push(0x45);
+    ip_packet.push(0x00);
+    ip_packet.extend_from_slice(&ip_total_len.to_be_bytes());
+    ip_packet.extend_from_slice(&0x4a3cu16.to_be_bytes());
+    ip_packet.extend_from_slice(&0x4000u16.to_be_bytes());
+    ip_packet.push(ttl);
+    ip_packet.push(ip_protocol);
+    ip_packet.extend_from_slice(&[0x00, 0x00]);
+    ip_packet.extend_from_slice(&SYNTHETIC_SOURCE_IP);
+    ip_packet.extend_from_slice(&dst_ip);
+    let checksum = internet_checksum(&ip_packet);
+    ip_packet[10..12].copy_from_slice(&checksum.to_be_bytes());
+    ip_packet.extend_from_slice(ip_payload);
+
+    let dst_mac = if dst_ip[0] & 0xf0 == 0xe0 {
+        [0x01, 0x00, 0x5e, dst_ip[1] & 0x7f, dst_ip[2], dst_ip[3]]
+    } else {
+        [0x02, 0x00, 0x00, 0x00, 0x00, 0x01]
+    };
+    build_ethernet_frame(
+        dst_mac,
+        [0x02, 0x00, 0x00, 0x00, 0x00, 0x02],
+        0x0800,
+        &ip_packet,
+    )
+}
+
 fn build_ethernet_ipv4_udp_frame(
     dst_ip: [u8; 4],
     src_port: u16,
@@ -20,33 +90,68 @@ fn build_ethernet_ipv4_udp_frame(
     udp_payload: &[u8],
 ) -> Vec<u8> {
     let udp_len = u16::try_from(8 + udp_payload.len()).expect("UDP payload should fit in a frame");
-    let ip_total_len = 20u16
-        .checked_add(udp_len)
-        .expect("UDP datagram should fit in an IPv4 packet");
+    let mut udp = Vec::with_capacity(usize::from(udp_len));
+    udp.extend_from_slice(&src_port.to_be_bytes());
+    udp.extend_from_slice(&dst_port.to_be_bytes());
+    udp.extend_from_slice(&udp_len.to_be_bytes());
+    udp.extend_from_slice(&[0x00, 0x00]);
+    udp.extend_from_slice(udp_payload);
+    build_ethernet_ipv4_frame(dst_ip, 17, 64, &udp)
+}
 
-    let mut frame = Vec::with_capacity(14 + ip_total_len as usize);
-    frame.extend_from_slice(&[0x02, 0x00, 0x00, 0x00, 0x00, 0x01]);
-    frame.extend_from_slice(&[0x02, 0x00, 0x00, 0x00, 0x00, 0x02]);
-    frame.extend_from_slice(&0x0800u16.to_be_bytes());
+fn build_ethernet_ipv4_tcp_frame(
+    dst_ip: [u8; 4],
+    src_port: u16,
+    dst_port: u16,
+    tcp_payload: &[u8],
+) -> Vec<u8> {
+    let tcp_len = u16::try_from(20 + tcp_payload.len()).expect("TCP segment should fit in IPv4");
+    let mut tcp = Vec::with_capacity(usize::from(tcp_len));
+    tcp.extend_from_slice(&src_port.to_be_bytes());
+    tcp.extend_from_slice(&dst_port.to_be_bytes());
+    tcp.extend_from_slice(&0x1020_3040u32.to_be_bytes());
+    tcp.extend_from_slice(&0x5060_7080u32.to_be_bytes());
+    tcp.extend_from_slice(&[0x50, 0x18]);
+    tcp.extend_from_slice(&0x4000u16.to_be_bytes());
+    tcp.extend_from_slice(&[0x00, 0x00]);
+    tcp.extend_from_slice(&[0x00, 0x00]);
+    tcp.extend_from_slice(tcp_payload);
 
-    frame.push(0x45);
-    frame.push(0x00);
-    frame.extend_from_slice(&ip_total_len.to_be_bytes());
-    frame.extend_from_slice(&0x1234u16.to_be_bytes());
-    frame.extend_from_slice(&0x4000u16.to_be_bytes());
-    frame.push(64);
-    frame.push(17);
-    frame.extend_from_slice(&[0x00, 0x00]);
-    frame.extend_from_slice(&[192, 0, 2, 1]);
-    frame.extend_from_slice(&dst_ip);
+    let mut pseudo_header = Vec::with_capacity(12 + tcp.len());
+    pseudo_header.extend_from_slice(&SYNTHETIC_SOURCE_IP);
+    pseudo_header.extend_from_slice(&dst_ip);
+    pseudo_header.extend_from_slice(&[0x00, 0x06]);
+    pseudo_header.extend_from_slice(&tcp_len.to_be_bytes());
+    pseudo_header.extend_from_slice(&tcp);
+    let checksum = internet_checksum(&pseudo_header);
+    tcp[16..18].copy_from_slice(&checksum.to_be_bytes());
 
-    frame.extend_from_slice(&src_port.to_be_bytes());
-    frame.extend_from_slice(&dst_port.to_be_bytes());
-    frame.extend_from_slice(&udp_len.to_be_bytes());
-    frame.extend_from_slice(&[0x00, 0x00]);
-    frame.extend_from_slice(udp_payload);
+    build_ethernet_ipv4_frame(dst_ip, 6, 64, &tcp)
+}
 
-    frame
+fn build_bgp_message(message_type: u8, body: &[u8]) -> Vec<u8> {
+    let length =
+        u16::try_from(19 + body.len()).expect("BGP message should fit in its length field");
+    let mut message = vec![0xff; 16];
+    message.extend_from_slice(&length.to_be_bytes());
+    message.push(message_type);
+    message.extend_from_slice(body);
+    message
+}
+
+fn dnp3_crc(data: &[u8]) -> u16 {
+    let mut crc = 0u16;
+    for &byte in data {
+        crc ^= u16::from(byte);
+        for _ in 0..8 {
+            crc = if crc & 1 == 0 {
+                crc >> 1
+            } else {
+                (crc >> 1) ^ 0xa6bc
+            };
+        }
+    }
+    !crc
 }
 
 #[test]
@@ -116,20 +221,25 @@ fn pcp_fixture_frame_four_is_announce_request() {
 }
 
 #[test]
-fn dnp3_fixture_frame_four_matches_tshark() {
-    let bytes = include_bytes!("pcaps/protocol-gaps/dnp3_read.pcap");
-    let frame = iter_capture_frames(bytes)
-        .expect("pcap should parse")
-        .nth(3)
-        .expect("capture should contain frame 4")
-        .expect("capture frame should parse");
-    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
-        .expect("packet should parse");
+fn dnp3_synthetic_frame_four_matches_tshark() {
+    let mut dnp3 = vec![0x05, 0x64, 0x0b, 0xc4];
+    dnp3.extend_from_slice(&0x1234u16.to_le_bytes());
+    dnp3.extend_from_slice(&0x5678u16.to_le_bytes());
+    let header_crc = dnp3_crc(&dnp3);
+    dnp3.extend_from_slice(&header_crc.to_le_bytes());
+
+    let user_data = [0xc7, 0xc3, 0x01, 30, 1, 0x06];
+    dnp3.extend_from_slice(&user_data);
+    let data_crc = dnp3_crc(&user_data);
+    dnp3.extend_from_slice(&data_crc.to_le_bytes());
+
+    let frame = build_ethernet_ipv4_tcp_frame([198, 51, 100, 20], 41_000, 20_000, &dnp3);
+    let parsed = BuiltinPacketParser::parse(&frame).expect("packet should parse");
     let dnp3 = parsed.dnp3.as_ref().expect("DNP3 should be present");
 
     assert_eq!(dnp3.link_function, Dnp3FunctionCode::UnconfirmedUserData);
-    assert_eq!(dnp3.destination, 3);
-    assert_eq!(dnp3.source, 4);
+    assert_eq!(dnp3.destination, 0x1234);
+    assert_eq!(dnp3.source, 0x5678);
     assert_eq!(
         dnp3.application.map(|application| application.function),
         Some(Dnp3AppFunctionCode::Read)
@@ -137,15 +247,10 @@ fn dnp3_fixture_frame_four_matches_tshark() {
 }
 
 #[test]
-fn bgp_fixture_frame_one_matches_tshark() {
-    let bytes = include_bytes!("pcaps/protocol-gaps/bgp_shutdown.pcap");
-    let frame = iter_capture_frames(bytes)
-        .expect("pcap should parse")
-        .next()
-        .expect("capture should contain frame 1")
-        .expect("capture frame should parse");
-    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
-        .expect("packet should parse");
+fn bgp_synthetic_frame_one_matches_tshark() {
+    let keepalive = build_bgp_message(4, &[]);
+    let frame = build_ethernet_ipv4_tcp_frame([198, 51, 100, 7], 40_000, 179, &keepalive);
+    let parsed = BuiltinPacketParser::parse(&frame).expect("packet should parse");
     let bgp = parsed.bgp.expect("BGP should be present");
 
     assert_eq!(bgp.message_type, BgpMessageType::Keepalive);
@@ -153,49 +258,74 @@ fn bgp_fixture_frame_one_matches_tshark() {
 }
 
 #[test]
-fn bgp_fixture_frame_five_is_notification() {
-    let bytes = include_bytes!("pcaps/protocol-gaps/bgp_shutdown.pcap");
-    let frame = iter_capture_frames(bytes)
-        .expect("pcap should parse")
-        .nth(4)
-        .expect("capture should contain frame 5")
-        .expect("capture frame should parse");
-    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
-        .expect("packet should parse");
+fn bgp_synthetic_frame_five_is_notification() {
+    let notification = build_bgp_message(3, &[2, 1, 0, 3]);
+    let frame = build_ethernet_ipv4_tcp_frame([198, 51, 100, 7], 40_000, 179, &notification);
+    let parsed = BuiltinPacketParser::parse(&frame).expect("packet should parse");
     let bgp = parsed.bgp.expect("BGP should be present");
 
     assert_eq!(bgp.message_type, BgpMessageType::Notification);
+    assert_eq!(bgp.length, 23);
 }
 
 #[test]
-fn ospf_fixture_frame_one_is_hello() {
-    let bytes = include_bytes!("pcaps/protocol-gaps/ospf_hello.cap");
-    let frame = iter_capture_frames(bytes)
-        .expect("pcap should parse")
-        .next()
-        .expect("capture should contain frame 1")
-        .expect("capture frame should parse");
-    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
-        .expect("packet should parse");
+fn ospf_synthetic_frame_one_is_hello() {
+    let mut hello = vec![2, 1];
+    hello.extend_from_slice(&44u16.to_be_bytes());
+    hello.extend_from_slice(&[10, 23, 45, 67]);
+    hello.extend_from_slice(&[0, 0, 0, 42]);
+    hello.extend_from_slice(&[0, 0]);
+    hello.extend_from_slice(&0u16.to_be_bytes());
+    hello.extend_from_slice(&[0; 8]);
+    hello.extend_from_slice(&[255, 255, 255, 0]);
+    hello.extend_from_slice(&10u16.to_be_bytes());
+    hello.extend_from_slice(&[0x02, 0x03]);
+    hello.extend_from_slice(&40u32.to_be_bytes());
+    hello.extend_from_slice(&[10, 23, 45, 1]);
+    hello.extend_from_slice(&[10, 23, 45, 2]);
+    let checksum = internet_checksum(&hello);
+    hello[12..14].copy_from_slice(&checksum.to_be_bytes());
+
+    let frame = build_ethernet_ipv4_frame([224, 0, 0, 5], 89, 1, &hello);
+    let parsed = BuiltinPacketParser::parse(&frame).expect("packet should parse");
     let ospf = parsed.ospf.as_ref().expect("OSPF should be present");
 
     assert_eq!(ospf.version, 2);
     assert_eq!(ospf.message_type, 1);
     assert_eq!(ospf.packet_length, 44);
-    assert_eq!(ospf.router_id, Ipv4Addr::new(192, 168, 170, 8));
-    assert_eq!(ospf.area_id, Ipv4Addr::new(0, 0, 0, 1));
+    assert_eq!(ospf.router_id, Ipv4Addr::new(10, 23, 45, 67));
+    assert_eq!(ospf.area_id, Ipv4Addr::new(0, 0, 0, 42));
 }
 
 #[test]
-fn lacp_fixture_frame_one_is_actor_state() {
-    let bytes = include_bytes!("pcaps/protocol-gaps/lacp.pcap");
-    let frame = iter_capture_frames(bytes)
-        .expect("pcap should parse")
-        .next()
-        .expect("capture should contain frame 1")
-        .expect("capture frame should parse");
-    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
-        .expect("packet should parse");
+fn lacp_synthetic_frame_one_is_actor_state() {
+    let mut lacpdu = vec![1, 1, 1, 20];
+    lacpdu.extend_from_slice(&0x7000u16.to_be_bytes());
+    lacpdu.extend_from_slice(&[0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0x01]);
+    lacpdu.extend_from_slice(&0x0123u16.to_be_bytes());
+    lacpdu.extend_from_slice(&0x6000u16.to_be_bytes());
+    lacpdu.extend_from_slice(&27u16.to_be_bytes());
+    lacpdu.extend_from_slice(&[0x3d, 0, 0, 0]);
+    lacpdu.extend_from_slice(&[2, 20]);
+    lacpdu.extend_from_slice(&0x7100u16.to_be_bytes());
+    lacpdu.extend_from_slice(&[0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0x02]);
+    lacpdu.extend_from_slice(&0x0456u16.to_be_bytes());
+    lacpdu.extend_from_slice(&0x6100u16.to_be_bytes());
+    lacpdu.extend_from_slice(&31u16.to_be_bytes());
+    lacpdu.extend_from_slice(&[0x3d, 0, 0, 0]);
+    lacpdu.extend_from_slice(&[3, 16]);
+    lacpdu.extend_from_slice(&0u16.to_be_bytes());
+    lacpdu.extend_from_slice(&[0; 12]);
+    lacpdu.extend_from_slice(&[0, 0]);
+    lacpdu.extend_from_slice(&[0; 50]);
+
+    let frame = build_ethernet_frame(
+        [0x01, 0x80, 0xc2, 0x00, 0x00, 0x02],
+        [0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0x01],
+        0x8809,
+        &lacpdu,
+    );
+    let parsed = BuiltinPacketParser::parse(&frame).expect("packet should parse");
     let ethernet = parsed
         .ethernet
         .as_ref()
@@ -206,36 +336,42 @@ fn lacp_fixture_frame_one_is_actor_state() {
     assert_eq!(ethernet.ethertype, 0x8809);
     assert_eq!(lacp.subtype, 1);
     assert_eq!(lacp.version, 1);
-    assert_eq!(lacp.actor_port, 18);
+    assert_eq!(lacp.actor_port, 27);
 }
 
 #[test]
-fn cdp_fixture_frame_one_has_device_id_header() {
-    let bytes = include_bytes!("pcaps/protocol-gaps/cdp_device_id.pcap");
-    let frame = iter_capture_frames(bytes)
-        .expect("pcap should parse")
-        .next()
-        .expect("capture should contain frame 1")
-        .expect("capture frame should parse");
-    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
-        .expect("packet should parse");
+fn cdp_synthetic_frame_one_has_device_id_header() {
+    let mut cdp_payload = vec![2, 77, 0, 0];
+    cdp_payload.extend_from_slice(&1u16.to_be_bytes());
+    cdp_payload.extend_from_slice(&14u16.to_be_bytes());
+    cdp_payload.extend_from_slice(b"paccel-rtr");
+    let checksum = internet_checksum(&cdp_payload);
+    cdp_payload[2..4].copy_from_slice(&checksum.to_be_bytes());
+
+    let mut llc_snap = vec![0xaa, 0xaa, 0x03, 0x00, 0x00, 0x0c, 0x20, 0x00];
+    llc_snap.extend_from_slice(&cdp_payload);
+    let payload_length = u16::try_from(llc_snap.len()).expect("CDP payload should fit in 802.3");
+    let frame = build_ethernet_frame(
+        [0x01, 0x00, 0x0c, 0xcc, 0xcc, 0xcc],
+        [0x02, 0x00, 0x0c, 0x00, 0x00, 0x2a],
+        payload_length,
+        &llc_snap,
+    );
+    let parsed = BuiltinPacketParser::parse(&frame).expect("packet should parse");
     let cdp = parsed.cdp.as_ref().expect("CDP should be present");
 
-    assert_eq!(cdp.version, 1);
-    assert_eq!(cdp.ttl, 180);
-    assert_eq!(cdp.checksum, 0xc65e);
+    assert_eq!(cdp.version, 2);
+    assert_eq!(cdp.ttl, 77);
+    assert_eq!(cdp.checksum, checksum);
 }
 
 #[test]
-fn hsrp_fixture_frame_one_is_hello() {
-    let bytes = include_bytes!("pcaps/protocol-gaps/hsrp_hello.pcap");
-    let frame = iter_capture_frames(bytes)
-        .expect("pcap should parse")
-        .next()
-        .expect("capture should contain frame 1")
-        .expect("capture frame should parse");
-    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
-        .expect("packet should parse");
+fn hsrp_synthetic_frame_one_is_hello() {
+    let mut hello = vec![0, 0, 8, 3, 10, 135, 37, 0];
+    hello.extend_from_slice(b"cisco\0\0\0");
+    hello.extend_from_slice(&[198, 51, 100, 254]);
+    let frame = build_ethernet_ipv4_udp_frame([224, 0, 0, 2], 1985, 1985, &hello);
+    let parsed = BuiltinPacketParser::parse(&frame).expect("packet should parse");
     let hsrp = parsed.hsrp.as_ref().expect("HSRP should be present");
     let udp = match parsed.transport.as_ref() {
         Some(TransportSegment::Udp(udp)) => udp,
@@ -245,22 +381,28 @@ fn hsrp_fixture_frame_one_is_hello() {
     assert_eq!(udp.destination_port, 1985);
     assert_eq!(hsrp.version, 0);
     assert_eq!(hsrp.opcode, 0);
-    assert_eq!(hsrp.state, 16);
-    assert_eq!(hsrp.group, 10);
-    assert_eq!(hsrp.priority, 90);
+    assert_eq!(hsrp.state, 8);
+    assert_eq!(hsrp.group, 37);
+    assert_eq!(hsrp.priority, 135);
     assert!(parsed.udp_hints.contains(&UdpAppHint::Hsrp));
 }
 
 #[test]
-fn eigrp_fixture_frame_one_is_hello() {
-    let bytes = include_bytes!("pcaps/protocol-gaps/eigrp_hello.cap");
-    let frame = iter_capture_frames(bytes)
-        .expect("pcap should parse")
-        .next()
-        .expect("capture should contain frame 1")
-        .expect("capture frame should parse");
-    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
-        .expect("packet should parse");
+fn eigrp_synthetic_frame_one_is_hello() {
+    let mut hello = vec![2, 5, 0, 0];
+    hello.extend_from_slice(&0u32.to_be_bytes());
+    hello.extend_from_slice(&0u32.to_be_bytes());
+    hello.extend_from_slice(&0u32.to_be_bytes());
+    hello.extend_from_slice(&4242u32.to_be_bytes());
+    hello.extend_from_slice(&1u16.to_be_bytes());
+    hello.extend_from_slice(&12u16.to_be_bytes());
+    hello.extend_from_slice(&[1, 0, 1, 0, 0, 0]);
+    hello.extend_from_slice(&15u16.to_be_bytes());
+    let checksum = internet_checksum(&hello);
+    hello[2..4].copy_from_slice(&checksum.to_be_bytes());
+
+    let frame = build_ethernet_ipv4_frame([224, 0, 0, 10], 88, 2, &hello);
+    let parsed = BuiltinPacketParser::parse(&frame).expect("packet should parse");
     let ipv4 = parsed.ipv4.as_ref().expect("IPv4 should be present");
     let eigrp = parsed.eigrp.as_ref().expect("EIGRP should be present");
 
@@ -268,19 +410,20 @@ fn eigrp_fixture_frame_one_is_hello() {
     assert_eq!(ipv4.protocol, 88);
     assert_eq!(eigrp.version, 2);
     assert_eq!(eigrp.opcode, 5);
-    assert_eq!(eigrp.as_number, 100);
+    assert_eq!(eigrp.as_number, 4242);
 }
 
 #[test]
-fn pim_fixture_frame_one_is_hello() {
-    let bytes = include_bytes!("pcaps/protocol-gaps/pim_hello_register.cap");
-    let frame = iter_capture_frames(bytes)
-        .expect("pcap should parse")
-        .next()
-        .expect("capture should contain frame 1")
-        .expect("capture frame should parse");
-    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
-        .expect("packet should parse");
+fn pim_synthetic_frame_one_is_hello() {
+    let mut hello = vec![0x20, 0, 0, 0];
+    hello.extend_from_slice(&1u16.to_be_bytes());
+    hello.extend_from_slice(&2u16.to_be_bytes());
+    hello.extend_from_slice(&105u16.to_be_bytes());
+    let checksum = internet_checksum(&hello);
+    hello[2..4].copy_from_slice(&checksum.to_be_bytes());
+
+    let frame = build_ethernet_ipv4_frame([224, 0, 0, 13], 103, 1, &hello);
+    let parsed = BuiltinPacketParser::parse(&frame).expect("packet should parse");
     let pim = parsed.pim.as_ref().expect("PIM should be present");
 
     assert_eq!(pim.version, 2);
@@ -288,15 +431,17 @@ fn pim_fixture_frame_one_is_hello() {
 }
 
 #[test]
-fn pim_fixture_frame_three_is_register() {
-    let bytes = include_bytes!("pcaps/protocol-gaps/pim_hello_register.cap");
-    let frame = iter_capture_frames(bytes)
-        .expect("pcap should parse")
-        .nth(2)
-        .expect("capture should contain frame 3")
-        .expect("capture frame should parse");
-    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
-        .expect("packet should parse");
+fn pim_synthetic_frame_three_is_register() {
+    let encapsulated =
+        build_ethernet_ipv4_udp_frame([239, 23, 45, 67], 49_000, 49_001, b"multicast-data");
+    let mut register = vec![0x21, 0, 0, 0];
+    register.extend_from_slice(&0u32.to_be_bytes());
+    let checksum = internet_checksum(&register);
+    register[2..4].copy_from_slice(&checksum.to_be_bytes());
+    register.extend_from_slice(&encapsulated[14..]);
+
+    let frame = build_ethernet_ipv4_frame([198, 51, 100, 99], 103, 64, &register);
+    let parsed = BuiltinPacketParser::parse(&frame).expect("packet should parse");
     let pim = parsed.pim.as_ref().expect("PIM should be present");
 
     assert_eq!(pim.version, 2);
@@ -304,30 +449,21 @@ fn pim_fixture_frame_three_is_register() {
 }
 
 #[test]
-fn vrrp_fixture_frame_one_is_advertisement() {
-    let bytes = include_bytes!("pcaps/protocol-gaps/vrrp_advertisement.pcapng");
-    let frame = iter_capture_frames(bytes)
-        .expect("pcap should parse")
-        .next()
-        .expect("capture should contain frame 1")
-        .expect("capture frame should parse");
-    let ethernet_end = frame
-        .data
-        .len()
-        .checked_sub(4)
-        .expect("mPacket frame should include its FCS");
-    let ethernet = frame
-        .data
-        .get(8..ethernet_end)
-        .expect("mPacket frame should include a preamble and Ethernet payload");
-    let parsed =
-        BuiltinPacketParser::parse_with_linktype(ethernet, 1).expect("packet should parse");
+fn vrrp_synthetic_frame_one_is_advertisement() {
+    let mut advertisement = vec![0x21, 42, 175, 1, 0, 1, 0, 0];
+    advertisement.extend_from_slice(&[192, 0, 2, 254]);
+    advertisement.extend_from_slice(&[0; 8]);
+    let checksum = internet_checksum(&advertisement);
+    advertisement[6..8].copy_from_slice(&checksum.to_be_bytes());
+
+    let frame = build_ethernet_ipv4_frame([224, 0, 0, 18], 112, 255, &advertisement);
+    let parsed = BuiltinPacketParser::parse(&frame).expect("packet should parse");
     let vrrp = parsed.vrrp.as_ref().expect("VRRP should be present");
 
     assert_eq!(vrrp.version, 2);
     assert_eq!(vrrp.packet_type, 1);
-    assert_eq!(vrrp.virtual_router_id, 1);
-    assert_eq!(vrrp.priority, 100);
+    assert_eq!(vrrp.virtual_router_id, 42);
+    assert_eq!(vrrp.priority, 175);
     assert_eq!(vrrp.address_count, 1);
 }
 
@@ -371,15 +507,12 @@ fn rpc_fixture_frame_two_is_reply() {
 }
 
 #[test]
-fn rip_fixture_frame_one_is_request() {
-    let bytes = include_bytes!("pcaps/protocol-gaps/rip_v1.pcap");
-    let frame = iter_capture_frames(bytes)
-        .expect("pcap should parse")
-        .next()
-        .expect("capture should contain frame 1")
-        .expect("capture frame should parse");
-    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
-        .expect("packet should parse");
+fn rip_synthetic_frame_one_is_request() {
+    let mut request = vec![1, 1, 0, 0];
+    request.extend_from_slice(&[0; 16]);
+    request.extend_from_slice(&16u32.to_be_bytes());
+    let frame = build_ethernet_ipv4_udp_frame([255, 255, 255, 255], 520, 520, &request);
+    let parsed = BuiltinPacketParser::parse(&frame).expect("packet should parse");
     let rip = parsed.rip.as_ref().expect("RIP should be present");
 
     assert_eq!(rip.command, 1);
@@ -387,15 +520,15 @@ fn rip_fixture_frame_one_is_request() {
 }
 
 #[test]
-fn rip_fixture_frame_two_is_response() {
-    let bytes = include_bytes!("pcaps/protocol-gaps/rip_v1.pcap");
-    let frame = iter_capture_frames(bytes)
-        .expect("pcap should parse")
-        .nth(1)
-        .expect("capture should contain frame 2")
-        .expect("capture frame should parse");
-    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
-        .expect("packet should parse");
+fn rip_synthetic_frame_two_is_response() {
+    let mut response = vec![2, 1, 0, 0];
+    response.extend_from_slice(&2u16.to_be_bytes());
+    response.extend_from_slice(&0u16.to_be_bytes());
+    response.extend_from_slice(&[203, 0, 113, 0]);
+    response.extend_from_slice(&[0; 8]);
+    response.extend_from_slice(&3u32.to_be_bytes());
+    let frame = build_ethernet_ipv4_udp_frame([255, 255, 255, 255], 520, 520, &response);
+    let parsed = BuiltinPacketParser::parse(&frame).expect("packet should parse");
     let rip = parsed.rip.as_ref().expect("RIP should be present");
 
     assert_eq!(rip.command, 2);

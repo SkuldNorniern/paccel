@@ -132,22 +132,15 @@ The crate is zero-dependency by default. Two optional features pull in [RustCryp
 
 | Fixture | Source |
 |---|---|
-| `cdp_device_id.pcap` | Hand-built with [scapy](https://scapy.net/) (`scapy.contrib.cdp`); no external capture |
-| `eigrp_hello.cap` | [Wireshark SampleCaptures: `[redacted]`]([redacted]) |
 | `ftp_session.cap` | [Wireshark SampleCaptures: `[redacted]`]([redacted]) (trimmed to `tcp.port==21`, reformatted from NetMon to pcapng) |
-| `hsrp_hello.pcap` | [Wireshark SampleCaptures: `hsrp.pcap`]([redacted]) |
 | `http2_get_hello.pcap` | Self-generated on loopback: `curl --http2-prior-knowledge` against a local Python [`h2`](https://github.com/python-hyper/h2) library server, captured with `tcpdump`; not third-party/GPL data |
 | `ikev2_sa_init.pcap` | [Wireshark test suite: `[redacted]`]([redacted]) |
 | `imap_banner.cap` | [Wireshark SampleCaptures: `imap.cap`]([redacted]) |
-| `lacp.pcap` | [Wireshark SampleCaptures: `[redacted]`]([redacted]) |
 | `nfs_getattr.pcap` | [Wireshark test suite: `nfs.pcap`]([redacted]) |
-| `ospf_hello.cap` | [Wireshark SampleCaptures: `ospf.cap`]([redacted]) |
-| `pim_hello_register.cap` | [Wireshark SampleCaptures: `[redacted]`]([redacted]) |
 | `quic_fragmented_handshake.pcapng` | [Wireshark test suite: `[redacted]`]([redacted]) |
 | `quic_multistream.pcapng` | [Wireshark test suite: `[redacted]`]([redacted]) |
 | `quic_retry.pcapng` | [Wireshark test suite: `[redacted]`]([redacted]) |
 | `quic_tls_upgrade.pcapng` | [Wireshark test suite: `[redacted]`]([redacted]) |
-| `rip_v1.pcap` | [Wireshark SampleCaptures: `RIP_v1`]([redacted]) |
 | `rtcp_sr_rr.pcap` | [Wireshark SampleCaptures: `[redacted]`]([redacted]) (`tls-1.3/sip.pcap` inside the archive) |
 | `smb1_negotiate.cap` | [Wireshark SampleCaptures: `[redacted]`]([redacted]) (2 frames extracted) |
 | `smb2_negotiate.pcapng` | [The Ultimate PCAP by Johannes Weber]([redacted]) (2 frames extracted) |
@@ -157,10 +150,9 @@ The crate is zero-dependency by default. Two optional features pull in [RustCryp
 | `telnet_iac.pcap` | [Wireshark SampleCaptures: `[redacted]`]([redacted]) |
 | `tls12_sni.pcapng` | [Wireshark test suite: `[redacted]`]([redacted]) |
 | `tls13_handshake.pcap` | [Wireshark test suite: `[redacted]`]([redacted]) |
-| `vrrp_advertisement.pcapng` | [The Ultimate PCAP by Johannes Weber]([redacted]) (1 frame extracted) |
 | `wireguard_ping_tcp.pcap` | [Wireshark test suite: `[redacted]`]([redacted]) |
 | `wireguard_psk.pcap` | [Wireshark test suite: `[redacted]`]([redacted]) |
-| `bgp_shutdown.pcap`, `coap_cbor.pcap`, `dhcpv6.pcap`, `dnp3_read.pcap`, `kerberos.pcapng`, `ldap_search.pcap`, `modbus.pcap`, `mqtt.pcap`, `nntp.pcap`, `openvpn_tcp_tls-auth.pcapng`, `openvpn_udp_tls-auth.pcapng`, `radius_localhost.pcapng`, `sip-rtp-g711.pcap`, `snmp_usm.pcap`, `tftp_rrq.pcap` | Added in an earlier session; exact source not recorded |
+| `coap_cbor.pcap`, `dhcpv6.pcap`, `kerberos.pcapng`, `ldap_search.pcap`, `modbus.pcap`, `mqtt.pcap`, `nntp.pcap`, `openvpn_tcp_tls-auth.pcapng`, `openvpn_udp_tls-auth.pcapng`, `radius_localhost.pcapng`, `sip-rtp-g711.pcap`, `snmp_usm.pcap`, `tftp_rrq.pcap` | Added in an earlier session; exact source not recorded |
 
 [redacted]
 
