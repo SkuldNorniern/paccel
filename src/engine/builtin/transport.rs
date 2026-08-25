@@ -1668,6 +1668,40 @@ mod tests {
     }
 
     #[test]
+    fn skips_transport_for_non_initial_ipv4_fragment() {
+        let mut frame = build_ethernet_ipv4_tcp_frame(49152, 443, &[]);
+        frame[20..22].copy_from_slice(&0x0001u16.to_be_bytes());
+
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+
+        assert!(parsed.ipv4.is_some());
+        assert!(parsed.transport.is_none());
+        assert!(
+            parsed
+                .warnings
+                .iter()
+                .any(|warning| warning.code == ParseWarningCode::Ipv4Fragmented)
+        );
+    }
+
+    #[test]
+    fn parses_transport_for_initial_ipv4_fragment() {
+        let mut frame = build_ethernet_ipv4_tcp_frame(49152, 443, &[]);
+        frame[20..22].copy_from_slice(&0x2000u16.to_be_bytes());
+
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+
+        assert!(parsed.ipv4.is_some());
+        assert!(matches!(parsed.transport, Some(TransportSegment::Tcp(_))));
+        assert!(
+            parsed
+                .warnings
+                .iter()
+                .any(|warning| warning.code == ParseWarningCode::Ipv4Fragmented)
+        );
+    }
+
+    #[test]
     fn flow_key_uses_outer_ipv4_tcp_tuple_and_reverses_it() {
         let frame = build_ethernet_ipv4_tcp_frame(49152, 443, &[]);
         let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");

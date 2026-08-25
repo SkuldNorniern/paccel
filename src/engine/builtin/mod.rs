@@ -265,18 +265,20 @@ impl BuiltinPacketParser {
                     return Ok(parsed);
                 }
 
-                let l4_end = total_len.min(l3_bytes.len());
-                let l4_bytes = &l3_bytes[ip_header_len..l4_end];
-                let transport_parse = parse_transport(ipv4.protocol, l4_bytes, config)?;
-                apply_transport_parse(&mut parsed, transport_parse);
-                recurse_transport_tunnel(
-                    &mut parsed,
-                    ipv4.protocol,
-                    l4_bytes,
-                    config,
-                    depth,
-                    l3_offset + ip_header_len,
-                );
+                if ipv4.fragment_offset == 0 {
+                    let l4_end = total_len.min(l3_bytes.len());
+                    let l4_bytes = &l3_bytes[ip_header_len..l4_end];
+                    let transport_parse = parse_transport(ipv4.protocol, l4_bytes, config)?;
+                    apply_transport_parse(&mut parsed, transport_parse);
+                    recurse_transport_tunnel(
+                        &mut parsed,
+                        ipv4.protocol,
+                        l4_bytes,
+                        config,
+                        depth,
+                        l3_offset + ip_header_len,
+                    );
+                }
                 parsed.ipv4 = Some(ipv4);
                 Ok(parsed)
             }
