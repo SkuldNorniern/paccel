@@ -9,20 +9,55 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  check:
-    name: fmt + clippy + test
+  fmt:
+    name: fmt
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Install stable toolchain
-        run: rustup toolchain install stable --profile minimal --component rustfmt,clippy
+        run: rustup toolchain install stable --profile minimal --component rustfmt
       - uses: Swatinem/rust-cache@v2
       - name: Format
         run: cargo fmt --all --check
-      - name: Clippy
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install stable toolchain
+        run: rustup toolchain install stable --profile minimal --component clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Clippy (default features)
         run: cargo clippy --all-targets -- -D warnings
-      - name: Test
+      - name: Clippy (quic-decrypt)
+        run: cargo clippy --all-targets --features quic-decrypt -- -D warnings
+
+  test-msrv:
+    name: test (MSRV 1.88)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install MSRV toolchain
+        run: rustup toolchain install 1.88.0 --profile minimal
+      - uses: Swatinem/rust-cache@v2
+      - name: Test (default features)
+        run: cargo +1.88.0 test --all-targets
+      - name: Test (quic-decrypt)
+        run: cargo +1.88.0 test --all-targets --features quic-decrypt
+
+  test-latest:
+    name: test (stable)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install stable toolchain
+        run: rustup toolchain install stable --profile minimal
+      - uses: Swatinem/rust-cache@v2
+      - name: Test (default features)
         run: cargo test --all-targets
+      - name: Test (quic-decrypt)
+        run: cargo test --all-targets --features quic-decrypt
 
   fuzz-smoke:
     name: fuzz smoke
