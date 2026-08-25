@@ -22,8 +22,10 @@ Requires Rust 1.88+ (edition 2024, let chains).
 | Network | IPv4 with options; IPv6 with extension headers; ICMP with echo; ICMPv6 with NDP; IGMP; OSPF; PIM; EIGRP; VRRP |
 | Transport | TCP with options; UDP; SCTP; GRE; AH; ESP; L2TP |
 | Tunnel (recursive inner decode) | GRE; VXLAN; GENEVE; MPLS; IP-in-IP |
-| Application (full parse) | DNS (records + EDNS), mDNS, DHCP, DHCPv6, NTP, TLS ClientHello (SNI/ALPN), HTTP/1.x, QUIC (version-aware long-header packet types v1/v2), BGP, CoAP, DNP3, FTP, HSRP, IKE/ISAKMP (v1/v2), IMAP, Kerberos (UDP/TCP), LDAP, Modbus/TCP, MQTT, NNTP, ONC-RPC (NFS classification), PCP, RADIUS, RIP, RTCP, RTP, SIP, SMB1/CIFS, SMB2, SMTP, SNMP, SSDP, SSH (banner), STUN, Syslog, TFTP, Telnet (IAC negotiation) — plus OSPF, PIM, EIGRP, VRRP, CDP, LACP (see Link/Network rows) |
+| Application (full parse) | DNS (records + EDNS), mDNS, DHCP, DHCPv6, NTP, TLS ClientHello (SNI/ALPN/raw extension order) and ServerHello, HTTP/1.x, HTTP/2 (frame header: type/length/flags/stream ID, no HPACK), QUIC (version-aware long-header packet types v1/v2, Token/Length/PN-offset, Retry token + integrity tag), SSH banner and `SSH_MSG_KEXINIT` algorithm lists, BGP, CoAP, DNP3, FTP, HSRP, IKE/ISAKMP (v1/v2), IMAP, Kerberos (UDP/TCP), LDAP, Modbus/TCP, MQTT, NNTP, ONC-RPC (NFS classification), PCP, RADIUS, RIP, RTCP, RTP, SIP, SMB1/CIFS, SMB2, SMTP, SNMP, SSDP, STUN, Syslog, TFTP, Telnet (IAC negotiation) — plus OSPF, PIM, EIGRP, VRRP, CDP, LACP (see Link/Network rows) |
 | Application (port/heuristic classification only) | WireGuard, OpenVPN, L2TP, QUIC short header (1-RTT), LLMNR, NBNS, NAT-PMP |
+| Fingerprinting (`fingerprint` feature) | JA3 / JA4 (TLS ClientHello), JA3S (TLS ServerHello), HASSH / HASSHServer (SSH KEXINIT) |
+| QUIC decrypt (`quic-decrypt` feature) | Initial packets: full decrypt from publicly-derivable keys (recovers the ClientHello - SNI/ALPN). Handshake/1-RTT: decrypt via an externally-supplied `SSLKEYLOGFILE`-format secret (`QuicKeyLog`), same model Wireshark/curl/browsers use - these levels need a live TLS 1.3 ECDHE exchange, not derivable from a passive capture alone. Opt-in `QuicConnectionTracker` for connection-ID/packet-number state across a flow. |
 | Capture formats | pcap and pcapng (linktype-aware: Ethernet, SLL, SLL2, NULL, RAW/IPv4/IPv6, FDDI/SNAP, and 802.11) |
 | Reassembly | IPv4/IPv6 fragments; TCP streams (opt-in) |
 | Streaming | Multi-segment HTTP/TLS through `SessionTracker` |
@@ -35,8 +37,10 @@ The parser never panics on malformed input; it is fuzz-, property-, and differen
 - tshark corpus scaffolding exists; parity automation is in place, but tshark-based differential coverage is still being expanded
 - baseline pcap-vs-scapy parity test exists, but coverage is still small
 - still uses intermediate allocations in parts of hot path
-- QUIC support is wire-metadata only: version, long-header packet type (v1/v2-aware), and per-packet DCID/SCID. No Version Negotiation list parsing, no Initial token/Retry integrity tag, no coalesced-packet splitting, no header protection removal or decryption, no CRYPTO/STREAM frame parsing, no connection-ID state tracking across packets (so short-header/1-RTT classification is a low-confidence heuristic, not authoritative)
+- QUIC: no Version Negotiation list parsing, no coalesced-packet splitting, no STREAM frame parsing (so HTTP/3 is not reachable yet). Handshake/1-RTT decrypt needs an externally-supplied keylog secret (see the `quic-decrypt` feature above) - there is no way to derive those keys from a passive capture alone, by design of TLS 1.3. Short-header/1-RTT classification without `QuicConnectionTracker` state remains a low-confidence heuristic (any UDP payload's top two bits have a 1-in-4 chance of matching).
+- HTTP/2 is frame-header classification only (type/length/flags/stream ID) - no HPACK header decompression, so individual header fields inside HEADERS/CONTINUATION frames are not decoded
 - no GTP or Diameter support yet (no ground-truth test data available)
+- fingerprinting only covers ClientHello/ServerHello/KEXINIT-based JA3/JA4/JA3S/HASSH; no JA4S/JA4X/JA4H/JA4SSH variants yet
 
 ## Quick usage
 
@@ -80,6 +84,13 @@ For allocation-sensitive iteration, use `paccel::engine::iter_capture_frames(...
 
 The core `BuiltinPacketParser` is intentionally stateless by design (similar to libpnet/scapy usage patterns).
 Flow/state tracking should be composed on the integration side (for example inside Fluere).
+
+## Cargo features
+
+The crate is zero-dependency by default. Two optional features pull in [RustCrypto](https://github.com/RustCrypto) crates (all Apache-2.0/MIT):
+
+- **`quic-decrypt`** (`aes-gcm`, `aes`, `hkdf`, `sha2`): `paccel::layer::application::quic::decrypt_initial_client_hello`/`decrypt_initial_packet` recover a QUIC Initial packet's plaintext, including the ClientHello, using only keys derivable from the packet's own Destination Connection ID (RFC 9001 §5.2 - this is the same on-path visibility any DPI tool or Wireshark itself has, not a break of QUIC's security model). For Handshake/1-RTT, `decrypt_packet_with_secret` takes a secret from `paccel::layer::application::quic::QuicKeyLog`, which parses the standard `SSLKEYLOGFILE` text format (`<Label> <ClientHelloRandomHex> <SecretHex>` per line, `CLIENT_HANDSHAKE_TRAFFIC_SECRET`/`SERVER_HANDSHAKE_TRAFFIC_SECRET`/`CLIENT_TRAFFIC_SECRET_0`/`SERVER_TRAFFIC_SECRET_0`) - the same file curl, browsers, and Wireshark itself already know how to produce via the `SSLKEYLOGFILE` environment variable. There is no way around needing this file for Handshake/1-RTT: those levels are protected by a live ECDHE exchange, not something derivable from a capture alone.
+- **`fingerprint`** (`md-5`, `sha2`): `paccel::fingerprint` provides `ja3_string`/`ja3_hash`/`ja4_string` (from a `TlsClientHello`), `ja3s_string`/`ja3s_hash` (from a `TlsServerHello`), and `hassh`/`hassh_server` (from an `SshKexInit`). All verified against official reference vectors or tshark's own native field computation, not hand-derived.
 
 ## libpnet compatibility snapshot
 
