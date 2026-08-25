@@ -302,16 +302,17 @@ pub fn extract_crypto_stream(plaintext: &[u8]) -> Vec<u8> {
     let mut stream = Vec::new();
     for (data_offset, data) in chunks {
         let Ok(data_offset) = usize::try_from(data_offset) else {
-            continue;
+            break;
         };
         if data_offset < stream.len() {
             let overlap = stream.len() - data_offset;
             if overlap < data.len() {
                 stream.extend_from_slice(&data[overlap..]);
             }
-        } else {
-            stream.resize(data_offset, 0);
+        } else if data_offset == stream.len() {
             stream.extend_from_slice(data);
+        } else {
+            break;
         }
     }
     stream
@@ -378,6 +379,30 @@ mod tests {
     const HANDSHAKE_PACKET_HEX: &str = "ea0000000104aabbccdd05112233445532be8efef96fc8190e83e58c6fb096d74e9eaf3177a70f65b223dbdcf17ba830d4ef1d80be29f87003064a2409052deda7027b";
     const HANDSHAKE_SECRET_HEX: &str =
         "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+
+    #[test]
+    fn crypto_stream_stops_at_gap() {
+        let plaintext = [
+            0x06, 0x00, 0x0a, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0x06, 0x14, 0x03, 20, 21, 22,
+        ];
+
+        assert_eq!(
+            extract_crypto_stream(&plaintext),
+            (0..10).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn crypto_stream_reassembles_contiguous_frames() {
+        let plaintext = [
+            0x06, 0x00, 0x0a, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0x06, 0x0a, 0x03, 10, 11, 12,
+        ];
+
+        assert_eq!(
+            extract_crypto_stream(&plaintext),
+            (0..13).collect::<Vec<_>>()
+        );
+    }
 
     #[test]
     fn decrypts_rfc9001_appendix_a2_client_initial() {
