@@ -132,24 +132,18 @@ The crate is zero-dependency by default. Two optional features pull in [RustCryp
 
 | Fixture | Source |
 |---|---|
-| `ftp_session.cap` | [Wireshark SampleCaptures: `[redacted]`]([redacted]) (trimmed to `tcp.port==21`, reformatted from NetMon to pcapng) |
 | `http2_get_hello.pcap` | Self-generated on loopback: `curl --http2-prior-knowledge` against a local Python [`h2`](https://github.com/python-hyper/h2) library server, captured with `tcpdump`; not third-party/GPL data |
 | `ikev2_sa_init.pcap` | [Wireshark test suite: `[redacted]`]([redacted]) |
-| `imap_banner.cap` | [Wireshark SampleCaptures: `imap.cap`]([redacted]) |
 | `quic_fragmented_handshake.pcapng` | [Wireshark test suite: `[redacted]`]([redacted]) |
 | `quic_multistream.pcapng` | [Wireshark test suite: `[redacted]`]([redacted]) |
 | `quic_retry.pcapng` | [Wireshark test suite: `[redacted]`]([redacted]) |
 | `quic_tls_upgrade.pcapng` | [Wireshark test suite: `[redacted]`]([redacted]) |
-| `smb1_negotiate.cap` | [Wireshark SampleCaptures: `[redacted]`]([redacted]) (2 frames extracted) |
-| `smb2_negotiate.pcapng` | [The Ultimate PCAP by Johannes Weber]([redacted]) (2 frames extracted) |
-| `smtp_session.pcap` | [Wireshark SampleCaptures: `smtp.pcap`]([redacted]) |
 | `ssh_banner.pcapng` | [Wireshark SampleCaptures: `[redacted]`]([redacted]) |
-| `telnet_iac.pcap` | [Wireshark SampleCaptures: `[redacted]`]([redacted]) |
 | `tls12_sni.pcapng` | [Wireshark test suite: `[redacted]`]([redacted]) |
 | `tls13_handshake.pcap` | [Wireshark test suite: `[redacted]`]([redacted]) |
 | `wireguard_ping_tcp.pcap` | [Wireshark test suite: `[redacted]`]([redacted]) |
 | `wireguard_psk.pcap` | [Wireshark test suite: `[redacted]`]([redacted]) |
-| `dhcpv6.pcap`, `kerberos.pcapng`, `openvpn_tcp_tls-auth.pcapng`, `openvpn_udp_tls-auth.pcapng` | Added in an earlier session; exact source not recorded |
+| `dhcpv6.pcap`, `openvpn_tcp_tls-auth.pcapng`, `openvpn_udp_tls-auth.pcapng` | Added in an earlier session; exact source not recorded |
 
 [redacted]
 
