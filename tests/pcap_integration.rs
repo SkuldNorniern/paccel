@@ -129,6 +129,17 @@ fn build_ethernet_ipv4_tcp_frame(
     build_ethernet_ipv4_frame(dst_ip, 6, 64, &tcp)
 }
 
+fn build_ber_tlv(tag: u8, content: &[u8]) -> Vec<u8> {
+    let content_len = u8::try_from(content.len()).expect("synthetic BER content should fit in u8");
+    assert!(
+        content_len < 0x80,
+        "synthetic BER content should use a short-form length"
+    );
+    let mut tlv = vec![tag, content_len];
+    tlv.extend_from_slice(content);
+    tlv
+}
+
 fn build_bgp_message(message_type: u8, body: &[u8]) -> Vec<u8> {
     let length =
         u16::try_from(19 + body.len()).expect("BGP message should fit in its length field");
@@ -468,20 +479,29 @@ fn vrrp_synthetic_frame_one_is_advertisement() {
 }
 
 #[test]
-fn rpc_fixture_frame_one_is_nfs_getattr_call() {
-    let bytes = include_bytes!("pcaps/protocol-gaps/nfs_getattr.pcap");
-    let frame = iter_capture_frames(bytes)
-        .expect("pcap should parse")
-        .next()
-        .expect("capture should contain frame 1")
-        .expect("capture frame should parse");
-    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
-        .expect("packet should parse");
+fn rpc_synthetic_frame_one_is_nfs_getattr_call() {
+    let xid = 0x2468_ace0u32;
+    let mut call = Vec::new();
+    call.extend_from_slice(&xid.to_be_bytes());
+    call.extend_from_slice(&0u32.to_be_bytes());
+    call.extend_from_slice(&2u32.to_be_bytes());
+    call.extend_from_slice(&100_003u32.to_be_bytes());
+    call.extend_from_slice(&3u32.to_be_bytes());
+    call.extend_from_slice(&1u32.to_be_bytes());
+    call.extend_from_slice(&0u32.to_be_bytes());
+    call.extend_from_slice(&0u32.to_be_bytes());
+    call.extend_from_slice(&0u32.to_be_bytes());
+    call.extend_from_slice(&0u32.to_be_bytes());
+    call.extend_from_slice(&8u32.to_be_bytes());
+    call.extend_from_slice(&[0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88]);
+
+    let frame = build_ethernet_ipv4_udp_frame([198, 51, 100, 30], 40_400, 2049, &call);
+    let parsed = BuiltinPacketParser::parse(&frame).expect("packet should parse");
 
     assert_eq!(
         parsed.rpc,
         Some(RpcMessage::Call {
-            xid: 0x7b55_8aeb,
+            xid,
             rpc_version: 2,
             program: 100_003,
             program_version: 3,
@@ -492,17 +512,21 @@ fn rpc_fixture_frame_one_is_nfs_getattr_call() {
 }
 
 #[test]
-fn rpc_fixture_frame_two_is_reply() {
-    let bytes = include_bytes!("pcaps/protocol-gaps/nfs_getattr.pcap");
-    let frame = iter_capture_frames(bytes)
-        .expect("pcap should parse")
-        .nth(1)
-        .expect("capture should contain frame 2")
-        .expect("capture frame should parse");
-    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
-        .expect("packet should parse");
+fn rpc_synthetic_frame_two_is_reply() {
+    let xid = 0x2468_ace0u32;
+    let mut reply = Vec::new();
+    reply.extend_from_slice(&xid.to_be_bytes());
+    reply.extend_from_slice(&1u32.to_be_bytes());
+    reply.extend_from_slice(&0u32.to_be_bytes());
+    reply.extend_from_slice(&0u32.to_be_bytes());
+    reply.extend_from_slice(&0u32.to_be_bytes());
+    reply.extend_from_slice(&0u32.to_be_bytes());
+    reply.extend_from_slice(&2u32.to_be_bytes());
 
-    assert_eq!(parsed.rpc, Some(RpcMessage::Reply { xid: 0x7b55_8aeb }));
+    let frame = build_ethernet_ipv4_udp_frame([192, 0, 2, 1], 2049, 40_400, &reply);
+    let parsed = BuiltinPacketParser::parse(&frame).expect("packet should parse");
+
+    assert_eq!(parsed.rpc, Some(RpcMessage::Reply { xid }));
     assert!(parsed.udp_hints.contains(&UdpAppHint::Rpc));
 }
 
@@ -842,71 +866,70 @@ fn wireguard_ping_tcp_fixture_frame_three_is_transport_data() {
 }
 
 #[test]
-fn coap_fixture_frame_one_matches_tshark() {
-    let bytes = include_bytes!("pcaps/protocol-gaps/coap_cbor.pcap");
-    let frame = iter_capture_frames(bytes)
-        .expect("pcap should parse")
-        .next()
-        .expect("capture should contain frame 1")
-        .expect("capture frame should parse");
-    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
-        .expect("packet should parse");
+fn coap_synthetic_frame_one_matches_tshark() {
+    let payload = [0x42, 0x02, 0x4a, 0x2b, 0xca, 0xfe];
+    let frame = build_ethernet_ipv4_udp_frame([198, 51, 100, 40], 45_683, 5683, &payload);
+    let parsed = BuiltinPacketParser::parse(&frame).expect("packet should parse");
     let coap = parsed.coap.expect("CoAP should be present");
 
     assert_eq!(coap.version, 1);
     assert_eq!(coap.message_type, CoapType::Confirmable);
     assert_eq!(coap.code_class, 0);
     assert_eq!(coap.code_detail, 2);
+    assert_eq!(coap.message_id, 0x4a2b);
     assert!(parsed.udp_hints.contains(&UdpAppHint::Coap));
 }
 
 #[test]
-fn ldap_fixture_frame_four_matches_tshark() {
-    let bytes = include_bytes!("pcaps/protocol-gaps/ldap_search.pcap");
-    let frame = iter_capture_frames(bytes)
-        .expect("pcap should parse")
-        .nth(3)
-        .expect("capture should contain frame 4")
-        .expect("capture frame should parse");
-    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
-        .expect("packet should parse");
+fn ldap_synthetic_frame_four_matches_tshark() {
+    let version = build_ber_tlv(0x02, &[0x03]);
+    let name = build_ber_tlv(0x04, &[]);
+    let simple_authentication = build_ber_tlv(0x80, &[]);
+    let mut bind_content = version;
+    bind_content.extend_from_slice(&name);
+    bind_content.extend_from_slice(&simple_authentication);
+    assert_eq!(bind_content.len(), 7);
+    let bind_request = build_ber_tlv(0x60, &bind_content);
+
+    let message_id = build_ber_tlv(0x02, &[0x05]);
+    let mut message_content = message_id;
+    message_content.extend_from_slice(&bind_request);
+    assert_eq!(message_content.len(), 12);
+    let payload = build_ber_tlv(0x30, &message_content);
+    assert_eq!(payload.len(), 14);
+
+    let frame = build_ethernet_ipv4_tcp_frame([198, 51, 100, 41], 43_890, 389, &payload);
+    let parsed = BuiltinPacketParser::parse(&frame).expect("packet should parse");
     let ldap = parsed.ldap.expect("LDAP should be present");
 
-    assert_eq!(ldap.message_id, 1);
+    assert_eq!(ldap.message_id, 5);
     assert_eq!(ldap.protocol_op, LdapProtocolOp::BindRequest);
 }
 
 #[test]
-fn nntp_fixture_frame_four_matches_tshark() {
-    let bytes = include_bytes!("pcaps/protocol-gaps/nntp.pcap");
-    let frame = iter_capture_frames(bytes)
-        .expect("pcap should parse")
-        .nth(3)
-        .expect("capture should contain frame 4")
-        .expect("capture frame should parse");
-    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
-        .expect("packet should parse");
+fn nntp_synthetic_frame_four_matches_tshark() {
+    let payload = b"200 Paccel synthetic news service ready\r\n";
+    let frame = build_ethernet_ipv4_tcp_frame([198, 51, 100, 42], 119, 46_119, payload);
+    let parsed = BuiltinPacketParser::parse(&frame).expect("packet should parse");
 
-    assert!(matches!(
+    assert_eq!(
         parsed.nntp,
-        Some(NntpMessage::Response { code: 200, .. })
-    ));
+        Some(NntpMessage::Response {
+            code: 200,
+            text: "Paccel synthetic news service ready".to_string(),
+        })
+    );
 }
 
 #[test]
-fn syslog_fixture_frame_one_has_expected_facility_severity() {
-    let bytes = include_bytes!("pcaps/protocol-gaps/syslog_messages.pcapng");
-    let frame = iter_capture_frames(bytes)
-        .expect("pcapng should parse")
-        .next()
-        .expect("capture should contain frame 1")
-        .expect("capture frame should parse");
-    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
-        .expect("packet should parse");
+fn syslog_synthetic_frame_one_has_expected_facility_severity() {
+    let payload = b"<187>Aug 25 12:00:00 paccel parser warning";
+    let frame = build_ethernet_ipv4_udp_frame([198, 51, 100, 43], 45_514, 514, payload);
+    let parsed = BuiltinPacketParser::parse(&frame).expect("packet should parse");
     let syslog = parsed.syslog.expect("Syslog should be present");
 
     assert_eq!(syslog.facility, 23);
-    assert_eq!(syslog.severity, 5);
+    assert_eq!(syslog.severity, 3);
     assert!(matches!(
         parsed.transport,
         Some(TransportSegment::Udp(ref udp)) if udp.destination_port == 514
@@ -915,19 +938,14 @@ fn syslog_fixture_frame_one_has_expected_facility_severity() {
 }
 
 #[test]
-fn syslog_fixture_frame_two_has_expected_facility_severity() {
-    let bytes = include_bytes!("pcaps/protocol-gaps/syslog_messages.pcapng");
-    let frame = iter_capture_frames(bytes)
-        .expect("pcapng should parse")
-        .nth(1)
-        .expect("capture should contain frame 2")
-        .expect("capture frame should parse");
-    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
-        .expect("packet should parse");
+fn syslog_synthetic_frame_two_has_expected_facility_severity() {
+    let payload = b"<191>Aug 25 12:00:01 paccel parser trace";
+    let frame = build_ethernet_ipv4_udp_frame([198, 51, 100, 43], 45_514, 514, payload);
+    let parsed = BuiltinPacketParser::parse(&frame).expect("packet should parse");
     let syslog = parsed.syslog.expect("Syslog should be present");
 
     assert_eq!(syslog.facility, 23);
-    assert_eq!(syslog.severity, 6);
+    assert_eq!(syslog.severity, 7);
     assert!(parsed.udp_hints.contains(&UdpAppHint::Syslog));
 }
 
@@ -1134,34 +1152,39 @@ fn telnet_fixture_frame_four_is_do_suppress_go_ahead() {
 }
 
 #[test]
-fn mqtt_fixture_frame_one_matches_tshark() {
-    let bytes = include_bytes!("pcaps/protocol-gaps/mqtt.pcap");
-    let frame = iter_capture_frames(bytes)
-        .expect("pcap should parse")
-        .next()
-        .expect("capture should contain frame 1")
-        .expect("capture frame should parse");
-    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
-        .expect("packet should parse");
+fn mqtt_synthetic_frame_one_matches_tshark() {
+    let mut connect_body = Vec::new();
+    connect_body.extend_from_slice(&4u16.to_be_bytes());
+    connect_body.extend_from_slice(b"MQTT");
+    connect_body.push(4);
+    connect_body.push(0x02);
+    connect_body.extend_from_slice(&45u16.to_be_bytes());
+    connect_body.extend_from_slice(&13u16.to_be_bytes());
+    connect_body.extend_from_slice(b"paccel-client");
+    let remaining_length = u8::try_from(connect_body.len())
+        .expect("synthetic CONNECT body should use a one-byte remaining length");
+    let mut payload = vec![0x10, remaining_length];
+    payload.extend_from_slice(&connect_body);
+
+    let frame = build_ethernet_ipv4_tcp_frame([198, 51, 100, 50], 41_883, 1883, &payload);
+    let parsed = BuiltinPacketParser::parse(&frame).expect("packet should parse");
     let mqtt = parsed.mqtt.expect("MQTT should be present");
 
     assert_eq!(mqtt.packet_type, MqttPacketType::Connect);
-    assert_eq!(mqtt.remaining_length, 37);
+    assert_eq!(mqtt.remaining_length, u32::from(remaining_length));
+    assert_eq!(mqtt.remaining_length, 25);
 }
 
 #[test]
-fn modbus_fixture_frame_two_matches_tshark() {
-    let bytes = include_bytes!("pcaps/protocol-gaps/modbus.pcap");
-    let frame = iter_capture_frames(bytes)
-        .expect("pcap should parse")
-        .nth(1)
-        .expect("capture should contain frame 2")
-        .expect("capture frame should parse");
-    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
-        .expect("packet should parse");
+fn modbus_synthetic_frame_two_matches_tshark() {
+    let payload = [
+        0x00, 0x07, 0x00, 0x00, 0x00, 0x06, 0xff, 0x04, 0x12, 0x34, 0x00, 0x03,
+    ];
+    let frame = build_ethernet_ipv4_tcp_frame([198, 51, 100, 51], 45_502, 502, &payload);
+    let parsed = BuiltinPacketParser::parse(&frame).expect("packet should parse");
     let modbus = parsed.modbus.expect("Modbus should be present");
 
-    assert_eq!(modbus.transaction_id, 0);
+    assert_eq!(modbus.transaction_id, 7);
     assert_eq!(modbus.unit_id, 255);
     assert_eq!(modbus.function_code, 4);
     assert!(!modbus.is_exception);
@@ -1199,73 +1222,78 @@ fn kerberos_tcp_fixture_frame_five_is_tgs_req() {
 }
 
 #[test]
-fn sip_fixture_frame_one_matches_tshark() {
-    let bytes = include_bytes!("pcaps/protocol-gaps/sip-rtp-g711.pcap");
-    let frame = iter_capture_frames(bytes)
-        .expect("pcap should parse")
-        .next()
-        .expect("capture should contain frame 1")
-        .expect("capture frame should parse");
-    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
-        .expect("packet should parse");
+fn sip_synthetic_frame_one_matches_tshark() {
+    let payload = b"INVITE sip:echo@voice.example SIP/2.0\r\nVia: SIP/2.0/UDP client.example:5060;branch=z9hG4bK-paccel\r\nFrom: <sip:alice@voice.example>;tag=synthetic-a\r\nTo: <sip:echo@voice.example>\r\nCall-ID: synthetic-invite@paccel.test\r\nCSeq: 17 INVITE\r\nContent-Length: 0\r\n\r\n";
+    let frame = build_ethernet_ipv4_udp_frame([198, 51, 100, 60], 45_060, 5060, payload);
+    let parsed = BuiltinPacketParser::parse(&frame).expect("packet should parse");
 
     assert!(matches!(
         parsed.sip,
-        Some(SipMessage::Request { ref method, .. }) if method == "INVITE"
+        Some(SipMessage::Request {
+            ref method,
+            ref uri,
+            ref call_id,
+            ..
+        }) if method == "INVITE"
+            && uri == "sip:echo@voice.example"
+            && call_id.as_deref() == Some("synthetic-invite@paccel.test")
     ));
     assert!(parsed.udp_hints.contains(&UdpAppHint::Sip));
 }
 
 #[test]
-fn rtp_fixture_frame_six_matches_tshark() {
-    let bytes = include_bytes!("pcaps/protocol-gaps/sip-rtp-g711.pcap");
-    let frame = iter_capture_frames(bytes)
-        .expect("pcap should parse")
-        .nth(5)
-        .expect("capture should contain frame 6")
-        .expect("capture frame should parse");
-    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
-        .expect("packet should parse");
+fn rtp_synthetic_frame_six_matches_tshark() {
+    let mut payload = vec![0x80, 0x00];
+    payload.extend_from_slice(&0x2345u16.to_be_bytes());
+    payload.extend_from_slice(&0x1020_3040u32.to_be_bytes());
+    payload.extend_from_slice(&0x5566_7788u32.to_be_bytes());
+    payload.extend_from_slice(&[0xff, 0x7f, 0x00, 0x80]);
+    let frame = build_ethernet_ipv4_udp_frame([198, 51, 100, 61], 40_000, 40_002, &payload);
+    let parsed = BuiltinPacketParser::parse(&frame).expect("packet should parse");
     let rtp = parsed.rtp.as_ref().expect("RTP should be present");
 
     assert_eq!(rtp.payload_type, 0);
-    assert_eq!(rtp.sequence_number, 37_595);
-    assert_eq!(rtp.timestamp, 160);
-    assert_eq!(rtp.ssrc, 0x343d_a99b);
+    assert_eq!(rtp.sequence_number, 0x2345);
+    assert_eq!(rtp.timestamp, 0x1020_3040);
+    assert_eq!(rtp.ssrc, 0x5566_7788);
     assert!(parsed.udp_hints.contains(&UdpAppHint::Rtp));
 }
 
 #[test]
-fn rtcp_fixture_frame_228_is_sender_report() {
-    let bytes = include_bytes!("pcaps/protocol-gaps/rtcp_sr_rr.pcap");
-    let frame = iter_capture_frames(bytes)
-        .expect("pcap should parse")
-        .nth(227)
-        .expect("capture should contain frame 228")
-        .expect("capture frame should parse");
-    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
-        .expect("packet should parse");
+fn rtcp_synthetic_frame_228_is_sender_report() {
+    let mut sender_report = vec![0x80, 200];
+    sender_report.extend_from_slice(&6u16.to_be_bytes());
+    sender_report.extend_from_slice(&0x1020_3040u32.to_be_bytes());
+    sender_report.extend_from_slice(&0x0102_0304_0506_0708u64.to_be_bytes());
+    sender_report.extend_from_slice(&0x1122_3344u32.to_be_bytes());
+    sender_report.extend_from_slice(&21u32.to_be_bytes());
+    sender_report.extend_from_slice(&3_360u32.to_be_bytes());
+    assert_eq!(sender_report.len(), 28);
+    let frame = build_ethernet_ipv4_udp_frame([198, 51, 100, 62], 40_001, 40_003, &sender_report);
+    let parsed = BuiltinPacketParser::parse(&frame).expect("packet should parse");
     let rtcp = parsed.rtcp.as_ref().expect("RTCP should be present");
 
     assert_eq!(rtcp.packet_type, 200);
     assert_eq!(rtcp.version, 2);
-    assert_eq!(rtcp.ssrc, 0x5d93_1534);
+    assert_eq!(rtcp.report_count, 0);
+    assert_eq!(rtcp.length, 6);
+    assert_eq!(rtcp.ssrc, 0x1020_3040);
 }
 
 #[test]
-fn rtcp_fixture_frame_230_is_receiver_report() {
-    let bytes = include_bytes!("pcaps/protocol-gaps/rtcp_sr_rr.pcap");
-    let frame = iter_capture_frames(bytes)
-        .expect("pcap should parse")
-        .nth(229)
-        .expect("capture should contain frame 230")
-        .expect("capture frame should parse");
-    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
-        .expect("packet should parse");
+fn rtcp_synthetic_frame_230_is_receiver_report() {
+    let mut receiver_report = vec![0x80, 201];
+    receiver_report.extend_from_slice(&1u16.to_be_bytes());
+    receiver_report.extend_from_slice(&0x5060_7080u32.to_be_bytes());
+    assert_eq!(receiver_report.len(), 8);
+    let frame = build_ethernet_ipv4_udp_frame([198, 51, 100, 62], 40_003, 40_001, &receiver_report);
+    let parsed = BuiltinPacketParser::parse(&frame).expect("packet should parse");
     let rtcp = parsed.rtcp.as_ref().expect("RTCP should be present");
 
     assert_eq!(rtcp.packet_type, 201);
-    assert_eq!(rtcp.ssrc, 0x0193_2db4);
+    assert_eq!(rtcp.report_count, 0);
+    assert_eq!(rtcp.length, 1);
+    assert_eq!(rtcp.ssrc, 0x5060_7080);
 }
 
 #[test]
@@ -1381,19 +1409,14 @@ fn dhcpv6_fixture_solicit_matches_tshark() {
 }
 
 #[test]
-fn tftp_rrq_fixture_first_frame_matches_tshark() {
-    let bytes = include_bytes!("pcaps/protocol-gaps/tftp_rrq.pcap");
-    let frame = iter_capture_frames(bytes)
-        .expect("pcap should parse")
-        .next()
-        .expect("capture should contain frame 1")
-        .expect("capture frame should parse");
-
-    let parsed = BuiltinPacketParser::parse(frame.data).expect("packet should parse");
+fn tftp_rrq_synthetic_first_frame_matches_tshark() {
+    let payload = b"\0\x01firmware-test.bin\0octet\0";
+    let frame = build_ethernet_ipv4_udp_frame([198, 51, 100, 70], 47_069, 69, payload);
+    let parsed = BuiltinPacketParser::parse(&frame).expect("packet should parse");
     assert_eq!(
         parsed.tftp,
         Some(TftpMessage::ReadRequest {
-            filename: "rfc1350.txt".to_owned(),
+            filename: "firmware-test.bin".to_owned(),
             mode: "octet".to_owned(),
         })
     );
@@ -1401,46 +1424,102 @@ fn tftp_rrq_fixture_first_frame_matches_tshark() {
 }
 
 #[test]
-fn radius_fixture_frame_one_matches_tshark() {
-    let bytes = include_bytes!("pcaps/protocol-gaps/radius_localhost.pcapng");
-    let frame = iter_capture_frames(bytes)
-        .expect("pcapng should parse")
-        .next()
-        .expect("capture should contain frame 1")
-        .expect("capture frame should parse");
+fn radius_synthetic_frame_one_matches_tshark() {
+    let mut payload = vec![1, 42, 0, 0];
+    payload.extend_from_slice(&[
+        0x10, 0x32, 0x54, 0x76, 0x98, 0xba, 0xdc, 0xfe, 0xef, 0xcd, 0xab, 0x89, 0x67, 0x45, 0x23,
+        0x01,
+    ]);
+    payload.extend_from_slice(&[1, 6]);
+    payload.extend_from_slice(b"nova");
+    payload.extend_from_slice(&[4, 6, 198, 51, 100, 44]);
+    let radius_length = u16::try_from(payload.len()).expect("RADIUS message should fit in u16");
+    payload[2..4].copy_from_slice(&radius_length.to_be_bytes());
 
-    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
-        .expect("packet should parse");
+    let frame = build_ethernet_ipv4_udp_frame([198, 51, 100, 71], 41_812, 1812, &payload);
+    let parsed = BuiltinPacketParser::parse(&frame).expect("packet should parse");
     let radius = parsed.radius.as_ref().expect("RADIUS should be present");
     assert_eq!(radius.code, 1);
-    assert_eq!(radius.identifier, 103);
-    assert_eq!(radius.length, 87);
+    assert_eq!(radius.identifier, 42);
+    assert_eq!(radius.length, 32);
     assert!(parsed.udp_hints.contains(&UdpAppHint::Radius));
 }
 
 #[test]
-fn snmp_v3_fixture_frame_one_matches_tshark() {
-    let bytes = include_bytes!("pcaps/protocol-gaps/snmp_usm.pcap");
-    let frame = iter_capture_frames(bytes)
-        .expect("pcap should parse")
-        .next()
-        .expect("capture should contain frame 1")
-        .expect("capture frame should parse");
+fn snmp_v3_synthetic_frame_one_matches_tshark() {
+    let request_id = build_ber_tlv(0x02, &0x2345u16.to_be_bytes());
+    let error_status = build_ber_tlv(0x02, &[0]);
+    let error_index = build_ber_tlv(0x02, &[0]);
+    let variable_bindings = build_ber_tlv(0x30, &[]);
+    let mut get_request_content = request_id;
+    get_request_content.extend_from_slice(&error_status);
+    get_request_content.extend_from_slice(&error_index);
+    get_request_content.extend_from_slice(&variable_bindings);
+    assert_eq!(get_request_content.len(), 12);
+    let get_request = build_ber_tlv(0xa0, &get_request_content);
+    assert_eq!(get_request.len(), 14);
 
-    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
-        .expect("packet should parse");
+    let engine_id = build_ber_tlv(0x04, &[0x80, 0x00, 0x4f, 0xa1, 0x01]);
+    let context_name = build_ber_tlv(0x04, &[]);
+    let mut scoped_content = engine_id.clone();
+    scoped_content.extend_from_slice(&context_name);
+    scoped_content.extend_from_slice(&get_request);
+    assert_eq!(scoped_content.len(), 23);
+    let scoped_pdu = build_ber_tlv(0x30, &scoped_content);
+    assert_eq!(scoped_pdu.len(), 25);
+
+    let engine_boots = build_ber_tlv(0x02, &[7]);
+    let engine_time = build_ber_tlv(0x02, &[11]);
+    let user_name = build_ber_tlv(0x04, &[]);
+    let auth_parameters = build_ber_tlv(0x04, &[]);
+    let priv_parameters = build_ber_tlv(0x04, &[]);
+    let mut usm_content = engine_id;
+    usm_content.extend_from_slice(&engine_boots);
+    usm_content.extend_from_slice(&engine_time);
+    usm_content.extend_from_slice(&user_name);
+    usm_content.extend_from_slice(&auth_parameters);
+    usm_content.extend_from_slice(&priv_parameters);
+    assert_eq!(usm_content.len(), 19);
+    let usm_sequence = build_ber_tlv(0x30, &usm_content);
+    assert_eq!(usm_sequence.len(), 21);
+    let security_parameters = build_ber_tlv(0x04, &usm_sequence);
+    assert_eq!(security_parameters.len(), 23);
+
+    let msg_id = build_ber_tlv(0x02, &0x1234_5678u32.to_be_bytes());
+    let msg_max_size = build_ber_tlv(0x02, &[0x00, 0xc3, 0x50]);
+    let msg_flags = build_ber_tlv(0x04, &[0x04]);
+    let msg_security_model = build_ber_tlv(0x02, &[0x03]);
+    let mut global_content = msg_id;
+    global_content.extend_from_slice(&msg_max_size);
+    global_content.extend_from_slice(&msg_flags);
+    global_content.extend_from_slice(&msg_security_model);
+    assert_eq!(global_content.len(), 17);
+    let global_data = build_ber_tlv(0x30, &global_content);
+    assert_eq!(global_data.len(), 19);
+
+    let version = build_ber_tlv(0x02, &[0x03]);
+    let mut message_content = version;
+    message_content.extend_from_slice(&global_data);
+    message_content.extend_from_slice(&security_parameters);
+    message_content.extend_from_slice(&scoped_pdu);
+    assert_eq!(message_content.len(), 70);
+    let payload = build_ber_tlv(0x30, &message_content);
+    assert_eq!(payload.len(), 72);
+
+    let frame = build_ethernet_ipv4_udp_frame([198, 51, 100, 72], 45_161, 161, &payload);
+    let parsed = BuiltinPacketParser::parse(&frame).expect("packet should parse");
     assert!(matches!(
         parsed.snmp,
         Some(SnmpMessage::V3 {
-            msg_id: 821_490_644,
-            msg_max_size: 65_507,
+            msg_id: 0x1234_5678,
+            msg_max_size: 50_000,
             msg_flags: 0x04,
             reportable: true,
             encrypted: false,
             authenticated: false,
             msg_security_model: 3,
             pdu_type: Some(SnmpPduType::GetRequest),
-            request_id: Some(2_098_071_598),
+            request_id: Some(0x2345),
         })
     ));
     assert!(parsed.udp_hints.contains(&UdpAppHint::Snmp));
