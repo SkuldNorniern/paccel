@@ -8,6 +8,7 @@ const SERVER_HELLO_HANDSHAKE_TYPE: u8 = 2;
 pub struct TlsClientHello {
     pub record_version: u16,
     pub handshake_version: u16,
+    pub client_random: [u8; 32],
     pub cipher_suites: Vec<u16>,
     pub server_name: Option<String>,
     pub alpn: Vec<String>,
@@ -63,7 +64,9 @@ pub fn parse_tls_client_hello(payload: &[u8]) -> Result<TlsClientHello, LayerErr
     let mut offset = 0;
 
     let handshake_version = take_u16(hello, &mut offset)?;
-    take(hello, &mut offset, 32)?;
+    let client_random_bytes = take(hello, &mut offset, 32)?;
+    let mut client_random = [0u8; 32];
+    client_random.copy_from_slice(client_random_bytes);
 
     let session_id_length = usize::from(take_u8(hello, &mut offset)?);
     take(hello, &mut offset, session_id_length)?;
@@ -85,6 +88,7 @@ pub fn parse_tls_client_hello(payload: &[u8]) -> Result<TlsClientHello, LayerErr
     let mut parsed = TlsClientHello {
         record_version,
         handshake_version,
+        client_random,
         cipher_suites,
         server_name: None,
         alpn: Vec::new(),
@@ -381,6 +385,7 @@ mod tests {
         TlsClientHello {
             record_version: 0,
             handshake_version: 0,
+            client_random: [0u8; 32],
             cipher_suites: Vec::new(),
             server_name: None,
             alpn: Vec::new(),
