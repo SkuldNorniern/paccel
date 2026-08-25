@@ -39,6 +39,13 @@ fn tshark_available() -> bool {
         .unwrap_or(false)
 }
 
+/// Set in CI's dedicated differential job so a missing tshark fails the
+/// build instead of silently skipping - the soft-skip below stays the
+/// default for local `cargo test` on hosts without Wireshark installed.
+fn tshark_required() -> bool {
+    std::env::var("PACCEL_REQUIRE_TSHARK").is_ok()
+}
+
 fn tshark_rows(path: &str) -> Vec<TsharkRow> {
     let output = Command::new("tshark")
         .args([
@@ -92,23 +99,26 @@ fn tshark_rows(path: &str) -> Vec<TsharkRow> {
         .collect()
 }
 
-/// Assert equality only when both sides carry a value; a field absent from
-/// either tool is not evidence of disagreement.
+/// Requires exact agreement, symmetrically: if tshark extracted a value,
+/// paccel must have extracted the same one (a paccel `None` here is a real
+/// false negative, not a benign gap) - and if tshark found nothing, paccel
+/// asserting a value would be paccel hallucinating a field tshark didn't see.
 fn compare(field: &str, path: &str, idx: usize, paccel: Option<String>, tshark: &str) {
-    if let Some(value) = paccel
-        && !tshark.is_empty()
-    {
-        assert_eq!(
-            value.to_lowercase(),
-            tshark.to_lowercase(),
-            "{field} mismatch in {path} frame {idx}: paccel={value} tshark={tshark}"
-        );
-    }
+    let expected = (!tshark.is_empty()).then(|| tshark.to_lowercase());
+    let actual = paccel.map(|value| value.to_lowercase());
+    assert_eq!(
+        actual, expected,
+        "{field} mismatch in {path} frame {idx}: paccel={actual:?} tshark={tshark:?}"
+    );
 }
 
 #[test]
 fn paccel_agrees_with_tshark_on_fixtures() {
     if !tshark_available() {
+        assert!(
+            !tshark_required(),
+            "tshark is required (PACCEL_REQUIRE_TSHARK set) but not found on PATH"
+        );
         eprintln!("tshark not found on PATH; skipping differential test");
         return;
     }
