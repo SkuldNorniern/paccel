@@ -37,12 +37,12 @@ use crate::layer::application::smb2::Smb2Header;
 use crate::layer::application::smtp::SmtpMessage;
 use crate::layer::application::snmp::SnmpMessage;
 use crate::layer::application::ssdp::SsdpMessage;
-use crate::layer::application::ssh::SshBanner;
+use crate::layer::application::ssh::{SshBanner, SshKexInit};
 use crate::layer::application::stun::StunMessage;
 use crate::layer::application::syslog::SyslogMessage;
 use crate::layer::application::telnet::TelnetCommand;
 use crate::layer::application::tftp::TftpMessage;
-use crate::layer::application::tls::TlsClientHello;
+use crate::layer::application::tls::{TlsClientHello, TlsServerHello};
 use crate::layer::application::vrrp::VrrpHeader;
 use crate::layer::datalink::arp::ArpPacket;
 use crate::layer::datalink::dot11::{Dot11Frame, RadiotapHeader};
@@ -544,6 +544,7 @@ pub struct ParsedPacket {
     pub snmp: Option<SnmpMessage>,
     pub ntp: Option<NtpMessage>,
     pub tls: Option<TlsClientHello>,
+    pub tls_server_hello: Option<TlsServerHello>,
     pub http: Option<HttpMessage>,
     pub ssdp: Option<SsdpMessage>,
     pub nat_pmp: Option<NatPmpMessage>,
@@ -564,6 +565,7 @@ pub struct ParsedPacket {
     pub mqtt: Option<MqttMessage>,
     pub modbus: Option<ModbusMessage>,
     pub ssh: Option<SshBanner>,
+    pub ssh_kex_init: Option<SshKexInit>,
     pub coap: Option<CoapMessage>,
     pub kerberos: Option<KerberosMessage>,
     pub stun: Option<StunMessage>,

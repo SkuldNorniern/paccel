@@ -40,7 +40,7 @@ pub use crate::layer::application::smb2::Smb2Header;
 pub use crate::layer::application::smtp::SmtpMessage;
 pub use crate::layer::application::snmp::{SnmpMessage, SnmpPduType};
 pub use crate::layer::application::ssdp::SsdpMessage;
-pub use crate::layer::application::ssh::SshBanner;
+pub use crate::layer::application::ssh::{SshBanner, SshKexInit};
 pub use crate::layer::application::stun::StunMessage;
 pub use crate::layer::application::syslog::SyslogMessage;
 pub use crate::layer::application::telnet::TelnetCommand;
@@ -761,6 +761,7 @@ fn apply_transport_parse(parsed: &mut ParsedPacket, transport_parse: transport::
     parsed.snmp = transport_parse.snmp;
     parsed.ntp = transport_parse.ntp;
     parsed.tls = transport_parse.tls;
+    parsed.tls_server_hello = transport_parse.tls_server_hello;
     parsed.http = transport_parse.http;
     parsed.ssdp = transport_parse.ssdp;
     parsed.nat_pmp = transport_parse.nat_pmp;
@@ -781,6 +782,7 @@ fn apply_transport_parse(parsed: &mut ParsedPacket, transport_parse: transport::
     parsed.mqtt = transport_parse.mqtt;
     parsed.modbus = transport_parse.modbus;
     parsed.ssh = transport_parse.ssh;
+    parsed.ssh_kex_init = transport_parse.ssh_kex_init;
     parsed.coap = transport_parse.coap;
     parsed.kerberos = transport_parse.kerberos;
     parsed.stun = transport_parse.stun;

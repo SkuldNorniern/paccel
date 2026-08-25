@@ -604,6 +604,27 @@ fn tls12_sni_fixture_frame_one_has_sni() {
 }
 
 #[test]
+fn tls12_sni_fixture_frame_two_is_server_hello() {
+    let bytes = include_bytes!("pcaps/protocol-gaps/tls12_sni.pcapng");
+    let frame = iter_capture_frames(bytes)
+        .expect("pcap should parse")
+        .nth(1)
+        .expect("capture should contain frame 2")
+        .expect("capture frame should parse");
+    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
+        .expect("packet should parse");
+    let server_hello = parsed
+        .tls_server_hello
+        .as_ref()
+        .expect("ServerHello should be present");
+
+    assert_eq!(server_hello.record_version, 0x0303);
+    assert_eq!(server_hello.handshake_version, 0x0303);
+    assert_eq!(server_hello.cipher_suite, 0xc02f);
+    assert_eq!(server_hello.extension_types, vec![65281, 0, 11, 16, 23]);
+}
+
+#[test]
 fn wireguard_psk_fixture_frame_one_is_handshake_initiation() {
     let bytes = include_bytes!("pcaps/protocol-gaps/wireguard_psk.pcap");
     let frame = iter_capture_frames(bytes)
@@ -1104,6 +1125,35 @@ fn ssh_banner_fixture_frame_four_parses_openssh_client_banner() {
 
     assert_eq!(ssh.protocol_version, "2.0");
     assert_eq!(ssh.software_version, "OpenSSH_7.6p1");
+}
+
+#[test]
+fn ssh_banner_fixture_frame_eight_is_client_kexinit() {
+    let bytes = include_bytes!("pcaps/protocol-gaps/ssh_banner.pcapng");
+    let frame = iter_capture_frames(bytes)
+        .expect("pcapng should parse")
+        .nth(7)
+        .expect("capture should contain frame 8")
+        .expect("capture frame should parse");
+    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
+        .expect("packet should parse");
+    let kex = parsed
+        .ssh_kex_init
+        .as_ref()
+        .expect("SSH KEXINIT should be present");
+
+    assert_eq!(
+        kex.kex_algorithms,
+        vec!["curve25519-sha256".to_string(), "ext-info-c".to_string()]
+    );
+    assert_eq!(
+        kex.encryption_algorithms_client_to_server,
+        vec!["aes128-gcm@openssh.com".to_string()]
+    );
+    assert_eq!(
+        kex.mac_algorithms_client_to_server,
+        vec!["hmac-sha2-256".to_string()]
+    );
 }
 
 #[test]
