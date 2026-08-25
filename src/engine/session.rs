@@ -1,6 +1,6 @@
 //! Opt-in TCP session tracking and streaming application-layer probing.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::net::IpAddr;
 
 use crate::engine::{BuiltinPacketParser, ParsedPacket, TcpStreamReassembler, TransportSegment};
@@ -9,6 +9,7 @@ use crate::layer::application::tls::{TlsClientHello, parse_tls_client_hello};
 use crate::layer::transport::tcp::TcpHeader;
 
 const DEFAULT_MAX_PROBE_BYTES: usize = 65_536;
+const DEFAULT_MAX_PROBE_FLOWS: usize = 65_536;
 
 /// An application-layer message recognized in a reassembled TCP stream.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -59,6 +60,8 @@ pub struct SessionTracker {
     tcp: TcpStreamReassembler,
     probes: HashMap<DirectionKey, ProbeState>,
     max_probe_bytes: usize,
+    max_probe_flows: usize,
+    insertion_order: VecDeque<DirectionKey>,
 }
 
 impl SessionTracker {
@@ -75,7 +78,16 @@ impl SessionTracker {
             tcp: TcpStreamReassembler::new(),
             probes: HashMap::new(),
             max_probe_bytes,
+            max_probe_flows: DEFAULT_MAX_PROBE_FLOWS,
+            insertion_order: VecDeque::new(),
         }
+    }
+
+    /// Overrides the maximum number of concurrently tracked probe directions.
+    #[must_use]
+    pub fn with_max_probe_flows(mut self, max_probe_flows: usize) -> Self {
+        self.max_probe_flows = max_probe_flows;
+        self
     }
 
     /// Offers an Ethernet frame and returns the first HTTP or TLS message found in its direction.
@@ -102,7 +114,15 @@ impl SessionTracker {
             payload,
         );
 
-        let state = self.probes.entry(key).or_default();
+        if !self.probes.contains_key(&key) {
+            if self.max_probe_flows == 0 {
+                return None;
+            }
+            self.evict_until_room();
+            self.probes.insert(key.clone(), ProbeState::default());
+            self.insertion_order.push_back(key.clone());
+        }
+        let state = self.probes.get_mut(&key)?;
         if state.done {
             return None;
         }
@@ -130,6 +150,7 @@ impl SessionTracker {
         let flow = normalized_flow(src, src_port, dst, dst_port);
         let previous_len = self.probes.len();
         self.probes.retain(|key, _| key.flow != flow);
+        self.insertion_order.retain(|key| key.flow != flow);
         self.tcp.remove_flow(src, src_port, dst, dst_port) || self.probes.len() != previous_len
     }
 
@@ -137,6 +158,17 @@ impl SessionTracker {
     pub fn clear(&mut self) {
         self.tcp.clear();
         self.probes.clear();
+        self.insertion_order.clear();
+    }
+
+    fn evict_until_room(&mut self) {
+        while self.probes.len() >= self.max_probe_flows {
+            let Some(oldest) = self.insertion_order.pop_front() else {
+                self.probes.clear();
+                break;
+            };
+            self.probes.remove(&oldest);
+        }
     }
 }
 
@@ -245,11 +277,12 @@ fn normalized_flow(src: IpAddr, src_port: u16, dst: IpAddr, dst_port: u16) -> Fl
 #[allow(clippy::panic, clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use std::net::Ipv4Addr;
 
     const SRC_PORT: u16 = 49_152;
     const DST_PORT: u16 = 443;
 
-    fn tcp_frame(sequence: u32, syn: bool, payload: &[u8]) -> Vec<u8> {
+    fn tcp_frame(src_port: u16, sequence: u32, syn: bool, payload: &[u8]) -> Vec<u8> {
         let tcp_len = 20usize.saturating_add(payload.len());
         let ip_len = 20usize.saturating_add(tcp_len);
         let ip_len = u16::try_from(ip_len).unwrap_or(u16::MAX);
@@ -266,7 +299,7 @@ mod tests {
         frame.extend_from_slice(&[10, 0, 0, 1]);
         frame.extend_from_slice(&[10, 0, 0, 2]);
 
-        frame.extend_from_slice(&SRC_PORT.to_be_bytes());
+        frame.extend_from_slice(&src_port.to_be_bytes());
         frame.extend_from_slice(&DST_PORT.to_be_bytes());
         frame.extend_from_slice(&sequence.to_be_bytes());
         frame.extend_from_slice(&0u32.to_be_bytes());
@@ -380,8 +413,9 @@ mod tests {
     fn parses_http_across_tcp_segments() {
         let payload = b"GET /index.html HTTP/1.1\r\nHost: example.com\r\n\r\n";
         let split = 12;
-        let first = tcp_frame(1_000, false, &payload[..split]);
+        let first = tcp_frame(SRC_PORT, 1_000, false, &payload[..split]);
         let second = tcp_frame(
+            SRC_PORT,
             1_000u32.saturating_add(u32::try_from(split).unwrap_or(u32::MAX)),
             false,
             &payload[split..],
@@ -403,8 +437,9 @@ mod tests {
     fn parses_tls_client_hello_across_tcp_segments() {
         let payload = tls_client_hello();
         let split = 12;
-        let first = tcp_frame(2_000, false, &payload[..split]);
+        let first = tcp_frame(SRC_PORT, 2_000, false, &payload[..split]);
         let second = tcp_frame(
+            SRC_PORT,
             2_000u32.saturating_add(u32::try_from(split).unwrap_or(u32::MAX)),
             false,
             &payload[split..],
@@ -425,9 +460,10 @@ mod tests {
     fn parses_out_of_order_segments_after_syn() {
         let payload = b"GET /index.html HTTP/1.1\r\nHost: example.com\r\n\r\n";
         let split = 12;
-        let syn = tcp_frame(999, true, &[]);
-        let first = tcp_frame(1_000, false, &payload[..split]);
+        let syn = tcp_frame(SRC_PORT, 999, true, &[]);
+        let first = tcp_frame(SRC_PORT, 1_000, false, &payload[..split]);
         let second = tcp_frame(
+            SRC_PORT,
             1_000u32.saturating_add(u32::try_from(split).unwrap_or(u32::MAX)),
             false,
             &payload[split..],
@@ -446,5 +482,49 @@ mod tests {
             }
             _ => panic!("expected HTTP request"),
         }
+    }
+
+    #[test]
+    fn probe_flow_count_is_bounded() {
+        let mut tracker = SessionTracker::new().with_max_probe_flows(2);
+
+        for src_port in [1_000, 1_001, 1_002, 1_003] {
+            let frame = tcp_frame(src_port, 100, true, &[]);
+            assert!(tracker.offer_frame(&frame).is_none());
+            assert!(tracker.probes.len() <= 2);
+        }
+    }
+
+    #[test]
+    fn evicted_probe_flow_starts_with_fresh_state() {
+        let mut tracker = SessionTracker::new().with_max_probe_flows(2);
+        let prefix = tcp_frame(1_000, 100, false, b"G");
+        assert!(tracker.offer_frame(&prefix).is_none());
+        assert!(
+            tracker
+                .offer_frame(&tcp_frame(1_001, 200, true, &[]))
+                .is_none()
+        );
+        assert!(
+            tracker
+                .offer_frame(&tcp_frame(1_002, 300, true, &[]))
+                .is_none()
+        );
+
+        let continuation = b"ET / HTTP/1.1\r\nHost: example.com\r\n\r\n";
+        let resumed = tcp_frame(1_000, 101, false, continuation);
+        assert!(tracker.offer_frame(&resumed).is_none());
+
+        let key = direction_key(
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            1_000,
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            DST_PORT,
+        );
+        assert_eq!(
+            tracker.probes.get(&key).map(|state| state.bytes.as_slice()),
+            Some(continuation.as_slice())
+        );
+        assert_eq!(tracker.probes.len(), 2);
     }
 }
