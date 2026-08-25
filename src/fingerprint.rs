@@ -230,6 +230,7 @@ mod tests {
         TlsClientHello {
             record_version: 0,
             handshake_version: 0,
+            client_random: [0u8; 32],
             cipher_suites: Vec::new(),
             server_name: None,
             alpn: Vec::new(),
