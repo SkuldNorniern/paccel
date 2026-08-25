@@ -2,6 +2,7 @@ use crate::layer::LayerError;
 
 const TLS_HANDSHAKE_CONTENT_TYPE: u8 = 22;
 const CLIENT_HELLO_HANDSHAKE_TYPE: u8 = 1;
+const SERVER_HELLO_HANDSHAKE_TYPE: u8 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TlsClientHello {
@@ -11,6 +12,26 @@ pub struct TlsClientHello {
     pub server_name: Option<String>,
     pub alpn: Vec<String>,
     pub supported_versions: Vec<u16>,
+    /// Extension type IDs in wire order, unfiltered (including any GREASE
+    /// values) - JA3/JA4-style fingerprinting needs the raw order/set, and
+    /// decides its own GREASE-filtering policy on top of this.
+    pub extension_types: Vec<u16>,
+}
+
+/// ServerHello (RFC 8446 sec 4.1.3). Unlike ClientHello, `cipher_suite` is a
+/// single negotiated value, not a list, and ALPN carries at most one selected
+/// protocol. Certificate/ServerKeyExchange are NOT covered here: TLS 1.3
+/// encrypts everything after ServerHello, and even for TLS 1.2 the
+/// Certificate message routinely spans multiple TCP segments in real
+/// traffic, which a stateless per-packet parser can't reassemble.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TlsServerHello {
+    pub record_version: u16,
+    pub handshake_version: u16,
+    pub cipher_suite: u16,
+    pub alpn: Option<String>,
+    pub supported_version: Option<u16>,
+    pub extension_types: Vec<u16>,
 }
 
 pub fn parse_tls_client_hello(payload: &[u8]) -> Result<TlsClientHello, LayerError> {
@@ -65,9 +86,107 @@ pub fn parse_tls_client_hello(payload: &[u8]) -> Result<TlsClientHello, LayerErr
         server_name: None,
         alpn: Vec::new(),
         supported_versions: Vec::new(),
+        extension_types: Vec::new(),
     };
     parse_extensions(extensions, &mut parsed);
     Ok(parsed)
+}
+
+pub fn parse_tls_server_hello(payload: &[u8]) -> Result<TlsServerHello, LayerError> {
+    if payload.len() < 5 {
+        return Err(LayerError::InvalidLength);
+    }
+    if payload[0] != TLS_HANDSHAKE_CONTENT_TYPE {
+        return Err(LayerError::InvalidHeader);
+    }
+
+    let record_version = read_u16(payload, 1)?;
+    let record_length = usize::from(read_u16(payload, 3)?);
+    let record_end = 5usize.saturating_add(record_length).min(payload.len());
+    let record = &payload[5..record_end];
+
+    if record.len() < 4 {
+        return Err(LayerError::InvalidLength);
+    }
+    if record[0] != SERVER_HELLO_HANDSHAKE_TYPE {
+        return Err(LayerError::InvalidHeader);
+    }
+
+    let handshake_length = read_u24(record, 1)?;
+    let handshake_end = 4usize.saturating_add(handshake_length).min(record.len());
+    let hello = &record[4..handshake_end];
+    let mut offset = 0;
+
+    let handshake_version = take_u16(hello, &mut offset)?;
+    take(hello, &mut offset, 32)?;
+
+    let session_id_length = usize::from(take_u8(hello, &mut offset)?);
+    take(hello, &mut offset, session_id_length)?;
+
+    let cipher_suite = take_u16(hello, &mut offset)?;
+    take_u8(hello, &mut offset)?; // compression method
+
+    let extensions_length = usize::from(take_u16(hello, &mut offset)?);
+    let available_extensions_length = extensions_length.min(hello.len() - offset);
+    let extensions = take(hello, &mut offset, available_extensions_length)?;
+
+    let mut parsed = TlsServerHello {
+        record_version,
+        handshake_version,
+        cipher_suite,
+        alpn: None,
+        supported_version: None,
+        extension_types: Vec::new(),
+    };
+    parse_server_extensions(extensions, &mut parsed);
+    Ok(parsed)
+}
+
+fn parse_server_extensions(extensions: &[u8], parsed: &mut TlsServerHello) {
+    let mut offset = 0;
+    while offset < extensions.len() {
+        let Some(header_end) = offset.checked_add(4) else {
+            break;
+        };
+        if header_end > extensions.len() {
+            break;
+        }
+
+        let extension_type = u16::from_be_bytes([extensions[offset], extensions[offset + 1]]);
+        let extension_length = usize::from(u16::from_be_bytes([
+            extensions[offset + 2],
+            extensions[offset + 3],
+        ]));
+        let Some(data_end) = header_end.checked_add(extension_length) else {
+            break;
+        };
+        if data_end > extensions.len() {
+            break;
+        }
+        parsed.extension_types.push(extension_type);
+
+        let data = &extensions[header_end..data_end];
+        match extension_type {
+            // ALPN (16): server selects exactly one protocol.
+            16 => {
+                if let Some((protocol_length, rest)) = data.get(2).zip(data.get(3..)) {
+                    let protocol_length = usize::from(*protocol_length);
+                    if let Some(protocol) = rest.get(..protocol_length) {
+                        parsed.alpn = Some(String::from_utf8_lossy(protocol).into_owned());
+                    }
+                }
+            }
+            // supported_versions (43): server sends a single selected version, not a list.
+            43 => {
+                if let Some(bytes) = data.get(..2) {
+                    parsed.supported_version = Some(u16::from_be_bytes([bytes[0], bytes[1]]));
+                }
+            }
+            _ => {}
+        }
+
+        offset = data_end;
+    }
 }
 
 fn parse_extensions(extensions: &[u8], parsed: &mut TlsClientHello) {
@@ -91,6 +210,7 @@ fn parse_extensions(extensions: &[u8], parsed: &mut TlsClientHello) {
         if data_end > extensions.len() {
             break;
         }
+        parsed.extension_types.push(extension_type);
 
         let data = &extensions[header_end..data_end];
         let valid = match extension_type {
