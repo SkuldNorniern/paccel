@@ -115,6 +115,7 @@ Flow/state tracking should be composed on the integration side (for example insi
 | `eigrp_hello.cap` | [Wireshark SampleCaptures: `[redacted]`]([redacted]) |
 | `ftp_session.cap` | [Wireshark SampleCaptures: `[redacted]`]([redacted]) (trimmed to `tcp.port==21`, reformatted from NetMon to pcapng) |
 | `hsrp_hello.pcap` | [Wireshark SampleCaptures: `hsrp.pcap`]([redacted]) |
+| `http2_get_hello.pcap` | Self-generated on loopback: `curl --http2-prior-knowledge` against a local Python [`h2`](https://github.com/python-hyper/h2) library server, captured with `tcpdump`; not third-party/GPL data |
 | `ikev2_sa_init.pcap` | [Wireshark test suite: `[redacted]`]([redacted]) |
 | `imap_banner.cap` | [Wireshark SampleCaptures: `imap.cap`]([redacted]) |
 | `lacp.pcap` | [Wireshark SampleCaptures: `[redacted]`]([redacted]) |

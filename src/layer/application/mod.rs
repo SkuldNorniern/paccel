@@ -9,6 +9,7 @@ pub mod eigrp;
 pub mod ftp;
 pub mod hsrp;
 pub mod http;
+pub mod http2;
 pub mod imap;
 pub mod isakmp;
 pub mod kerberos;
