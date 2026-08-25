@@ -98,6 +98,8 @@ pub(super) fn parse_ipv6_header(data: &[u8]) -> Result<Ipv6Header, LayerError> {
         hop_limit,
         source,
         destination,
+        resolved_next_header: next_header,
+        transport_header_offset: 40,
     })
 }
 

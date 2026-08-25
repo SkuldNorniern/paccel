@@ -166,7 +166,10 @@ fn tcp_payload<'a>(raw: &'a [u8], parsed: &ParsedPacket, tcp: &TcpHeader) -> Opt
         )
     } else {
         let ipv6 = parsed.ipv6.as_ref()?;
-        (40, 40usize.checked_add(usize::from(ipv6.payload_length))?)
+        (
+            usize::from(ipv6.transport_header_offset),
+            40usize.checked_add(usize::from(ipv6.payload_length))?,
+        )
     };
     let ip_end = l3_offset.checked_add(ip_packet_len)?.min(raw.len());
     let tcp_offset = l3_offset.checked_add(ip_header_len)?;
@@ -273,6 +276,53 @@ mod tests {
         frame.extend_from_slice(&[0, 0, 0, 0]);
         frame.extend_from_slice(payload);
         frame
+    }
+
+    fn ipv6_hop_by_hop_tcp_frame(payload: &[u8]) -> Vec<u8> {
+        // Hop-by-Hop (next_header=0) wrapping TCP: next_header=6, hdr_ext_len=0
+        // (8-byte ext header), then a minimal TCP header, then payload.
+        let hop_by_hop = [6u8, 0, 0, 0, 0, 0, 0, 0];
+        let tcp_len = 20usize + payload.len();
+        let l4_len = hop_by_hop.len() + tcp_len;
+        let mut frame = Vec::with_capacity(14 + 40 + l4_len);
+        frame.extend_from_slice(&[0, 1, 2, 3, 4, 5]);
+        frame.extend_from_slice(&[6, 7, 8, 9, 10, 11]);
+        frame.extend_from_slice(&0x86ddu16.to_be_bytes());
+
+        frame.extend_from_slice(&[0x60, 0x00, 0x00, 0x00]);
+        frame.extend_from_slice(&u16::try_from(l4_len).unwrap_or(u16::MAX).to_be_bytes());
+        frame.push(0); // next_header: Hop-by-Hop
+        frame.push(64);
+        frame.extend_from_slice(&[0; 15]);
+        frame.push(1);
+        frame.extend_from_slice(&[0; 15]);
+        frame.push(2);
+
+        frame.extend_from_slice(&hop_by_hop);
+
+        frame.extend_from_slice(&SRC_PORT.to_be_bytes());
+        frame.extend_from_slice(&DST_PORT.to_be_bytes());
+        frame.extend_from_slice(&1u32.to_be_bytes());
+        frame.extend_from_slice(&0u32.to_be_bytes());
+        frame.push(0x50);
+        frame.push(0x18);
+        frame.extend_from_slice(&0x4000u16.to_be_bytes());
+        frame.extend_from_slice(&[0, 0, 0, 0]);
+        frame.extend_from_slice(payload);
+        frame
+    }
+
+    #[test]
+    fn tcp_payload_locates_data_past_ipv6_hop_by_hop_extension_header() {
+        let payload = b"hello";
+        let frame = ipv6_hop_by_hop_tcp_frame(payload);
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+        let Some(TransportSegment::Tcp(tcp)) = parsed.transport.as_ref() else {
+            panic!("expected TCP transport");
+        };
+
+        let found = tcp_payload(&frame, &parsed, tcp).expect("payload should be located");
+        assert_eq!(found, payload);
     }
 
     fn tls_client_hello() -> Vec<u8> {
