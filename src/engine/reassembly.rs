@@ -13,6 +13,7 @@ const DEFAULT_MAX_DATAGRAM_BYTES: usize = 65_535;
 const DEFAULT_MAX_CONCURRENT_DATAGRAMS: usize = 1_024;
 const DEFAULT_MAX_BUFFERED_BYTES: usize = 1_048_576;
 const DEFAULT_MAX_GAP: usize = 65_535;
+const DEFAULT_MAX_FLOWS: usize = 65_536;
 const TCP_SEQUENCE_HALF_RANGE: u32 = 1 << 31;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -288,7 +289,9 @@ struct TcpFlowState {
 pub struct TcpStreamReassembler {
     max_buffered_bytes: usize,
     max_gap: usize,
+    max_flows: usize,
     flows: HashMap<TcpFlowKey, TcpFlowState>,
+    insertion_order: VecDeque<TcpFlowKey>,
 }
 
 impl TcpStreamReassembler {
@@ -304,8 +307,17 @@ impl TcpStreamReassembler {
         Self {
             max_buffered_bytes,
             max_gap,
+            max_flows: DEFAULT_MAX_FLOWS,
             flows: HashMap::new(),
+            insertion_order: VecDeque::new(),
         }
+    }
+
+    /// Overrides the maximum number of concurrently tracked TCP flows.
+    #[must_use]
+    pub fn with_max_flows(mut self, max_flows: usize) -> Self {
+        self.max_flows = max_flows;
+        self
     }
 
     /// Offers one TCP segment and returns all newly contiguous payload bytes for its direction.
@@ -325,7 +337,17 @@ impl TcpStreamReassembler {
             return Vec::new();
         };
         let (key, direction) = normalized_flow(src, src_port, dst, dst_port);
-        let flow = self.flows.entry(key).or_default();
+        if !self.flows.contains_key(&key) {
+            if self.max_flows == 0 {
+                return Vec::new();
+            }
+            self.evict_until_room();
+            self.flows.insert(key.clone(), TcpFlowState::default());
+            self.insertion_order.push_back(key.clone());
+        }
+        let Some(flow) = self.flows.get_mut(&key) else {
+            return Vec::new();
+        };
         let state = &mut flow.directions[direction];
 
         if state.expected.is_none() {
@@ -354,12 +376,25 @@ impl TcpStreamReassembler {
     /// Removes both directions of a normalized flow, returning whether it existed.
     pub fn remove_flow(&mut self, src: IpAddr, src_port: u16, dst: IpAddr, dst_port: u16) -> bool {
         let (key, _) = normalized_flow(src, src_port, dst, dst_port);
-        self.flows.remove(&key).is_some()
+        let removed = self.flows.remove(&key).is_some();
+        self.insertion_order.retain(|queued| queued != &key);
+        removed
     }
 
     /// Removes all flow state.
     pub fn clear(&mut self) {
         self.flows.clear();
+        self.insertion_order.clear();
+    }
+
+    fn evict_until_room(&mut self) {
+        while self.flows.len() >= self.max_flows {
+            let Some(oldest) = self.insertion_order.pop_front() else {
+                self.flows.clear();
+                break;
+            };
+            self.flows.remove(&oldest);
+        }
     }
 
     fn accept_payload(
@@ -724,5 +759,47 @@ mod tests {
             reassembler.offer(src, 1000, dst, 80, 1, false, false, b"ok"),
             b"ok"
         );
+    }
+
+    #[test]
+    fn tcp_flow_count_is_bounded() {
+        let (src, dst) = endpoints();
+        let mut reassembler = TcpStreamReassembler::new().with_max_flows(2);
+
+        for src_port in [1_000, 1_001, 1_002, 1_003] {
+            assert!(
+                reassembler
+                    .offer(src, src_port, dst, 80, 100, true, false, b"")
+                    .is_empty()
+            );
+            assert!(reassembler.flows.len() <= 2);
+        }
+    }
+
+    #[test]
+    fn tcp_evicted_flow_starts_with_fresh_sequence_state() {
+        let (src, dst) = endpoints();
+        let mut reassembler = TcpStreamReassembler::new().with_max_flows(2);
+
+        assert_eq!(
+            reassembler.offer(src, 1_000, dst, 80, 100, true, false, b"old"),
+            b"old"
+        );
+        assert!(
+            reassembler
+                .offer(src, 1_001, dst, 80, 200, true, false, b"")
+                .is_empty()
+        );
+        assert!(
+            reassembler
+                .offer(src, 1_002, dst, 80, 300, true, false, b"")
+                .is_empty()
+        );
+
+        assert_eq!(
+            reassembler.offer(src, 1_000, dst, 80, 100, true, false, b"fresh"),
+            b"fresh"
+        );
+        assert_eq!(reassembler.flows.len(), 2);
     }
 }
