@@ -71,6 +71,42 @@ jobs:
       - name: Test (all features)
         run: cargo test --all-targets --all-features
 
+  differential:
+    name: differential (tshark oracle)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install stable toolchain
+        run: rustup toolchain install stable --profile minimal
+      - uses: Swatinem/rust-cache@v2
+      - name: Install tshark
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y tshark
+      - name: Run differential test (tshark required)
+        env:
+          PACCEL_REQUIRE_TSHARK: "1"
+        run: cargo test --test differential
+
+  package:
+    name: package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install stable toolchain
+        run: rustup toolchain install stable --profile minimal
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo package
+        run: cargo package --all-features
+      - name: cargo publish --dry-run
+        run: cargo publish --dry-run --all-features
+      - name: Confirm test fixtures never ship in the package
+        run: |
+          if cargo package --list --all-features | grep -q '^tests/pcaps/'; then
+            echo "tests/pcaps/ leaked into the published package" >&2
+            exit 1
+          fi
+
   fuzz-smoke:
     name: fuzz smoke
     runs-on: ubuntu-latest
