@@ -2138,6 +2138,33 @@ mod tests {
     }
 
     #[test]
+    fn flow_key_resolves_protocol_past_ipv6_hop_by_hop_extension_header() {
+        // Hop-by-Hop (next_header=0) wrapping TCP: next_header=6, hdr_ext_len=0
+        // (8-byte header: 2-byte prefix + 6 bytes padding), then a minimal TCP header.
+        let hop_by_hop = [6u8, 0, 0, 0, 0, 0, 0, 0];
+        let tcp = [
+            0x00, 0x50, 0x01, 0xbb, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x02, 0x50, 0x10,
+            0x10, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ];
+        let mut l4 = hop_by_hop.to_vec();
+        l4.extend_from_slice(&tcp);
+        let frame = build_ethernet_ipv6_l4_frame(0, &l4);
+
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+        let ipv6 = parsed.ipv6.as_ref().expect("ipv6");
+        assert_eq!(
+            ipv6.next_header, 0,
+            "base header still names the ext header"
+        );
+        assert_eq!(ipv6.resolved_next_header, 6, "resolved past the ext header");
+        assert_eq!(ipv6.transport_header_offset, 48);
+        assert!(matches!(parsed.transport, Some(TransportSegment::Tcp(_))));
+
+        let flow_key = parsed.flow_key().expect("flow key");
+        assert_eq!(flow_key.protocol, 6, "must be TCP, not the ext header's 0");
+    }
+
+    #[test]
     fn parses_ndp_neighbor_solicitation_with_source_link_addr() {
         let target = "2001:db8::1234"
             .parse::<Ipv6Addr>()

@@ -593,7 +593,7 @@ impl ParsedPacket {
             (
                 IpAddr::V6(ipv6.source),
                 IpAddr::V6(ipv6.destination),
-                ipv6.next_header,
+                ipv6.resolved_next_header,
             )
         } else {
             return None;

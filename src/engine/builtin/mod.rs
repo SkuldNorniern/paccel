@@ -281,7 +281,7 @@ impl BuiltinPacketParser {
                 Ok(parsed)
             }
             ethertype::IPV6 => {
-                let ipv6 = parse_ipv6_header(l3_bytes)?;
+                let mut ipv6 = parse_ipv6_header(l3_bytes)?;
 
                 let payload_len = ipv6.payload_length as usize;
                 let declared_l4_end = 40 + payload_len;
@@ -314,6 +314,9 @@ impl BuiltinPacketParser {
                 if state.l4_offset > ipv6_payload.len() {
                     return Err(LayerError::InvalidLength);
                 }
+
+                ipv6.resolved_next_header = state.next_header;
+                ipv6.transport_header_offset = u16::try_from(state.l4_offset).unwrap_or(u16::MAX);
 
                 if state.depth_limit_hit {
                     parsed.warnings.push(ParseWarning {
