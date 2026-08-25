@@ -20,6 +20,10 @@ pub struct PcapFrame<'a> {
 pub enum TsResolution {
     Micro,
     Nano,
+    /// Any resolution other than exactly micro/nanosecond (e.g. millisecond,
+    /// or a non-power-of-ten/two interface resolution) - `timestamp_subsec`
+    /// is a raw count of this many ticks per second, not microseconds.
+    Other(u64),
 }
 
 pub struct PcapFrameIter<'a> {
@@ -472,10 +476,10 @@ fn parse_pcapng_simple_packet<'a>(
 }
 
 fn resolution_from_ticks(ticks_per_second: u64) -> TsResolution {
-    if ticks_per_second == 1_000_000_000 {
-        TsResolution::Nano
-    } else {
-        TsResolution::Micro
+    match ticks_per_second {
+        1_000_000 => TsResolution::Micro,
+        1_000_000_000 => TsResolution::Nano,
+        other => TsResolution::Other(other),
     }
 }
 
@@ -761,5 +765,72 @@ mod tests {
         out.extend_from_slice(&(epb_total_len as u32).to_le_bytes());
 
         out
+    }
+
+    /// Builds a minimal pcapng (SHB + IDB with an `if_tsresol` option + EPB)
+    /// so a non-micro/non-nano interface resolution can be exercised.
+    fn build_pcapng_epb_with_tsresol(tsresol_byte: u8, frame: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+
+        out.extend_from_slice(&0x0a0d0d0au32.to_le_bytes());
+        out.extend_from_slice(&28u32.to_le_bytes());
+        out.extend_from_slice(&0x1a2b3c4du32.to_le_bytes());
+        out.extend_from_slice(&1u16.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&(-1i64).to_le_bytes());
+        out.extend_from_slice(&28u32.to_le_bytes());
+
+        // IDB: type/len, linktype/reserved, snaplen, if_tsresol option, endofopt, trailing len.
+        let idb_total_len: u32 = 16 + 8 + 4 + 4;
+        out.extend_from_slice(&1u32.to_le_bytes());
+        out.extend_from_slice(&idb_total_len.to_le_bytes());
+        out.extend_from_slice(&1u16.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&65535u32.to_le_bytes());
+        out.extend_from_slice(&9u16.to_le_bytes()); // PCAPNG_OPT_IF_TSRESOL
+        out.extend_from_slice(&1u16.to_le_bytes());
+        out.push(tsresol_byte);
+        out.extend_from_slice(&[0u8; 3]); // pad to 4 bytes
+        out.extend_from_slice(&0u16.to_le_bytes()); // endofopt code
+        out.extend_from_slice(&0u16.to_le_bytes()); // endofopt len
+        out.extend_from_slice(&idb_total_len.to_le_bytes());
+
+        let cap_len = frame.len();
+        let cap_padded = (cap_len + 3) & !3;
+        let epb_total_len = 32 + cap_padded;
+
+        out.extend_from_slice(&6u32.to_le_bytes());
+        out.extend_from_slice(&(epb_total_len as u32).to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes());
+        out.extend_from_slice(&1_500_000u32.to_le_bytes());
+        out.extend_from_slice(&(cap_len as u32).to_le_bytes());
+        out.extend_from_slice(&(cap_len as u32).to_le_bytes());
+        out.extend_from_slice(frame);
+        out.extend(std::iter::repeat_n(0u8, cap_padded - cap_len));
+        out.extend_from_slice(&(epb_total_len as u32).to_le_bytes());
+
+        out
+    }
+
+    #[test]
+    fn millisecond_interface_resolution_is_not_mislabeled_as_micro() {
+        let frame = [0xaa, 0xbb];
+        // 0x03 (MSB clear) = decimal exponent 3 -> 10^3 = 1000 ticks/second (milliseconds).
+        let bytes = build_pcapng_epb_with_tsresol(0x03, &frame);
+
+        let frames = parse_pcap_frames(&bytes).expect("pcapng should parse");
+        assert_eq!(frames[0].ts_resolution, TsResolution::Other(1_000));
+        assert_ne!(frames[0].ts_resolution, TsResolution::Micro);
+    }
+
+    #[test]
+    fn microsecond_interface_resolution_still_reports_micro() {
+        let frame = [0xaa, 0xbb];
+        // 0x06 -> 10^6 = 1_000_000 ticks/second, the common case.
+        let bytes = build_pcapng_epb_with_tsresol(0x06, &frame);
+
+        let frames = parse_pcap_frames(&bytes).expect("pcapng should parse");
+        assert_eq!(frames[0].ts_resolution, TsResolution::Micro);
     }
 }
