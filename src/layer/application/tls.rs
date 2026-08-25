@@ -48,7 +48,12 @@ pub fn parse_tls_client_hello(payload: &[u8]) -> Result<TlsClientHello, LayerErr
 
     let record_version = read_u16(payload, 1)?;
     let record_length = usize::from(read_u16(payload, 3)?);
-    let record_end = 5usize.saturating_add(record_length).min(payload.len());
+    let record_end = 5usize
+        .checked_add(record_length)
+        .ok_or(LayerError::InvalidLength)?;
+    if record_end > payload.len() {
+        return Err(LayerError::InsufficientData);
+    }
     let record = &payload[5..record_end];
 
     if record.len() < 4 {
@@ -59,7 +64,12 @@ pub fn parse_tls_client_hello(payload: &[u8]) -> Result<TlsClientHello, LayerErr
     }
 
     let handshake_length = read_u24(record, 1)?;
-    let handshake_end = 4usize.saturating_add(handshake_length).min(record.len());
+    let handshake_end = 4usize
+        .checked_add(handshake_length)
+        .ok_or(LayerError::InvalidLength)?;
+    if handshake_end > record.len() {
+        return Err(LayerError::InsufficientData);
+    }
     let hello = &record[4..handshake_end];
     let mut offset = 0;
 
@@ -82,8 +92,13 @@ pub fn parse_tls_client_hello(payload: &[u8]) -> Result<TlsClientHello, LayerErr
     take(hello, &mut offset, compression_methods_length)?;
 
     let extensions_length = usize::from(take_u16(hello, &mut offset)?);
-    let available_extensions_length = extensions_length.min(hello.len() - offset);
-    let extensions = take(hello, &mut offset, available_extensions_length)?;
+    let extensions_end = offset
+        .checked_add(extensions_length)
+        .ok_or(LayerError::InvalidLength)?;
+    if extensions_end > hello.len() {
+        return Err(LayerError::InsufficientData);
+    }
+    let extensions = take(hello, &mut offset, extensions_length)?;
 
     let mut parsed = TlsClientHello {
         record_version,
@@ -98,7 +113,9 @@ pub fn parse_tls_client_hello(payload: &[u8]) -> Result<TlsClientHello, LayerErr
         signature_algorithms: Vec::new(),
         extension_types: Vec::new(),
     };
-    parse_extensions(extensions, &mut parsed);
+    if !parse_extensions(extensions, &mut parsed) {
+        return Err(LayerError::InsufficientData);
+    }
     Ok(parsed)
 }
 
@@ -112,7 +129,12 @@ pub fn parse_tls_server_hello(payload: &[u8]) -> Result<TlsServerHello, LayerErr
 
     let record_version = read_u16(payload, 1)?;
     let record_length = usize::from(read_u16(payload, 3)?);
-    let record_end = 5usize.saturating_add(record_length).min(payload.len());
+    let record_end = 5usize
+        .checked_add(record_length)
+        .ok_or(LayerError::InvalidLength)?;
+    if record_end > payload.len() {
+        return Err(LayerError::InsufficientData);
+    }
     let record = &payload[5..record_end];
 
     if record.len() < 4 {
@@ -123,7 +145,12 @@ pub fn parse_tls_server_hello(payload: &[u8]) -> Result<TlsServerHello, LayerErr
     }
 
     let handshake_length = read_u24(record, 1)?;
-    let handshake_end = 4usize.saturating_add(handshake_length).min(record.len());
+    let handshake_end = 4usize
+        .checked_add(handshake_length)
+        .ok_or(LayerError::InvalidLength)?;
+    if handshake_end > record.len() {
+        return Err(LayerError::InsufficientData);
+    }
     let hello = &record[4..handshake_end];
     let mut offset = 0;
 
@@ -137,8 +164,13 @@ pub fn parse_tls_server_hello(payload: &[u8]) -> Result<TlsServerHello, LayerErr
     take_u8(hello, &mut offset)?; // compression method
 
     let extensions_length = usize::from(take_u16(hello, &mut offset)?);
-    let available_extensions_length = extensions_length.min(hello.len() - offset);
-    let extensions = take(hello, &mut offset, available_extensions_length)?;
+    let extensions_end = offset
+        .checked_add(extensions_length)
+        .ok_or(LayerError::InvalidLength)?;
+    if extensions_end > hello.len() {
+        return Err(LayerError::InsufficientData);
+    }
+    let extensions = take(hello, &mut offset, extensions_length)?;
 
     let mut parsed = TlsServerHello {
         record_version,
@@ -148,18 +180,20 @@ pub fn parse_tls_server_hello(payload: &[u8]) -> Result<TlsServerHello, LayerErr
         supported_version: None,
         extension_types: Vec::new(),
     };
-    parse_server_extensions(extensions, &mut parsed);
+    if !parse_server_extensions(extensions, &mut parsed) {
+        return Err(LayerError::InsufficientData);
+    }
     Ok(parsed)
 }
 
-fn parse_server_extensions(extensions: &[u8], parsed: &mut TlsServerHello) {
+fn parse_server_extensions(extensions: &[u8], parsed: &mut TlsServerHello) -> bool {
     let mut offset = 0;
     while offset < extensions.len() {
         let Some(header_end) = offset.checked_add(4) else {
-            break;
+            return false;
         };
         if header_end > extensions.len() {
-            break;
+            return false;
         }
 
         let extension_type = u16::from_be_bytes([extensions[offset], extensions[offset + 1]]);
@@ -168,10 +202,10 @@ fn parse_server_extensions(extensions: &[u8], parsed: &mut TlsServerHello) {
             extensions[offset + 3],
         ]));
         let Some(data_end) = header_end.checked_add(extension_length) else {
-            break;
+            return false;
         };
         if data_end > extensions.len() {
-            break;
+            return false;
         }
         parsed.extension_types.push(extension_type);
 
@@ -197,16 +231,17 @@ fn parse_server_extensions(extensions: &[u8], parsed: &mut TlsServerHello) {
 
         offset = data_end;
     }
+    true
 }
 
-fn parse_extensions(extensions: &[u8], parsed: &mut TlsClientHello) {
+fn parse_extensions(extensions: &[u8], parsed: &mut TlsClientHello) -> bool {
     let mut offset = 0;
     while offset < extensions.len() {
         let Some(header_end) = offset.checked_add(4) else {
-            break;
+            return false;
         };
         if header_end > extensions.len() {
-            break;
+            return false;
         }
 
         let extension_type = u16::from_be_bytes([extensions[offset], extensions[offset + 1]]);
@@ -215,10 +250,10 @@ fn parse_extensions(extensions: &[u8], parsed: &mut TlsClientHello) {
             extensions[offset + 3],
         ]));
         let Some(data_end) = header_end.checked_add(extension_length) else {
-            break;
+            return false;
         };
         if data_end > extensions.len() {
-            break;
+            return false;
         }
         parsed.extension_types.push(extension_type);
 
@@ -233,10 +268,11 @@ fn parse_extensions(extensions: &[u8], parsed: &mut TlsClientHello) {
             _ => true,
         };
         if !valid {
-            break;
+            return false;
         }
         offset = data_end;
     }
+    true
 }
 
 fn parse_u16_list(data: &[u8], values: &mut Vec<u16>) -> bool {
@@ -397,6 +433,115 @@ mod tests {
         }
     }
 
+    fn client_hello_record(extensions: &[u8]) -> Vec<u8> {
+        let mut hello = Vec::new();
+        hello.extend_from_slice(&0x0303u16.to_be_bytes());
+        hello.extend_from_slice(&[0u8; 32]);
+        hello.push(0);
+        hello.extend_from_slice(&2u16.to_be_bytes());
+        hello.extend_from_slice(&0x1301u16.to_be_bytes());
+        hello.extend_from_slice(&[1, 0]);
+        let extensions_length =
+            u16::try_from(extensions.len()).expect("test extension length fits");
+        hello.extend_from_slice(&extensions_length.to_be_bytes());
+        hello.extend_from_slice(extensions);
+        handshake_record(CLIENT_HELLO_HANDSHAKE_TYPE, &hello)
+    }
+
+    fn server_hello_record(extensions: &[u8]) -> Vec<u8> {
+        let mut hello = Vec::new();
+        hello.extend_from_slice(&0x0303u16.to_be_bytes());
+        hello.extend_from_slice(&[0u8; 32]);
+        hello.push(0);
+        hello.extend_from_slice(&0x1301u16.to_be_bytes());
+        hello.push(0);
+        let extensions_length =
+            u16::try_from(extensions.len()).expect("test extension length fits");
+        hello.extend_from_slice(&extensions_length.to_be_bytes());
+        hello.extend_from_slice(extensions);
+        handshake_record(SERVER_HELLO_HANDSHAKE_TYPE, &hello)
+    }
+
+    fn handshake_record(handshake_type: u8, hello: &[u8]) -> Vec<u8> {
+        let record_length = u16::try_from(4 + hello.len()).expect("test record length fits");
+        let handshake_length = u32::try_from(hello.len()).expect("test handshake length fits");
+        let handshake_length_bytes = handshake_length.to_be_bytes();
+        let mut record = vec![TLS_HANDSHAKE_CONTENT_TYPE, 0x03, 0x03];
+        record.extend_from_slice(&record_length.to_be_bytes());
+        record.push(handshake_type);
+        record.extend_from_slice(&handshake_length_bytes[1..]);
+        record.extend_from_slice(hello);
+        record
+    }
+
+    #[test]
+    fn rejects_truncated_tls_record_bodies() {
+        let mut client = client_hello_record(&[]);
+        client.pop();
+        assert!(matches!(
+            parse_tls_client_hello(&client),
+            Err(LayerError::InsufficientData)
+        ));
+
+        let mut server = server_hello_record(&[]);
+        server.pop();
+        assert!(matches!(
+            parse_tls_server_hello(&server),
+            Err(LayerError::InsufficientData)
+        ));
+    }
+
+    #[test]
+    fn rejects_truncated_tls_handshake_bodies() {
+        let mut client = client_hello_record(&[]);
+        client[8] += 1;
+        assert!(matches!(
+            parse_tls_client_hello(&client),
+            Err(LayerError::InsufficientData)
+        ));
+
+        let mut server = server_hello_record(&[]);
+        server[8] += 1;
+        assert!(matches!(
+            parse_tls_server_hello(&server),
+            Err(LayerError::InsufficientData)
+        ));
+    }
+
+    #[test]
+    fn rejects_truncated_tls_extension_blocks() {
+        let mut client = client_hello_record(&[]);
+        let client_last = client.len() - 1;
+        client[client_last] = 1;
+        assert!(matches!(
+            parse_tls_client_hello(&client),
+            Err(LayerError::InsufficientData)
+        ));
+
+        let mut server = server_hello_record(&[]);
+        let server_last = server.len() - 1;
+        server[server_last] = 1;
+        assert!(matches!(
+            parse_tls_server_hello(&server),
+            Err(LayerError::InsufficientData)
+        ));
+    }
+
+    #[test]
+    fn rejects_incompletely_parsed_tls_extensions() {
+        let client = client_hello_record(&[0, 0, 0, 2, 0, 1]);
+        assert!(matches!(
+            parse_tls_client_hello(&client),
+            Err(LayerError::InsufficientData)
+        ));
+
+        let server = server_hello_record(&[0, 0]);
+        assert!(matches!(
+            parse_tls_server_hello(&server),
+            Err(LayerError::InsufficientData)
+        ));
+    }
+
     #[test]
     fn parses_fingerprint_extension_fields_in_wire_order() {
         let extensions = [
@@ -406,7 +551,7 @@ mod tests {
         ];
         let mut hello = client_hello();
 
-        parse_extensions(&extensions, &mut hello);
+        assert!(parse_extensions(&extensions, &mut hello));
 
         assert_eq!(hello.extension_types, vec![10, 11, 13]);
         assert_eq!(hello.supported_groups, vec![23, 0x0a0a, 24]);
