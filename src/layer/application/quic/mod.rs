@@ -2,11 +2,16 @@ use crate::layer::LayerError;
 
 #[cfg(feature = "quic-decrypt")]
 pub mod decrypt;
+#[cfg(feature = "quic-decrypt")]
+pub mod keylog;
 
 #[cfg(feature = "quic-decrypt")]
 pub use decrypt::{
-    DecryptedInitial, decrypt_initial_client_hello, decrypt_initial_packet, extract_crypto_stream,
+    DecryptedInitial, decrypt_initial_client_hello, decrypt_initial_packet,
+    decrypt_packet_with_secret, extract_crypto_stream,
 };
+#[cfg(feature = "quic-decrypt")]
+pub use keylog::{QuicKeyLog, QuicKeyLogLabel};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QuicPacketType {
