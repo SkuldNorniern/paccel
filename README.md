@@ -32,6 +32,16 @@ Requires Rust 1.88+ (edition 2024, let chains).
 
 The parser never panics on malformed input; it is fuzz-, property-, and differential-tested.
 
+## Capability maturity (ahead of 0.1.0)
+
+Paccel's `0.x` versioning means the API can still change substantially before `1.0` — `1.0` will mean API/semantic stability, not "supports everything." Ahead of the first tagged `0.1.0`, here's the honest maturity of each major piece, so you can decide what to build on:
+
+- **Stable enough for 0.1**: everything in the "full parse" row of the protocol table above; link/network/transport/tunnel parsing; pcap/pcapng capture iteration; opt-in IPv4/IPv6 fragment reassembly and TCP stream reassembly (both have hard flow-count bounds with FIFO eviction); `SessionTracker` multi-segment streaming; QUIC long-header structural parsing (Token/Length/PN-offset/Retry).
+- **Heuristic**: everything in the "port/heuristic classification only" row — no structural confirmation, just port numbers and/or a byte pattern that's suggestive but not conclusive. QUIC short-header (1-RTT) classification specifically has a roughly 1-in-4 false-positive rate on arbitrary UDP payloads without connection state; feeding it real state via `QuicConnectionTracker` makes it authoritative instead, but that plumbing is on the caller.
+- **Feature-gated, experimental**: `quic-decrypt` (Initial packet decrypt from publicly-derivable keys; Handshake/1-RTT decrypt from an externally-supplied `SSLKEYLOGFILE` secret) and `fingerprint` (JA3/JA4/JA3S/HASSH/HASSHServer). Both are real, cryptographically/algorithmically verified against RFC vectors, independent implementations, or tshark's own field output — not toy code — but they're new, off by default, and haven't seen real-world traffic diversity yet.
+- **Experimental**: HTTP/2 frame-header parsing (type/length/flags/stream ID only, no HPACK, no `BuiltinPacketParser`/`ParsedPacket` wiring yet — it's a standalone module callers invoke directly).
+- **Not yet supported**: HTTP/3, GTP, Diameter, QUIC Version Negotiation list parsing, QUIC coalesced-packet splitting, QUIC STREAM frame parsing, JA4S/JA4X/JA4H/JA4SSH fingerprint variants.
+
 ## What it is not yet
 
 - tshark corpus scaffolding exists; parity automation is in place, but tshark-based differential coverage is still being expanded
