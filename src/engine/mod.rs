@@ -2,6 +2,7 @@ pub mod builtin;
 pub mod constants;
 pub mod cursor;
 pub mod pcap;
+pub mod quic_tracker;
 pub mod reassembly;
 pub mod session;
 
@@ -24,5 +25,6 @@ pub use pcap::{
     CaptureFrameIter, PcapFrame, PcapFrameIter, PcapNgFrameIter, TsResolution, iter_capture_frames,
     iter_pcap_frames, iter_pcapng_frames, parse_capture_frames, parse_pcap_frames,
 };
+pub use quic_tracker::QuicConnectionTracker;
 pub use reassembly::{IpFragmentReassembler, TcpStreamReassembler};
 pub use session::{SessionTracker, StreamEvent, StreamL7};

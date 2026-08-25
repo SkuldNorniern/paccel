@@ -8,7 +8,7 @@ use sha2::Sha256;
 use crate::layer::LayerError;
 use crate::layer::application::tls::{TlsClientHello, parse_tls_client_hello};
 
-use super::{QuicLongHeader, QuicPacketType, is_v1_or_v2_family};
+use super::{QuicLongHeader, QuicPacketType, decode_packet_number, is_v1_or_v2_family};
 
 // RFC 9001 sec 5.2.
 const V1_SALT: [u8; 20] = [
@@ -155,13 +155,16 @@ pub fn decrypt_initial_packet(
     for (index, byte) in protected_pn.iter().enumerate() {
         pn_bytes[4 - pn_len + index] = byte ^ mask[1 + index];
     }
-    // No prior "largest packet number" state exists for a single observed
-    // packet; the truncated value is used as-is (correct for the common case
-    // of an early Initial packet, e.g. PN 0/1/2 - see RFC 9001 Appendix A.3
-    // packet-number decoding algorithm, which this approximates). `pn_bytes`
-    // already has the decoded bytes placed at their correct (low-order)
-    // positions, so no further shift is needed here.
-    let packet_number = u32::from_be_bytes(pn_bytes);
+    // This single-packet helper has no connection state, so `None` reconstructs
+    // the packet number using RFC 9000 Appendix A.3 as if the largest packet
+    // number were -1. Stateful callers can use `QuicConnectionTracker` across
+    // multiple packets. `pn_bytes` already holds the decoded low-order bytes.
+    let packet_number = u32::try_from(decode_packet_number(
+        None,
+        u32::from_be_bytes(pn_bytes),
+        pn_len,
+    ))
+    .unwrap_or(u32::MAX);
 
     let mut associated_data = raw_packet
         .get(..pn_offset)

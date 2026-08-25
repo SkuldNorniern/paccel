@@ -54,6 +54,41 @@ pub fn decode_varint(payload: &[u8]) -> Option<(u64, usize)> {
     Some((value, len))
 }
 
+/// Reconstructs a full QUIC packet number from its truncated wire encoding
+/// using RFC 9000 Appendix A.3.
+pub fn decode_packet_number(largest_pn: Option<u64>, truncated_pn: u32, pn_len: usize) -> u64 {
+    let expected_pn = largest_pn.map_or(0, |pn| pn.saturating_add(1));
+    let pn_nbits = pn_len.saturating_mul(8);
+    let pn_win = u32::try_from(pn_nbits)
+        .ok()
+        .and_then(|bits| 1u64.checked_shl(bits))
+        .unwrap_or(u64::MAX);
+    let pn_hwin = pn_win / 2;
+    let pn_mask = pn_win.saturating_sub(1);
+    let candidate_pn = (expected_pn & !pn_mask) | u64::from(truncated_pn);
+    let max_packet_number = 1u64 << 62;
+
+    if let (Some(next_window), Some(expected_lower_bound), Some(packet_number_limit)) = (
+        candidate_pn.checked_add(pn_win),
+        expected_pn.checked_sub(pn_hwin),
+        max_packet_number.checked_sub(pn_win),
+    ) && candidate_pn <= expected_lower_bound
+        && candidate_pn < packet_number_limit
+    {
+        return next_window;
+    }
+
+    if candidate_pn >= pn_win
+        && expected_pn
+            .checked_add(pn_hwin)
+            .is_some_and(|expected_upper_bound| candidate_pn > expected_upper_bound)
+    {
+        return candidate_pn.saturating_sub(pn_win);
+    }
+
+    candidate_pn
+}
+
 pub fn quic_version_name(version: u32) -> &'static str {
     match version {
         0x0000_0000 => "version_negotiation",
@@ -209,10 +244,28 @@ pub fn parse_quic_long_header(payload: &[u8]) -> Result<QuicLongHeader, LayerErr
 mod tests {
     use std::iter::repeat_n;
 
-    use super::{QuicPacketType, parse_quic_long_header, quic_version_name};
+    use super::{QuicPacketType, decode_packet_number, parse_quic_long_header, quic_version_name};
 
     // token_length=0 (0x00), length=1 (0x01), 1 byte of (still-protected) packet number.
     const INITIAL_TAIL: [u8; 3] = [0x00, 0x01, 0x00];
+
+    #[test]
+    fn decodes_rfc_packet_number_example() {
+        assert_eq!(
+            decode_packet_number(Some(0xa82f_30ea), 0x9b32, 2),
+            0xa82f_9b32
+        );
+    }
+
+    #[test]
+    fn decodes_packet_number_without_prior_state() {
+        assert_eq!(decode_packet_number(None, 2, 1), 2);
+    }
+
+    #[test]
+    fn decodes_small_monotonic_packet_number() {
+        assert_eq!(decode_packet_number(Some(2), 3, 1), 3);
+    }
 
     #[test]
     fn classifies_v1_initial_and_version_name() {
