@@ -128,12 +128,11 @@ The crate is zero-dependency by default. Two optional features pull in [RustCryp
 
 `tests/pcaps/happy-path/*` are small hand-built captures (tens to hundreds of bytes each); no external source. Most protocol test data lives inline in `tests/pcap_integration.rs` as paccel-authored synthetic frames, each built and verified directly against that protocol's own parser source (`tshark` is used only as an independent oracle to cross-check output, never as a source of committed binary data).
 
-`tests/pcaps/protocol-gaps/*` holds a small remainder of real captures:
+`tests/pcaps/protocol-gaps/*` holds one self-generated capture:
 
 | Fixture | Source |
 |---|---|
 | `http2_get_hello.pcap` | Self-generated on loopback: `curl --http2-prior-knowledge` against a local Python [`h2`](https://github.com/python-hyper/h2) library server, captured with `tcpdump`; not third-party data |
-| `dhcpv6.pcap` | Exact source not recorded |
 
 SSDP/NAT-PMP/PCP classification is tested against in-code synthetic frames (`tests/pcap_integration.rs`) rather than a captured pcap — an earlier fixture built from a local home-network capture was removed and purged from git history since it embedded real device MAC/IP addresses.
 
