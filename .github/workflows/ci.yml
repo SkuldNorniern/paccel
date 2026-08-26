@@ -13,7 +13,7 @@ jobs:
     name: fmt
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install stable toolchain
         run: rustup toolchain install stable --profile minimal --component rustfmt
       - uses: Swatinem/rust-cache@v2
@@ -24,7 +24,7 @@ jobs:
     name: clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install stable toolchain
         run: rustup toolchain install stable --profile minimal --component clippy
       - uses: Swatinem/rust-cache@v2
@@ -41,7 +41,7 @@ jobs:
     name: docs
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install stable toolchain
         run: rustup toolchain install stable --profile minimal
       - uses: Swatinem/rust-cache@v2
@@ -54,7 +54,7 @@ jobs:
     name: test (MSRV 1.88)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install MSRV toolchain
         run: rustup toolchain install 1.88.0 --profile minimal
       - uses: Swatinem/rust-cache@v2
@@ -71,7 +71,7 @@ jobs:
     name: test (stable)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install stable toolchain
         run: rustup toolchain install stable --profile minimal
       - uses: Swatinem/rust-cache@v2
@@ -88,7 +88,7 @@ jobs:
     name: differential (tshark oracle)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install stable toolchain
         run: rustup toolchain install stable --profile minimal
       - uses: Swatinem/rust-cache@v2
@@ -105,7 +105,7 @@ jobs:
     name: package
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install stable toolchain
         run: rustup toolchain install stable --profile minimal
       - uses: Swatinem/rust-cache@v2
@@ -124,7 +124,7 @@ jobs:
     name: fuzz smoke
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install nightly toolchain
         run: rustup toolchain install nightly --profile minimal
       - uses: Swatinem/rust-cache@v2

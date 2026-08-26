@@ -47,7 +47,7 @@ paccel = { version = "0.1", features = ["quic-decrypt"] }
 | Reassembly | IPv4/IPv6 fragments; TCP streams (opt-in) |
 | Streaming | Multi-segment HTTP/TLS through `SessionTracker` |
 
-The parser never panics on malformed input; it is fuzz-, property-, and differential-tested.
+The parser is designed to handle malformed input without panicking; it is fuzz-, property-, and differential-tested.
 
 ## Capability maturity (ahead of 0.1.0)
 

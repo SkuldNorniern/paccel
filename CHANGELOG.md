@@ -13,7 +13,7 @@ Initial public release.
 - Tunnels (recursive inner decode): GRE, VXLAN, GENEVE, MPLS, IP-in-IP.
 - 40+ application-layer protocols — see README's protocol table.
 - pcap and pcapng capture parsing, linktype-aware (Ethernet, SLL, SLL2, NULL, RAW, FDDI/SNAP, 802.11).
-- Strict/permissive parse modes; never panics on malformed input (fuzz-, property-, malformed-input-, and differential-tested).
+- Strict/permissive parse modes; designed to handle malformed input without panicking (fuzz-, property-, malformed-input-, and differential-tested).
 
 ### Opt-in stateful components
 
