@@ -4,13 +4,16 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
 authors = ["Eira"]
-description = "Zero-dependency Rust packet parsing engine for pcap/pcapng capture and live traffic classification"
+description = "Zero-dependency-by-default Rust packet parsing engine for pcap/pcapng capture and live traffic classification"
 license = "Apache-2.0"
 readme = "README.md"
 repository = "https://github.com/SkuldNorniern/paccel"
 keywords = ["packet", "pcap", "network", "parser", "protocol"]
 categories = ["network-programming", "parser-implementations"]
 exclude = ["tests/pcaps/", "fuzz/"]
+
+[package.metadata.docs.rs]
+all-features = true
 
 [features]
 fingerprint = ["dep:md-5", "dep:sha2"]
