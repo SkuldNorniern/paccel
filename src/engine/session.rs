@@ -168,6 +168,21 @@ impl SessionTracker {
                 break;
             };
             self.probes.remove(&oldest);
+
+            // both probe dirs gone -> tcp seq state stale too, clear it
+            let flow = &oldest.flow;
+            let other_direction = DirectionKey {
+                flow: flow.clone(),
+                direction: 1 - oldest.direction,
+            };
+            if !self.probes.contains_key(&other_direction) {
+                self.tcp.remove_flow(
+                    flow.first.address,
+                    flow.first.port,
+                    flow.second.address,
+                    flow.second.port,
+                );
+            }
         }
     }
 }
@@ -526,5 +541,38 @@ mod tests {
             Some(continuation.as_slice())
         );
         assert_eq!(tracker.probes.len(), 2);
+    }
+
+    #[test]
+    fn probe_eviction_also_clears_stale_tcp_sequence_state() {
+        let mut tracker = SessionTracker::new().with_max_probe_flows(1);
+
+        // flow A: SYN only, no data yet, probe stays open
+        assert!(
+            tracker
+                .offer_frame(&tcp_frame(3_000, 500, true, &[]))
+                .is_none()
+        );
+        // flow B: evicts A's probe (max_probe_flows=1)
+        assert!(
+            tracker
+                .offer_frame(&tcp_frame(3_001, 1, true, &[]))
+                .is_none()
+        );
+
+        // reused 4-tuple, unrelated new connection, far-away seq
+        assert!(
+            tracker
+                .offer_frame(&tcp_frame(3_000, 50_000, true, &[]))
+                .is_none()
+        );
+        let request = b"GET / HTTP/1.1\r\nHost: x\r\n\r\n";
+        let event = tracker
+            .offer_frame(&tcp_frame(3_000, 50_001, false, request))
+            .expect("new connection's HTTP request should be recognized, not stuck behind stale seq state");
+        match event.l7 {
+            StreamL7::Http(HttpMessage::Request { target, .. }) => assert_eq!(target, "/"),
+            _ => panic!("expected HTTP request"),
+        }
     }
 }
