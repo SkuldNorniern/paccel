@@ -1,6 +1,9 @@
 #![allow(clippy::cognitive_complexity, clippy::panic)]
 
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::{
+    iter::repeat_n,
+    net::{Ipv4Addr, Ipv6Addr},
+};
 
 use paccel::engine::{
     BgpMessageType, BuiltinPacketParser, CoapType, Dnp3AppFunctionCode, Dnp3FunctionCode,
@@ -14,6 +17,8 @@ use paccel::fingerprint;
 use paccel::layer::application::quic::QuicPacketType;
 
 const SYNTHETIC_SOURCE_IP: [u8; 4] = [192, 0, 2, 1];
+const SYNTHETIC_SOURCE_IPV6: [u8; 16] =
+    [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2];
 
 fn internet_checksum(data: &[u8]) -> u16 {
     let mut sum = 0u32;
@@ -127,6 +132,210 @@ fn build_ethernet_ipv4_tcp_frame(
     tcp[16..18].copy_from_slice(&checksum.to_be_bytes());
 
     build_ethernet_ipv4_frame(dst_ip, 6, 64, &tcp)
+}
+
+fn build_ethernet_ipv6_udp_frame(
+    dst_ip: [u8; 16],
+    src_port: u16,
+    dst_port: u16,
+    udp_payload: &[u8],
+) -> Vec<u8> {
+    let udp_len = u16::try_from(8 + udp_payload.len()).expect("UDP payload should fit in IPv6");
+    let mut udp = Vec::with_capacity(usize::from(udp_len));
+    udp.extend_from_slice(&src_port.to_be_bytes());
+    udp.extend_from_slice(&dst_port.to_be_bytes());
+    udp.extend_from_slice(&udp_len.to_be_bytes());
+    udp.extend_from_slice(&[0x00, 0x00]);
+    udp.extend_from_slice(udp_payload);
+
+    let mut pseudo_header = Vec::with_capacity(40 + udp.len());
+    pseudo_header.extend_from_slice(&SYNTHETIC_SOURCE_IPV6);
+    pseudo_header.extend_from_slice(&dst_ip);
+    pseudo_header.extend_from_slice(&u32::from(udp_len).to_be_bytes());
+    pseudo_header.extend_from_slice(&[0x00, 0x00, 0x00, 17]);
+    pseudo_header.extend_from_slice(&udp);
+    let checksum = internet_checksum(&pseudo_header);
+    udp[6..8].copy_from_slice(&if checksum == 0 { 0xffff } else { checksum }.to_be_bytes());
+
+    let mut ipv6 = Vec::with_capacity(40 + udp.len());
+    ipv6.extend_from_slice(&[0x60, 0x00, 0x00, 0x00]);
+    ipv6.extend_from_slice(&udp_len.to_be_bytes());
+    ipv6.extend_from_slice(&[17, 64]);
+    ipv6.extend_from_slice(&SYNTHETIC_SOURCE_IPV6);
+    ipv6.extend_from_slice(&dst_ip);
+    ipv6.extend_from_slice(&udp);
+    build_ethernet_frame(
+        [0x02, 0x00, 0x00, 0x00, 0x00, 0x01],
+        [0x02, 0x00, 0x00, 0x00, 0x00, 0x02],
+        0x86dd,
+        &ipv6,
+    )
+}
+
+fn build_tls_handshake_record(record_version: u16, handshake_type: u8, body: &[u8]) -> Vec<u8> {
+    let handshake_length = u32::try_from(body.len()).expect("TLS handshake should fit in u24");
+    assert!(handshake_length <= 0x00ff_ffff);
+    let mut handshake = vec![handshake_type];
+    handshake.extend_from_slice(&handshake_length.to_be_bytes()[1..]);
+    handshake.extend_from_slice(body);
+
+    let record_length = u16::try_from(handshake.len()).expect("TLS handshake should fit in record");
+    let mut record = vec![22];
+    record.extend_from_slice(&record_version.to_be_bytes());
+    record.extend_from_slice(&record_length.to_be_bytes());
+    record.extend_from_slice(&handshake);
+    record
+}
+
+fn build_tls_client_hello(
+    record_version: u16,
+    cipher_suite: u16,
+    server_name: Option<&str>,
+    supported_version: Option<u16>,
+) -> Vec<u8> {
+    let mut hello = Vec::new();
+    hello.extend_from_slice(&0x0303u16.to_be_bytes());
+    hello.extend(0x40..0x60);
+    hello.push(0); // session ID length
+    hello.extend_from_slice(&2u16.to_be_bytes());
+    hello.extend_from_slice(&cipher_suite.to_be_bytes());
+    hello.extend_from_slice(&[1, 0]); // one null compression method
+
+    let mut extensions = Vec::new();
+    if let Some(hostname) = server_name {
+        let hostname_length = u16::try_from(hostname.len()).expect("hostname should fit in SNI");
+        let server_name_list_length = hostname_length
+            .checked_add(3)
+            .expect("SNI list length should fit in u16");
+        let extension_length = server_name_list_length
+            .checked_add(2)
+            .expect("SNI extension length should fit in u16");
+        extensions.extend_from_slice(&0u16.to_be_bytes());
+        extensions.extend_from_slice(&extension_length.to_be_bytes());
+        extensions.extend_from_slice(&server_name_list_length.to_be_bytes());
+        extensions.push(0);
+        extensions.extend_from_slice(&hostname_length.to_be_bytes());
+        extensions.extend_from_slice(hostname.as_bytes());
+    }
+    if let Some(version) = supported_version {
+        extensions.extend_from_slice(&43u16.to_be_bytes());
+        extensions.extend_from_slice(&3u16.to_be_bytes());
+        extensions.push(2);
+        extensions.extend_from_slice(&version.to_be_bytes());
+    }
+    let extensions_length =
+        u16::try_from(extensions.len()).expect("ClientHello extensions should fit in u16");
+    hello.extend_from_slice(&extensions_length.to_be_bytes());
+    hello.extend_from_slice(&extensions);
+    build_tls_handshake_record(record_version, 1, &hello)
+}
+
+fn build_tls_server_hello() -> Vec<u8> {
+    let mut extensions = Vec::new();
+    for (extension_type, data) in [
+        (65281u16, &[0][..]),
+        (11, &[1, 0][..]),
+        (16, &[0, 2, 1, b'h'][..]),
+        (23, &[][..]),
+    ] {
+        extensions.extend_from_slice(&extension_type.to_be_bytes());
+        let extension_length =
+            u16::try_from(data.len()).expect("ServerHello extension should fit in u16");
+        extensions.extend_from_slice(&extension_length.to_be_bytes());
+        extensions.extend_from_slice(data);
+    }
+
+    let mut hello = Vec::new();
+    hello.extend_from_slice(&0x0303u16.to_be_bytes());
+    hello.extend(0x70..0x90);
+    hello.push(0); // session ID length
+    hello.extend_from_slice(&0xc030u16.to_be_bytes());
+    hello.push(0); // null compression method
+    let extensions_length =
+        u16::try_from(extensions.len()).expect("ServerHello extensions should fit in u16");
+    hello.extend_from_slice(&extensions_length.to_be_bytes());
+    hello.extend_from_slice(&extensions);
+    build_tls_handshake_record(0x0303, 2, &hello)
+}
+
+fn push_ssh_name_list(packet: &mut Vec<u8>, algorithms: &str) {
+    let length = u32::try_from(algorithms.len()).expect("SSH name-list should fit in u32");
+    packet.extend_from_slice(&length.to_be_bytes());
+    packet.extend_from_slice(algorithms.as_bytes());
+}
+
+fn build_ssh_kex_init() -> Vec<u8> {
+    let mut payload = vec![20];
+    payload.extend(0xa0..0xb0); // cookie
+    for algorithms in [
+        "diffie-hellman-group14-sha256",
+        "rsa-sha2-512",
+        "chacha20-poly1305@openssh.com",
+        "chacha20-poly1305@openssh.com",
+        "hmac-sha2-512",
+        "hmac-sha2-512",
+        "none",
+        "none",
+        "",
+        "",
+    ] {
+        push_ssh_name_list(&mut payload, algorithms);
+    }
+    payload.push(0); // first_kex_packet_follows
+    payload.extend_from_slice(&0u32.to_be_bytes());
+
+    let mut padding_length = 4usize;
+    while !(4 + 1 + payload.len() + padding_length).is_multiple_of(8) {
+        padding_length += 1;
+    }
+    let packet_length =
+        u32::try_from(1 + payload.len() + padding_length).expect("SSH packet should fit in u32");
+    let mut packet = Vec::new();
+    packet.extend_from_slice(&packet_length.to_be_bytes());
+    packet.push(u8::try_from(padding_length).expect("SSH padding length should fit in u8"));
+    packet.extend_from_slice(&payload);
+    packet.extend(
+        (0..padding_length).map(|offset| {
+            0xd0 + u8::try_from(offset).expect("SSH padding offset should fit in u8")
+        }),
+    );
+    packet
+}
+
+fn build_wireguard_message(message_type: u8, total_length: usize) -> Vec<u8> {
+    let mut message = vec![0x5a; total_length];
+    message[..4].copy_from_slice(&[message_type, 0, 0, 0]);
+    message
+}
+
+fn encode_quic_varint(value: u16) -> [u8; 2] {
+    assert!(value > 63 && value <= 0x3fff);
+    (value | 0x4000).to_be_bytes()
+}
+
+fn build_quic_long_header(first_byte: u8, version: u32, dcid: &[u8], scid: &[u8]) -> Vec<u8> {
+    let mut packet = vec![first_byte];
+    packet.extend_from_slice(&version.to_be_bytes());
+    packet.push(u8::try_from(dcid.len()).expect("QUIC DCID length should fit in u8"));
+    packet.extend_from_slice(dcid);
+    packet.push(u8::try_from(scid.len()).expect("QUIC SCID length should fit in u8"));
+    packet.extend_from_slice(scid);
+    packet
+}
+
+fn build_quic_initial(dcid: &[u8], scid: &[u8], declared_length: u16) -> Vec<u8> {
+    let mut packet = build_quic_long_header(0xc0, 1, dcid, scid);
+    packet.push(0); // empty token, encoded as a one-byte varint
+    packet.extend_from_slice(&encode_quic_varint(declared_length));
+    packet.extend(repeat_n(0x5a, usize::from(declared_length)));
+    packet
+}
+
+fn build_quic_retry(dcid: &[u8], scid: &[u8], token: &[u8]) -> Vec<u8> {
+    let mut packet = build_quic_long_header(0xf0, 1, dcid, scid);
+    packet.extend_from_slice(token);
+    packet.extend(0xe0..0xf0); // structurally parsed, not cryptographically validated
+    packet
 }
 
 fn build_ber_tlv(tag: u8, content: &[u8]) -> Vec<u8> {
@@ -607,218 +816,179 @@ fn rip_synthetic_frame_two_is_response() {
 }
 
 #[test]
-fn ikev2_fixture_frame_one_is_sa_init_initiator_request() {
-    let bytes = include_bytes!("pcaps/protocol-gaps/ikev2_sa_init.pcap");
-    let frame = iter_capture_frames(bytes)
-        .expect("pcap should parse")
-        .next()
-        .expect("capture should contain frame 1")
-        .expect("capture frame should parse");
-    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
-        .expect("packet should parse");
+fn ikev2_synthetic_frame_one_is_sa_init_initiator_request() {
+    let mut sa_payload = vec![0, 0];
+    sa_payload.extend_from_slice(&40u16.to_be_bytes());
+    sa_payload.extend_from_slice(&[0, 0]);
+    sa_payload.extend_from_slice(&36u16.to_be_bytes());
+    sa_payload.extend_from_slice(&[1, 1, 0, 3]);
+    sa_payload.extend_from_slice(&[3, 0]);
+    sa_payload.extend_from_slice(&12u16.to_be_bytes());
+    sa_payload.extend_from_slice(&[1, 0]);
+    sa_payload.extend_from_slice(&12u16.to_be_bytes());
+    sa_payload.extend_from_slice(&[0x80, 0x0e, 0x00, 0x80]);
+    sa_payload.extend_from_slice(&[3, 0]);
+    sa_payload.extend_from_slice(&8u16.to_be_bytes());
+    sa_payload.extend_from_slice(&[2, 0]);
+    sa_payload.extend_from_slice(&5u16.to_be_bytes());
+    sa_payload.extend_from_slice(&[0, 0]);
+    sa_payload.extend_from_slice(&8u16.to_be_bytes());
+    sa_payload.extend_from_slice(&[4, 0]);
+    sa_payload.extend_from_slice(&14u16.to_be_bytes());
+    assert_eq!(sa_payload.len(), 40);
+
+    let total_length = u32::try_from(28 + sa_payload.len()).expect("IKE message should fit in u32");
+    let mut ike = Vec::new();
+    ike.extend_from_slice(&0x1020_3040_5060_7080u64.to_be_bytes());
+    ike.extend_from_slice(&0u64.to_be_bytes());
+    ike.extend_from_slice(&[0x21, 0x20, 0x22, 0x08]);
+    ike.extend_from_slice(&0u32.to_be_bytes());
+    ike.extend_from_slice(&total_length.to_be_bytes());
+    ike.extend_from_slice(&sa_payload);
+
+    let frame = build_ethernet_ipv4_udp_frame([198, 51, 100, 50], 50_000, 500, &ike);
+    let parsed = BuiltinPacketParser::parse(&frame).expect("packet should parse");
     let isakmp = parsed.isakmp.as_ref().expect("ISAKMP should be present");
 
-    assert_eq!(isakmp.initiator_spi, 0x5d48_bfee_b7d5_74da);
+    assert_eq!(isakmp.initiator_spi, 0x1020_3040_5060_7080);
     assert_eq!(isakmp.next_payload, 0x21);
     assert_eq!(isakmp.major_version, 2);
     assert_eq!(isakmp.exchange_type, 0x22);
     assert!(isakmp.is_initiator);
     assert!(!isakmp.is_response);
-    assert_eq!(isakmp.length, 232);
+    assert_eq!(isakmp.length, total_length);
 }
 
 #[test]
-fn quic_multistream_fixture_frame_one_has_expected_dcid() {
-    let bytes = include_bytes!("pcaps/protocol-gaps/quic_multistream.pcapng");
-    let frame = iter_capture_frames(bytes)
-        .expect("pcap should parse")
-        .next()
-        .expect("capture should contain frame 1")
-        .expect("capture frame should parse");
-    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
-        .expect("packet should parse");
+fn quic_multistream_synthetic_frame_one_has_expected_dcid() {
+    let dcid = [0x31, 0x41, 0x59, 0x26, 0x53, 0x58, 0x97, 0x93];
+    let quic_packet = build_quic_long_header(0xc0, 0xff00_001d, &dcid, &[]);
+    let frame = build_ethernet_ipv4_udp_frame([198, 51, 100, 60], 45_000, 443, &quic_packet);
+    let parsed = BuiltinPacketParser::parse(&frame).expect("packet should parse");
     let quic = parsed.quic.as_ref().expect("QUIC should be present");
 
     assert_eq!(quic.version, 0xff00_001d);
-    assert_eq!(
-        quic.dcid,
-        vec![0x2e, 0xe7, 0xfa, 0xb7, 0x09, 0xec, 0x0e, 0x70]
-    );
+    assert_eq!(quic.dcid, dcid);
     assert!(!quic.is_initial);
     assert_eq!(quic.kind, QuicPacketType::Unknown);
 }
 
 #[test]
-fn quic_retry_fixture_frame_one_is_v1_initial() {
-    let bytes = include_bytes!("pcaps/protocol-gaps/quic_retry.pcapng");
-    let frame = iter_capture_frames(bytes)
-        .expect("pcap should parse")
-        .next()
-        .expect("capture should contain frame 1")
-        .expect("capture frame should parse");
-    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
-        .expect("packet should parse");
+fn quic_retry_synthetic_frame_one_is_v1_initial() {
+    let dcid = [0x10, 0x32, 0x54, 0x76, 0x98, 0xba, 0xdc, 0xfe];
+    let scid = [0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef];
+    let quic_packet = build_quic_initial(&dcid, &scid, 1232);
+    let frame = build_ethernet_ipv4_udp_frame([198, 51, 100, 61], 45_001, 443, &quic_packet);
+    let parsed = BuiltinPacketParser::parse(&frame).expect("packet should parse");
     let quic = parsed.quic.as_ref().expect("QUIC should be present");
 
     assert_eq!(quic.version, 1);
     assert_eq!(quic.kind, QuicPacketType::Initial);
-    assert_eq!(
-        quic.dcid,
-        vec![0xb4, 0xe8, 0x3a, 0x41, 0xa2, 0x57, 0xc1, 0xe7]
-    );
+    assert_eq!(quic.dcid, dcid);
     assert_eq!(quic.token, Some(Vec::new()));
     assert_eq!(quic.length, Some(1232));
 }
 
 #[test]
-fn quic_retry_fixture_frame_three_is_retry() {
-    let bytes = include_bytes!("pcaps/protocol-gaps/quic_retry.pcapng");
-    let frame = iter_capture_frames(bytes)
-        .expect("pcap should parse")
-        .nth(2)
-        .expect("capture should contain frame 3")
-        .expect("capture frame should parse");
-    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
-        .expect("packet should parse");
+fn quic_retry_synthetic_frame_three_is_retry() {
+    let dcid = [0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8];
+    let scid = [
+        0xb0, 0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7, 0xb8, 0xb9, 0xba, 0xbb,
+    ];
+    let retry_token = [0xc1, 0xc3, 0xc5, 0xc7, 0xc9, 0xcb, 0xcd, 0xcf];
+    let quic_packet = build_quic_retry(&dcid, &scid, &retry_token);
+    let frame = build_ethernet_ipv4_udp_frame([198, 51, 100, 62], 443, 45_002, &quic_packet);
+    let parsed = BuiltinPacketParser::parse(&frame).expect("packet should parse");
     let quic = parsed.quic.as_ref().expect("QUIC should be present");
 
     assert_eq!(quic.kind, QuicPacketType::Retry);
-    assert_eq!(
-        quic.scid,
-        vec![
-            0xc0, 0x6a, 0xaa, 0xc2, 0x07, 0xb0, 0xe0, 0x83, 0xec, 0x50, 0x61, 0x19, 0x62, 0x8d,
-            0x3b, 0xf9, 0xb1, 0x79, 0x2d, 0x70
-        ]
-    );
-    assert_eq!(
-        quic.retry_token,
-        Some(vec![
-            0x99, 0x90, 0x63, 0x7f, 0xbc, 0xe6, 0x90, 0xa6, 0x09, 0x51, 0xe9, 0xf3, 0x4d, 0x27,
-            0x8f, 0x33, 0xe0, 0xaf, 0x2e, 0x8f, 0xb7, 0x8b, 0xf2, 0xf3, 0x00, 0x94, 0x6c, 0x37,
-            0xc9, 0x67, 0x70, 0x69, 0x7d, 0x9a, 0xf5, 0x15, 0x01, 0xde, 0xa1, 0x2a, 0x5f, 0x32,
-            0x40, 0xc0, 0xb4, 0xff, 0xf3, 0x57, 0x8a, 0xc3, 0x6a, 0x9d, 0x78, 0x09, 0xc8, 0xe7,
-            0xce, 0x3a, 0xc9, 0x08, 0xe6, 0x14, 0x95, 0x38, 0x05, 0x0f
-        ])
-    );
+    assert_eq!(quic.scid, scid);
+    assert_eq!(quic.retry_token, Some(retry_token.to_vec()));
     assert_eq!(
         quic.retry_integrity_tag,
         Some([
-            0xea, 0xf1, 0xe8, 0xc6, 0x29, 0x9e, 0xc8, 0x88, 0x1e, 0x1c, 0xb9, 0xf9, 0xaa, 0x6f,
-            0xdc, 0x20
+            0xe0, 0xe1, 0xe2, 0xe3, 0xe4, 0xe5, 0xe6, 0xe7, 0xe8, 0xe9, 0xea, 0xeb, 0xec, 0xed,
+            0xee, 0xef
         ])
     );
 }
 
 #[test]
-fn quic_fragmented_handshake_fixture_frame_two_is_retry_shaped() {
-    let bytes = include_bytes!("pcaps/protocol-gaps/quic_fragmented_handshake.pcapng");
-    let frame = iter_capture_frames(bytes)
-        .expect("pcap should parse")
-        .nth(1)
-        .expect("capture should contain frame 2")
-        .expect("capture frame should parse");
-    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
-        .expect("packet should parse");
+fn quic_fragmented_handshake_synthetic_frame_two_is_retry_shaped() {
+    let dcid = [
+        0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+        0x20, 0x21,
+    ];
+    let scid = [
+        0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3a, 0x3b, 0x3c, 0x3d, 0x3e, 0x3f,
+        0x40, 0x41, 0x42,
+    ];
+    let quic_packet = build_quic_retry(&dcid, &scid, &[0x51, 0x52, 0x53]);
+    let frame = build_ethernet_ipv4_udp_frame([198, 51, 100, 63], 443, 45_003, &quic_packet);
+    let parsed = BuiltinPacketParser::parse(&frame).expect("packet should parse");
     let quic = parsed.quic.as_ref().expect("QUIC should be present");
 
-    assert_eq!(
-        quic.dcid,
-        vec![
-            0x43, 0x94, 0x4e, 0xda, 0x18, 0xbe, 0xb7, 0xe5, 0x48, 0xb3, 0x8d, 0x37, 0x5b, 0xf3,
-            0xc2, 0xa3, 0xbc
-        ]
-    );
-    assert_eq!(
-        quic.scid,
-        vec![
-            0x2e, 0x9a, 0x32, 0xed, 0x45, 0xc9, 0x06, 0x6a, 0xd4, 0xf9, 0xac, 0x32, 0xc1, 0xd2,
-            0x3c, 0x19, 0xe4, 0x80
-        ]
-    );
+    assert_eq!(quic.kind, QuicPacketType::Retry);
+    assert_eq!(quic.dcid, dcid);
+    assert_eq!(quic.scid, scid);
 }
 
 #[test]
-fn quic_tls_upgrade_fixture_frame_forty_seven_is_v1_initial() {
-    let bytes = include_bytes!("pcaps/protocol-gaps/quic_tls_upgrade.pcapng");
-    let frame = iter_capture_frames(bytes)
-        .expect("pcap should parse")
-        .nth(46)
-        .expect("capture should contain frame 47")
-        .expect("capture frame should parse");
-    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
-        .expect("packet should parse");
+fn quic_tls_upgrade_synthetic_frame_forty_seven_is_v1_initial() {
+    let dcid = [0xde, 0xad, 0xbe, 0xef, 0x10, 0x20, 0x30, 0x40];
+    let scid = [0x91, 0x82, 0x73, 0x64, 0x55, 0x46, 0x37, 0x28];
+    let quic_packet = build_quic_initial(&dcid, &scid, 1188);
+    let destination = [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+    let frame = build_ethernet_ipv6_udp_frame(destination, 45_004, 443, &quic_packet);
+    let parsed = BuiltinPacketParser::parse(&frame).expect("packet should parse");
     let ipv6 = parsed.ipv6.as_ref().expect("IPv6 should be present");
     let quic = parsed.quic.as_ref().expect("QUIC should be present");
 
-    assert_eq!(
-        ipv6.destination,
-        "2606:4700:10::6816:826".parse::<Ipv6Addr>().unwrap()
-    );
+    assert_eq!(ipv6.destination, Ipv6Addr::from(destination));
     assert_eq!(quic.version, 1);
     assert_eq!(quic.kind, QuicPacketType::Initial);
-    assert_eq!(
-        quic.dcid,
-        vec![0x20, 0x3f, 0x9e, 0x9f, 0x68, 0x69, 0x82, 0x74]
-    );
+    assert_eq!(quic.dcid, dcid);
     assert_eq!(quic.token, Some(Vec::new()));
-    assert_eq!(quic.length, Some(1212));
+    assert_eq!(quic.length, Some(1188));
 }
 
 #[test]
-fn quic_tls_upgrade_fixture_frame_four_tls_sni() {
-    let bytes = include_bytes!("pcaps/protocol-gaps/quic_tls_upgrade.pcapng");
-    let frame = iter_capture_frames(bytes)
-        .expect("pcap should parse")
-        .nth(3)
-        .expect("capture should contain frame 4")
-        .expect("capture frame should parse");
-    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
-        .expect("packet should parse");
+fn quic_tls_upgrade_synthetic_frame_four_tls_sni() {
+    let client_hello = build_tls_client_hello(0x0303, 0xcca8, Some("fallback.paccel.test"), None);
+    let frame = build_ethernet_ipv4_tcp_frame([198, 51, 100, 64], 45_005, 443, &client_hello);
+    let parsed = BuiltinPacketParser::parse(&frame).expect("packet should parse");
     let tls = parsed.tls.as_ref().expect("TLS should be present");
 
-    assert_eq!(tls.server_name, Some("cloudflare-quic.com".to_string()));
+    assert_eq!(tls.server_name, Some("fallback.paccel.test".to_string()));
 }
 
 #[test]
-fn tls13_handshake_fixture_frame_one_is_clienthello() {
-    let bytes = include_bytes!("pcaps/protocol-gaps/tls13_handshake.pcap");
-    let frame = iter_capture_frames(bytes)
-        .expect("pcap should parse")
-        .next()
-        .expect("capture should contain frame 1")
-        .expect("capture frame should parse");
-    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
-        .expect("packet should parse");
+fn tls13_handshake_synthetic_frame_one_is_clienthello() {
+    let client_hello = build_tls_client_hello(0x0301, 0x1301, None, Some(0x0304));
+    let frame = build_ethernet_ipv4_tcp_frame([198, 51, 100, 70], 45_010, 443, &client_hello);
+    let parsed = BuiltinPacketParser::parse(&frame).expect("packet should parse");
     let tls = parsed.tls.as_ref().expect("TLS should be present");
 
     assert_eq!(tls.record_version, 0x0301);
+    assert_eq!(tls.handshake_version, 0x0303);
+    assert_eq!(tls.supported_versions, vec![0x0304]);
 }
 
 #[test]
-fn tls12_sni_fixture_frame_one_has_sni() {
-    let bytes = include_bytes!("pcaps/protocol-gaps/tls12_sni.pcapng");
-    let frame = iter_capture_frames(bytes)
-        .expect("pcap should parse")
-        .next()
-        .expect("capture should contain frame 1")
-        .expect("capture frame should parse");
-    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
-        .expect("packet should parse");
+fn tls12_sni_synthetic_frame_one_has_sni() {
+    let client_hello = build_tls_client_hello(0x0303, 0xcca8, Some("paccel.example.test"), None);
+    let frame = build_ethernet_ipv4_tcp_frame([198, 51, 100, 71], 45_011, 443, &client_hello);
+    let parsed = BuiltinPacketParser::parse(&frame).expect("packet should parse");
     let tls = parsed.tls.as_ref().expect("TLS should be present");
 
-    assert_eq!(tls.server_name, Some("example.com".to_string()));
+    assert_eq!(tls.server_name, Some("paccel.example.test".to_string()));
 }
 
 #[test]
-fn tls12_sni_fixture_frame_two_is_server_hello() {
-    let bytes = include_bytes!("pcaps/protocol-gaps/tls12_sni.pcapng");
-    let frame = iter_capture_frames(bytes)
-        .expect("pcap should parse")
-        .nth(1)
-        .expect("capture should contain frame 2")
-        .expect("capture frame should parse");
-    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
-        .expect("packet should parse");
+fn tls12_sni_synthetic_frame_two_is_server_hello() {
+    let server_hello = build_tls_server_hello();
+    let frame = build_ethernet_ipv4_tcp_frame([192, 0, 2, 1], 443, 45_011, &server_hello);
+    let parsed = BuiltinPacketParser::parse(&frame).expect("packet should parse");
     let server_hello = parsed
         .tls_server_hello
         .as_ref()
@@ -826,42 +996,36 @@ fn tls12_sni_fixture_frame_two_is_server_hello() {
 
     assert_eq!(server_hello.record_version, 0x0303);
     assert_eq!(server_hello.handshake_version, 0x0303);
-    assert_eq!(server_hello.cipher_suite, 0xc02f);
-    assert_eq!(server_hello.extension_types, vec![65281, 0, 11, 16, 23]);
+    assert_eq!(server_hello.cipher_suite, 0xc030);
+    assert_eq!(server_hello.extension_types, vec![65281, 11, 16, 23]);
 }
 
 #[cfg(feature = "fingerprint")]
 #[test]
-fn tls12_sni_fixture_frame_two_has_expected_ja3s() {
-    let bytes = include_bytes!("pcaps/protocol-gaps/tls12_sni.pcapng");
-    let frame = iter_capture_frames(bytes)
-        .expect("pcap should parse")
-        .nth(1)
-        .expect("capture should contain frame 2")
-        .expect("capture frame should parse");
-    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
-        .expect("packet should parse");
+fn tls12_sni_synthetic_frame_two_has_expected_ja3s() {
+    let server_hello = build_tls_server_hello();
+    let frame = build_ethernet_ipv4_tcp_frame([192, 0, 2, 1], 443, 45_011, &server_hello);
+    let parsed = BuiltinPacketParser::parse(&frame).expect("packet should parse");
     let server_hello = parsed
         .tls_server_hello
         .as_ref()
         .expect("ServerHello should be present");
 
     assert_eq!(
+        fingerprint::ja3s_string(server_hello),
+        "771,49200,65281-11-16-23"
+    );
+    assert_eq!(
         fingerprint::ja3s_hash(server_hello),
-        "5d79edf64e03689ff559a54e9d9487bc"
+        "6aea764ee67f71caf3dc723118906199"
     );
 }
 
 #[test]
-fn wireguard_psk_fixture_frame_one_is_handshake_initiation() {
-    let bytes = include_bytes!("pcaps/protocol-gaps/wireguard_psk.pcap");
-    let frame = iter_capture_frames(bytes)
-        .expect("pcap should parse")
-        .next()
-        .expect("capture should contain frame 1")
-        .expect("capture frame should parse");
-    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
-        .expect("packet should parse");
+fn wireguard_psk_synthetic_frame_one_is_handshake_initiation() {
+    let message = build_wireguard_message(1, 148);
+    let frame = build_ethernet_ipv4_udp_frame([198, 51, 100, 80], 45_020, 51_820, &message);
+    let parsed = BuiltinPacketParser::parse(&frame).expect("packet should parse");
     let wireguard = parsed
         .wireguard
         .as_ref()
@@ -874,15 +1038,10 @@ fn wireguard_psk_fixture_frame_one_is_handshake_initiation() {
 }
 
 #[test]
-fn wireguard_ping_tcp_fixture_frame_one_is_handshake_initiation() {
-    let bytes = include_bytes!("pcaps/protocol-gaps/wireguard_ping_tcp.pcap");
-    let frame = iter_capture_frames(bytes)
-        .expect("pcap should parse")
-        .next()
-        .expect("capture should contain frame 1")
-        .expect("capture frame should parse");
-    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
-        .expect("packet should parse");
+fn wireguard_ping_tcp_synthetic_frame_one_is_handshake_initiation() {
+    let message = build_wireguard_message(1, 148);
+    let frame = build_ethernet_ipv4_udp_frame([198, 51, 100, 81], 51_821, 45_021, &message);
+    let parsed = BuiltinPacketParser::parse(&frame).expect("packet should parse");
     let wireguard = parsed
         .wireguard
         .as_ref()
@@ -895,15 +1054,10 @@ fn wireguard_ping_tcp_fixture_frame_one_is_handshake_initiation() {
 }
 
 #[test]
-fn wireguard_ping_tcp_fixture_frame_three_is_transport_data() {
-    let bytes = include_bytes!("pcaps/protocol-gaps/wireguard_ping_tcp.pcap");
-    let frame = iter_capture_frames(bytes)
-        .expect("pcap should parse")
-        .nth(2)
-        .expect("capture should contain frame 3")
-        .expect("capture frame should parse");
-    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
-        .expect("packet should parse");
+fn wireguard_ping_tcp_synthetic_frame_three_is_transport_data() {
+    let message = build_wireguard_message(4, 32);
+    let frame = build_ethernet_ipv4_udp_frame([198, 51, 100, 81], 51_821, 45_021, &message);
+    let parsed = BuiltinPacketParser::parse(&frame).expect("packet should parse");
     let wireguard = parsed
         .wireguard
         .as_ref()
@@ -1292,31 +1446,21 @@ fn rtcp_synthetic_frame_230_is_receiver_report() {
 }
 
 #[test]
-fn ssh_banner_fixture_frame_four_parses_openssh_client_banner() {
-    let bytes = include_bytes!("pcaps/protocol-gaps/ssh_banner.pcapng");
-    let frame = iter_capture_frames(bytes)
-        .expect("pcapng should parse")
-        .nth(3)
-        .expect("capture should contain frame 4")
-        .expect("capture frame should parse");
-    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
-        .expect("packet should parse");
+fn ssh_banner_synthetic_frame_four_parses_openssh_client_banner() {
+    let banner = b"SSH-2.0-OpenSSH_9.6\r\n";
+    let frame = build_ethernet_ipv4_tcp_frame([198, 51, 100, 90], 45_030, 22, banner);
+    let parsed = BuiltinPacketParser::parse(&frame).expect("packet should parse");
     let ssh = parsed.ssh.as_ref().expect("SSH should be present");
 
     assert_eq!(ssh.protocol_version, "2.0");
-    assert_eq!(ssh.software_version, "OpenSSH_7.6p1");
+    assert_eq!(ssh.software_version, "OpenSSH_9.6");
 }
 
 #[test]
-fn ssh_banner_fixture_frame_eight_is_client_kexinit() {
-    let bytes = include_bytes!("pcaps/protocol-gaps/ssh_banner.pcapng");
-    let frame = iter_capture_frames(bytes)
-        .expect("pcapng should parse")
-        .nth(7)
-        .expect("capture should contain frame 8")
-        .expect("capture frame should parse");
-    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
-        .expect("packet should parse");
+fn ssh_banner_synthetic_frame_eight_is_client_kexinit() {
+    let kex_init = build_ssh_kex_init();
+    let frame = build_ethernet_ipv4_tcp_frame([198, 51, 100, 90], 45_030, 22, &kex_init);
+    let parsed = BuiltinPacketParser::parse(&frame).expect("packet should parse");
     let kex = parsed
         .ssh_kex_init
         .as_ref()
@@ -1324,62 +1468,65 @@ fn ssh_banner_fixture_frame_eight_is_client_kexinit() {
 
     assert_eq!(
         kex.kex_algorithms,
-        vec!["curve25519-sha256".to_string(), "ext-info-c".to_string()]
+        vec!["diffie-hellman-group14-sha256".to_string()]
     );
     assert_eq!(
         kex.encryption_algorithms_client_to_server,
-        vec!["aes128-gcm@openssh.com".to_string()]
+        vec!["chacha20-poly1305@openssh.com".to_string()]
     );
     assert_eq!(
         kex.mac_algorithms_client_to_server,
-        vec!["hmac-sha2-256".to_string()]
+        vec!["hmac-sha2-512".to_string()]
+    );
+    assert_eq!(
+        kex.compression_algorithms_client_to_server,
+        vec!["none".to_string()]
     );
 }
 
 #[cfg(feature = "fingerprint")]
 #[test]
-fn ssh_banner_fixture_frame_eight_has_expected_hassh() {
-    let bytes = include_bytes!("pcaps/protocol-gaps/ssh_banner.pcapng");
-    let frame = iter_capture_frames(bytes)
-        .expect("pcapng should parse")
-        .nth(7)
-        .expect("capture should contain frame 8")
-        .expect("capture frame should parse");
-    let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
-        .expect("packet should parse");
+fn ssh_banner_synthetic_frame_eight_has_expected_hassh() {
+    let kex_init = build_ssh_kex_init();
+    let frame = build_ethernet_ipv4_tcp_frame([198, 51, 100, 90], 45_030, 22, &kex_init);
+    let parsed = BuiltinPacketParser::parse(&frame).expect("packet should parse");
     let kex = parsed
         .ssh_kex_init
         .as_ref()
         .expect("SSH KEXINIT should be present");
 
-    assert_eq!(fingerprint::hassh(kex), "bf34b97113a976f3eb1a7f7f86ad9d3a");
+    assert_eq!(
+        fingerprint::hassh_algorithms_string(kex),
+        "diffie-hellman-group14-sha256;chacha20-poly1305@openssh.com;hmac-sha2-512;none"
+    );
+    assert_eq!(fingerprint::hassh(kex), "eae58349d2944626485ea59f9b00ace0");
 }
 
 #[test]
-fn openvpn_udp_fixture_first_five_frames_match_tshark() {
-    let bytes = include_bytes!("pcaps/protocol-gaps/openvpn_udp_tls-auth.pcapng");
-    let mut frames = iter_capture_frames(bytes).expect("pcapng should parse");
+fn openvpn_udp_synthetic_first_five_frames_match_tshark() {
+    const CLIENT_SESSION_ID: u64 = 0x1020_3040_5060_7080;
+    const SERVER_SESSION_ID: u64 = 0x8877_6655_4433_2211;
     let expected = [
         (
             OpenVpnOpcode::ControlHardResetClientV2,
-            0x8138_1462_1d67_462d,
+            7,
+            CLIENT_SESSION_ID,
         ),
         (
             OpenVpnOpcode::ControlHardResetServerV2,
-            0x5737_14a9_17f3_6048,
+            8,
+            SERVER_SESSION_ID,
         ),
-        (OpenVpnOpcode::AckV1, 0x8138_1462_1d67_462d),
-        (OpenVpnOpcode::ControlV1, 0x8138_1462_1d67_462d),
-        (OpenVpnOpcode::ControlV1, 0x8138_1462_1d67_462d),
+        (OpenVpnOpcode::AckV1, 5, CLIENT_SESSION_ID),
+        (OpenVpnOpcode::ControlV1, 4, CLIENT_SESSION_ID),
+        (OpenVpnOpcode::ControlV1, 4, CLIENT_SESSION_ID),
     ];
 
-    for (expected_opcode, expected_session_id) in expected {
-        let frame = frames
-            .next()
-            .expect("capture should contain five frames")
-            .expect("capture frame should parse");
-        let parsed = BuiltinPacketParser::parse_with_linktype(frame.data, frame.linktype)
-            .expect("packet should parse");
+    for (expected_opcode, opcode, expected_session_id) in expected {
+        let mut packet = vec![opcode << 3];
+        packet.extend_from_slice(&expected_session_id.to_be_bytes());
+        let frame = build_ethernet_ipv4_udp_frame([198, 51, 100, 91], 45_031, 1194, &packet);
+        let parsed = BuiltinPacketParser::parse(&frame).expect("packet should parse");
         let openvpn = parsed.openvpn.as_ref().expect("openvpn should be present");
         assert_eq!(openvpn.opcode, expected_opcode);
         assert_eq!(openvpn.session_id, Some(expected_session_id));
