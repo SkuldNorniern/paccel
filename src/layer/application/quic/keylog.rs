@@ -79,10 +79,12 @@ fn decode_hex(input: &str) -> Option<Vec<u8>> {
 
     input
         .as_bytes()
-        .chunks_exact(2)
-        .map(|pair| {
-            let high = hex_digit(pair[0])?;
-            let low = hex_digit(pair[1])?;
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|&[high, low]| {
+            let high = hex_digit(high)?;
+            let low = hex_digit(low)?;
             Some((high << 4) | low)
         })
         .collect()

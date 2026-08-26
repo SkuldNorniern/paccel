@@ -701,7 +701,7 @@ mod tests {
     #[test]
     fn test_parse_name_exceeding_encoded_length_limit() {
         let mut packet = Vec::new();
-        for label in [b'a', b'b', b'c', b'd'] {
+        for label in *b"abcd" {
             packet.push(63);
             packet.extend(repeat_n(label, 63));
         }

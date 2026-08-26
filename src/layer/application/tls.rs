@@ -84,8 +84,10 @@ pub fn parse_tls_client_hello(payload: &[u8]) -> Result<TlsClientHello, LayerErr
     let cipher_suites_length = usize::from(take_u16(hello, &mut offset)?);
     let cipher_suites_data = take(hello, &mut offset, cipher_suites_length)?;
     let cipher_suites = cipher_suites_data
-        .chunks_exact(2)
-        .map(|suite| u16::from_be_bytes([suite[0], suite[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|&suite| u16::from_be_bytes(suite))
         .collect();
 
     let compression_methods_length = usize::from(take_u8(hello, &mut offset)?);
@@ -287,8 +289,10 @@ fn parse_u16_list(data: &[u8], values: &mut Vec<u16>) -> bool {
         return false;
     }
     values.extend(
-        list.chunks_exact(2)
-            .map(|value| u16::from_be_bytes([value[0], value[1]])),
+        list.as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&value| u16::from_be_bytes(value)),
     );
     true
 }
@@ -372,8 +376,10 @@ fn parse_supported_versions(data: &[u8], parsed: &mut TlsClientHello) -> bool {
     }
     parsed.supported_versions.extend(
         versions[..list_length]
-            .chunks_exact(2)
-            .map(|version| u16::from_be_bytes([version[0], version[1]])),
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&version| u16::from_be_bytes(version)),
     );
     true
 }
