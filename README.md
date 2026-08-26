@@ -124,19 +124,16 @@ The crate is zero-dependency by default. Two optional features pull in [RustCryp
 
 ## Test fixture provenance
 
-**None of this affects the published crate.** `tests/pcaps/` and `fuzz/` are excluded from the packaged crate (see `exclude` in `Cargo.toml`) — `cargo package --list` confirms zero binary fixtures ship. Everything under `src/` is original, written from RFCs/specs and verified against `tshark`'s output, not derived from Wireshark's own (GPLv2) source code. Apache-2.0 in `LICENSE` covers the crate as published; the third-party test data below exists only in this git repository, for local test use, under its own license.
+**None of this affects the published crate.** `tests/pcaps/` and `fuzz/` are excluded from the packaged crate (see `exclude` in `Cargo.toml`) — `cargo package --list` confirms zero binary fixtures ship. Everything under `src/` is original, written from RFCs/specs and verified against `tshark`'s output, not derived from Wireshark's own (GPLv2) source code.
 
-`tests/pcaps/happy-path/*` are small hand-built captures (tens to hundreds of bytes each); no external source.
+`tests/pcaps/happy-path/*` are small hand-built captures (tens to hundreds of bytes each); no external source. Most protocol test data lives inline in `tests/pcap_integration.rs` as paccel-authored synthetic frames, each built and verified directly against that protocol's own parser source (`tshark` is used only as an independent oracle to cross-check output, never as a source of committed binary data).
 
-`tests/pcaps/protocol-gaps/*` are a mix of hand-built captures and real-world captures pulled from public sources for ground-truth testing (byte layouts cross-checked against `tshark`'s own dissectors before writing each parser). Origin of each real capture:
+`tests/pcaps/protocol-gaps/*` holds a small remainder of real captures:
 
 | Fixture | Source |
 |---|---|
-| `http2_get_hello.pcap` | Self-generated on loopback: `curl --http2-prior-knowledge` against a local Python [`h2`](https://github.com/python-hyper/h2) library server, captured with `tcpdump`; not third-party/GPL data |
-| `quic_tls_upgrade.pcapng` | [Wireshark test suite: `[redacted]`]([redacted]) |
-| `dhcpv6.pcap`, `openvpn_tcp_tls-auth.pcapng` | Added in an earlier session; exact source not recorded |
-
-[redacted]
+| `http2_get_hello.pcap` | Self-generated on loopback: `curl --http2-prior-knowledge` against a local Python [`h2`](https://github.com/python-hyper/h2) library server, captured with `tcpdump`; not third-party data |
+| `dhcpv6.pcap` | Exact source not recorded |
 
 SSDP/NAT-PMP/PCP classification is tested against in-code synthetic frames (`tests/pcap_integration.rs`) rather than a captured pcap — an earlier fixture built from a local home-network capture was removed and purged from git history since it embedded real device MAC/IP addresses.
 
