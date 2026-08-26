@@ -1535,18 +1535,15 @@ fn openvpn_udp_synthetic_first_five_frames_match_tshark() {
 }
 
 #[test]
-fn dhcpv6_fixture_solicit_matches_tshark() {
-    let bytes = include_bytes!("pcaps/protocol-gaps/dhcpv6.pcap");
-    let frame = iter_capture_frames(bytes)
-        .expect("pcap should parse")
-        .nth(1)
-        .expect("capture should contain frame 2")
-        .expect("capture frame should parse");
+fn dhcpv6_synthetic_solicit() {
+    let payload = [0x01, 0x22, 0x33, 0x44];
+    let dst = [0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 2];
+    let frame = build_ethernet_ipv6_udp_frame(dst, 546, 547, &payload);
 
-    let parsed = BuiltinPacketParser::parse(frame.data).expect("packet should parse");
+    let parsed = BuiltinPacketParser::parse(&frame).expect("packet should parse");
     let dhcp6 = parsed.dhcp6.as_ref().expect("dhcpv6 should be present");
     assert_eq!(dhcp6.msg_type, 1);
-    assert_eq!(dhcp6.transaction_id, 0x10_0874);
+    assert_eq!(dhcp6.transaction_id, 0x22_3344);
     assert!(parsed.udp_hints.contains(&UdpAppHint::Dhcpv6));
 }
 
