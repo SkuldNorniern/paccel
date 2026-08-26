@@ -45,8 +45,11 @@ pub fn parse_ldap_message(payload: &[u8]) -> Result<LdapMessage, LayerError> {
     }
     offset += 1;
     let (id_len, id_offset) = read_ber_length(payload, offset)?;
+    let id_end = id_offset
+        .checked_add(id_len)
+        .ok_or(LayerError::InvalidLength)?;
     let id_bytes = payload
-        .get(id_offset..id_offset + id_len)
+        .get(id_offset..id_end)
         .ok_or(LayerError::InvalidLength)?;
     if id_len == 0 || id_len > 4 {
         return Err(LayerError::InvalidHeader);
@@ -55,7 +58,7 @@ pub fn parse_ldap_message(payload: &[u8]) -> Result<LdapMessage, LayerError> {
     for byte in id_bytes {
         message_id = (message_id << 8) | u32::from(*byte);
     }
-    offset = id_offset + id_len;
+    offset = id_end;
 
     let op_tag = *payload.get(offset).ok_or(LayerError::InvalidLength)?;
     let opnum = op_tag & 0x1f;
@@ -154,6 +157,17 @@ mod tests {
         assert!(matches!(
             parse_ldap_message(&[0x30, 0x80]),
             Err(LayerError::InvalidHeader)
+        ));
+    }
+
+    #[test]
+    fn rejects_message_id_length_near_usize_max_without_overflow() {
+        let payload = [
+            0x30, 0x0c, 0x02, 0x88, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        ];
+        assert!(matches!(
+            parse_ldap_message(&payload),
+            Err(LayerError::InvalidLength)
         ));
     }
 }
