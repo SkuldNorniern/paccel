@@ -591,14 +591,13 @@ impl ParsedPacket {
                 IpAddr::V4(ipv4.destination),
                 ipv4.protocol,
             )
-        } else if let Some(ipv6) = self.ipv6.as_ref() {
+        } else {
+            let ipv6 = self.ipv6.as_ref()?;
             (
                 IpAddr::V6(ipv6.source),
                 IpAddr::V6(ipv6.destination),
                 ipv6.resolved_next_header,
             )
-        } else {
-            return None;
         };
 
         let (src_port, dst_port) = match self.transport.as_ref() {

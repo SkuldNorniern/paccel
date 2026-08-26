@@ -558,7 +558,7 @@ fn advance_expected(state: &mut TcpDirectionState, byte_count: usize) {
 }
 
 fn u32_to_usize(value: u32) -> usize {
-    usize::try_from(value).map_or(usize::MAX, |converted| converted)
+    usize::try_from(value).unwrap_or(usize::MAX)
 }
 
 #[cfg(test)]
