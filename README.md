@@ -6,6 +6,23 @@ The goal is to become a strong parsing alternative for Fluere workloads (not a f
 
 Requires Rust 1.88+ (edition 2024, let chains).
 
+## Install
+
+```bash
+cargo add paccel
+```
+
+Or in `Cargo.toml`:
+
+```toml
+paccel = "0.1"
+# optional features:
+paccel = { version = "0.1", features = ["fingerprint"] }
+paccel = { version = "0.1", features = ["quic-decrypt"] }
+```
+
+`0.x` releases are explicitly unstable — the public API can change between minor versions before `1.0`. See [Capability maturity](#capability-maturity-ahead-of-010) below before depending on any specific piece.
+
 ## Current status
 
 - parser engine scaffolding is in place (`engine/*`)
