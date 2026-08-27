@@ -2,19 +2,19 @@
 
 use std::{
     iter::repeat_n,
-    net::{Ipv4Addr, Ipv6Addr},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
 };
 
 use paccel::engine::{
     BgpMessageType, BuiltinPacketParser, CoapType, Dnp3AppFunctionCode, Dnp3FunctionCode,
     FtpMessage, ImapMessage, KerberosMessageType, LdapProtocolOp, MqttPacketType, NntpMessage,
-    OpenVpnOpcode, RpcMessage, SipMessage, SmtpMessage, SnmpMessage, SnmpPduType, SsdpMessage,
-    TelnetCommand, TftpMessage, TransportSegment, UdpAppHint, WireGuardMessageType,
-    iter_capture_frames, parse_capture_frames, parse_pcap_frames,
+    OpenVpnOpcode, QuicConnectionTracker, RpcMessage, SipMessage, SmtpMessage, SnmpMessage,
+    SnmpPduType, SsdpMessage, TelnetCommand, TftpMessage, TransportSegment, UdpAppHint,
+    WireGuardMessageType, iter_capture_frames, parse_capture_frames, parse_pcap_frames,
 };
 #[cfg(feature = "fingerprint")]
 use paccel::fingerprint;
-use paccel::layer::application::quic::QuicPacketType;
+use paccel::layer::application::quic::{QuicPacketType, parse_quic_short_header};
 
 const SYNTHETIC_SOURCE_IP: [u8; 4] = [192, 0, 2, 1];
 const SYNTHETIC_SOURCE_IPV6: [u8; 16] =
@@ -335,6 +335,13 @@ fn build_quic_retry(dcid: &[u8], scid: &[u8], token: &[u8]) -> Vec<u8> {
     let mut packet = build_quic_long_header(0xf0, 1, dcid, scid);
     packet.extend_from_slice(token);
     packet.extend(0xe0..0xf0); // structurally parsed, not cryptographically validated
+    packet
+}
+
+fn build_quic_short_header(dcid: &[u8]) -> Vec<u8> {
+    let mut packet = vec![0x41]; // short header, spin bit clear, 1-byte PN
+    packet.extend_from_slice(dcid);
+    packet.push(0x2a); // header-protected PN byte, not decoded structurally
     packet
 }
 
@@ -1872,6 +1879,47 @@ fn dns_query_pcapng_frame_matches_pcap_frame() {
     assert_eq!(
         pcap_frames[0].data, pcapng_frames[0].data,
         "pcap and pcapng should contain identical frame bytes"
+    );
+}
+
+#[test]
+fn quic_connection_migration_resolves_via_cid_tracker() {
+    let client_dcid = [0xde, 0xad, 0xbe, 0xef, 0x10, 0x20, 0x30, 0x40];
+    let client_scid = [0x91, 0x82, 0x73, 0x64, 0x55, 0x46, 0x37, 0x28];
+
+    let initial_packet = build_quic_initial(&client_dcid, &client_scid, 64);
+    let original_frame =
+        build_ethernet_ipv4_udp_frame([198, 51, 100, 10], 51_820, 443, &initial_packet);
+    let original =
+        BuiltinPacketParser::parse(&original_frame).expect("initial packet should parse");
+    let ipv4 = original.ipv4.as_ref().expect("IPv4 should be present");
+    let quic = original.quic.as_ref().expect("QUIC should be present");
+    assert_eq!(quic.scid, client_scid);
+
+    let mut tracker = QuicConnectionTracker::new();
+    let server = Ipv4Addr::new(198, 51, 100, 20);
+    tracker.observe_long_header(
+        IpAddr::V4(ipv4.source),
+        51_820,
+        IpAddr::V4(server),
+        443,
+        &quic.scid,
+    );
+
+    // Client rebinds to a new source port mid-connection (NAT rebind / migration).
+    // The short-header packet it now sends still carries a DCID the server
+    // recognizes from the original exchange - `connection_for_dcid` must resolve
+    // it back to the connection's last-known endpoints, tuple-independent. The new
+    // tuple itself (51_999) is deliberately unused below: resolution must not
+    // depend on it.
+    let short_header_packet = build_quic_short_header(&client_scid);
+    let short_header =
+        parse_quic_short_header(&short_header_packet, client_scid.len()).expect("short header");
+    assert_eq!(short_header.dcid, client_scid);
+
+    assert_eq!(
+        tracker.connection_for_dcid(short_header.dcid),
+        Some((IpAddr::V4(ipv4.source), 51_820, IpAddr::V4(server), 443))
     );
 }
 
