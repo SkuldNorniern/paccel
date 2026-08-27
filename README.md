@@ -21,7 +21,7 @@ paccel = { version = "0.1", features = ["fingerprint"] }
 paccel = { version = "0.1", features = ["quic-decrypt"] }
 ```
 
-`0.x` releases are explicitly unstable — the public API can change between minor versions before `1.0`. See [Capability maturity](#capability-maturity-ahead-of-010) below before depending on any specific piece.
+`0.x` releases are explicitly unstable — the public API can change between minor versions before `1.0`. See [Status](#status) below before depending on any specific piece.
 
 ## Current status
 
@@ -49,25 +49,19 @@ paccel = { version = "0.1", features = ["quic-decrypt"] }
 
 The parser is designed to handle malformed input without panicking; it is fuzz-, property-, and differential-tested.
 
-## Capability maturity (ahead of 0.1.0)
+## Status
 
-Paccel's `0.x` versioning means the API can still change substantially before `1.0` — `1.0` will mean API/semantic stability, not "supports everything." Ahead of the first tagged `0.1.0`, here's the honest maturity of each major piece, so you can decide what to build on:
+`0.x` — API can still change before `1.0`.
 
-- **Stable enough for 0.1**: everything in the "full parse" row of the protocol table above; link/network/transport/tunnel parsing; pcap/pcapng capture iteration; opt-in IPv4/IPv6 fragment reassembly (hard flow-count bounds with FIFO eviction, and any overlapping fragment drops the whole datagram); QUIC long-header structural parsing (Token/Length/PN-offset/Retry).
-- **Heuristic**: everything in the "port/heuristic classification only" row — no structural confirmation, just port numbers and/or a byte pattern that's suggestive but not conclusive. QUIC short-header (1-RTT) classification specifically has a roughly 1-in-4 false-positive rate on arbitrary UDP payloads without connection state; feeding it real state via `QuicConnectionTracker` makes it authoritative instead, but that plumbing is on the caller.
-- **Feature-gated, experimental**: `quic-decrypt` (Initial packet decrypt from publicly-derivable keys; Handshake/1-RTT decrypt from an externally-supplied `SSLKEYLOGFILE` secret) and `fingerprint` (JA3/JA4/JA3S/HASSH/HASSHServer). Both are real, cryptographically/algorithmically verified against RFC vectors, independent implementations, or tshark's own field output — not toy code — but they're new, off by default, and haven't seen real-world traffic diversity yet.
-- **Experimental**: HTTP/2 frame-header parsing (type/length/flags/stream ID only, no HPACK, no `BuiltinPacketParser`/`ParsedPacket` wiring yet — standalone module). Opt-in TCP stream reassembly and `SessionTracker` (hard flow-count bounds with FIFO eviction, same as IP reassembly, but partially-overlapping out-of-order TCP segments have no explicit reject policy yet — the earliest-sequence segment implicitly wins the bytes it covers rather than the whole segment being rejected. Fine for well-behaved traffic; don't rely on it against adversarial TCP overlap/retransmission tricks yet).
-- **Not yet supported**: HTTP/3, GTP, Diameter, QUIC STREAM frame parsing, JA4S/JA4X/JA4H/JA4SSH fingerprint variants.
-
-## What it is not yet
-
-- tshark corpus scaffolding exists; parity automation is in place, but tshark-based differential coverage is still being expanded
-- baseline pcap-vs-scapy parity test exists, but coverage is still small
-- still uses intermediate allocations in parts of hot path
-- QUIC: no STREAM frame parsing (so HTTP/3 is not reachable yet). Handshake/1-RTT decrypt needs an externally-supplied keylog secret (see the `quic-decrypt` feature above) - there is no way to derive those keys from a passive capture alone, by design of TLS 1.3. Short-header/1-RTT classification without `QuicConnectionTracker` state remains a low-confidence heuristic (any UDP payload's top two bits have a 1-in-4 chance of matching).
-- HTTP/2 is frame-header classification only (type/length/flags/stream ID) - no HPACK header decompression, so individual header fields inside HEADERS/CONTINUATION frames are not decoded
-- no GTP or Diameter support yet (no ground-truth test data available)
-- fingerprinting only covers ClientHello/ServerHello/KEXINIT-based JA3/JA4/JA3S/HASSH; no JA4S/JA4X/JA4H/JA4SSH variants yet
+- Link/network/transport/tunnel parsing, pcap/pcapng capture iteration, IPv4/IPv6 fragment reassembly: stable.
+- Port/heuristic-only protocols (WireGuard, OpenVPN, L2TP, QUIC short header, LLMNR, NBNS, NAT-PMP): no structural confirmation, port number and/or a suggestive byte pattern only. QUIC short-header classification has a roughly 1-in-4 false-positive rate on arbitrary UDP payloads without connection state; `QuicConnectionTracker` state makes it authoritative, plumbing is on the caller.
+- `quic-decrypt` and `fingerprint` features: off by default, RFC/reference-vector verified, not yet seen real-world traffic diversity.
+- HTTP/2: frame-header only (type/length/flags/stream ID), no HPACK, no `ParsedPacket` wiring.
+- QUIC: STREAM frames parseable (`iter_quic_frames`) and reassemblable (`QuicStreamReassembler`), standalone, not wired into `ParsedPacket`. HTTP/3 not built (needs QPACK on top of this). Handshake/1-RTT decrypt needs an externally-supplied `SSLKEYLOGFILE` secret — not derivable from a passive capture, by design of TLS 1.3.
+- TCP stream reassembly / `SessionTracker`: opt-in, bounded FIFO eviction, but overlapping out-of-order segments have no explicit reject policy yet (earliest-sequence segment wins the bytes it covers).
+- Not supported: HTTP/3, GTP, Diameter, JA4S/JA4X/JA4H/JA4SSH.
+- tshark differential and pcap-vs-scapy parity coverage still small/expanding.
+- Hot path still uses some intermediate allocations.
 
 ## Quick usage
 
