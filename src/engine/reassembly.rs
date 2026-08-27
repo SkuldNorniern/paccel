@@ -6,6 +6,7 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
+use crate::layer::application::quic::QuicFrame;
 use crate::layer::network::ipv4::Ipv4Header;
 
 const DEFAULT_MAX_FRAGMENTS_PER_DATAGRAM: usize = 1_024;
@@ -14,6 +15,7 @@ const DEFAULT_MAX_CONCURRENT_DATAGRAMS: usize = 1_024;
 const DEFAULT_MAX_BUFFERED_BYTES: usize = 1_048_576;
 const DEFAULT_MAX_GAP: usize = 65_535;
 const DEFAULT_MAX_FLOWS: usize = 65_536;
+const DEFAULT_MAX_STREAMS: usize = 65_536;
 const TCP_SEQUENCE_HALF_RANGE: u32 = 1 << 31;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -520,6 +522,378 @@ impl Default for TcpStreamReassembler {
     }
 }
 
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct QuicStreamKey {
+    first: Endpoint,
+    second: Endpoint,
+    stream_id: u64,
+}
+
+#[derive(Debug, Default)]
+struct QuicStreamState {
+    ranges: BTreeMap<u64, Vec<u8>>,
+    expected: u64,
+    buffered_bytes: usize,
+    fin_offset: Option<u64>,
+    closed: bool,
+}
+
+/// Reassembles QUIC STREAM-frame data with capped out-of-order storage.
+#[derive(Debug)]
+pub struct QuicStreamReassembler {
+    max_buffered_bytes_per_stream: usize,
+    max_gap: usize,
+    max_streams: usize,
+    streams: HashMap<QuicStreamKey, QuicStreamState>,
+    insertion_order: VecDeque<QuicStreamKey>,
+}
+
+impl QuicStreamReassembler {
+    /// Creates a reassembler with a 1 MiB per-stream buffer and a 65,535-byte maximum gap.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::with_limits(DEFAULT_MAX_BUFFERED_BYTES, DEFAULT_MAX_GAP)
+    }
+
+    /// Creates a QUIC reassembler with caller-supplied per-stream limits.
+    #[must_use]
+    pub fn with_limits(max_buffered_bytes_per_stream: usize, max_gap: usize) -> Self {
+        Self {
+            max_buffered_bytes_per_stream,
+            max_gap,
+            max_streams: DEFAULT_MAX_STREAMS,
+            streams: HashMap::new(),
+            insertion_order: VecDeque::new(),
+        }
+    }
+
+    /// Overrides the maximum number of concurrently tracked QUIC streams.
+    #[must_use]
+    pub fn with_max_streams(mut self, max_streams: usize) -> Self {
+        self.max_streams = max_streams;
+        self
+    }
+
+    /// Offers one QUIC STREAM frame and returns all newly contiguous bytes for its stream.
+    #[allow(clippy::too_many_arguments)]
+    pub fn offer(
+        &mut self,
+        src: IpAddr,
+        src_port: u16,
+        dst: IpAddr,
+        dst_port: u16,
+        stream_id: u64,
+        offset: u64,
+        fin: bool,
+        data: &[u8],
+    ) -> Vec<u8> {
+        let Ok(data_length) = u64::try_from(data.len()) else {
+            return Vec::new();
+        };
+        let Some(end) = offset.checked_add(data_length) else {
+            return Vec::new();
+        };
+        let key = normalized_quic_stream(src, src_port, dst, dst_port, stream_id);
+        if !self.ensure_stream(&key) {
+            return Vec::new();
+        }
+        let Some(state) = self.streams.get_mut(&key) else {
+            return Vec::new();
+        };
+        if state.closed || !offset_within_gap(state.expected, offset, self.max_gap) {
+            return Vec::new();
+        }
+        if !Self::accept_final_offset(state, end, fin) {
+            return Vec::new();
+        }
+
+        let mut output = Vec::new();
+        Self::accept_payload(
+            state,
+            offset,
+            data,
+            self.max_buffered_bytes_per_stream,
+            &mut output,
+        );
+        Self::consume_contiguous(state, &mut output);
+        Self::update_closed(state);
+        output
+    }
+
+    /// Offers a parsed STREAM frame, or returns `None` for any other QUIC frame.
+    ///
+    /// The byte-oriented [`Self::offer`] remains primary so callers can use alternate QUIC
+    /// decoders without constructing this crate's frame enum.
+    #[allow(clippy::too_many_arguments)]
+    pub fn offer_frame(
+        &mut self,
+        src: IpAddr,
+        src_port: u16,
+        dst: IpAddr,
+        dst_port: u16,
+        frame: &QuicFrame<'_>,
+    ) -> Option<Vec<u8>> {
+        match frame {
+            QuicFrame::Stream {
+                stream_id,
+                offset,
+                fin,
+                data,
+            } => Some(self.offer(
+                src, src_port, dst, dst_port, *stream_id, *offset, *fin, data,
+            )),
+            _ => None,
+        }
+    }
+
+    /// Returns whether a stream's final offset has been consumed contiguously.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn is_finished(
+        &self,
+        src: IpAddr,
+        src_port: u16,
+        dst: IpAddr,
+        dst_port: u16,
+        stream_id: u64,
+    ) -> bool {
+        let key = normalized_quic_stream(src, src_port, dst, dst_port, stream_id);
+        self.streams.get(&key).is_some_and(|state| state.closed)
+    }
+
+    /// Removes one stream, returning whether it existed.
+    #[allow(clippy::too_many_arguments)]
+    pub fn remove_stream(
+        &mut self,
+        src: IpAddr,
+        src_port: u16,
+        dst: IpAddr,
+        dst_port: u16,
+        stream_id: u64,
+    ) -> bool {
+        let key = normalized_quic_stream(src, src_port, dst, dst_port, stream_id);
+        let removed = self.streams.remove(&key).is_some();
+        self.insertion_order.retain(|queued| queued != &key);
+        removed
+    }
+
+    /// Removes every stream for a normalized UDP flow, returning whether any existed.
+    pub fn remove_flow(&mut self, src: IpAddr, src_port: u16, dst: IpAddr, dst_port: u16) -> bool {
+        let flow = normalized_flow(src, src_port, dst, dst_port).0;
+        let previous_len = self.streams.len();
+        self.streams
+            .retain(|key, _| key.first != flow.first || key.second != flow.second);
+        self.insertion_order
+            .retain(|key| key.first != flow.first || key.second != flow.second);
+        self.streams.len() != previous_len
+    }
+
+    /// Removes all stream state.
+    pub fn clear(&mut self) {
+        self.streams.clear();
+        self.insertion_order.clear();
+    }
+
+    fn ensure_stream(&mut self, key: &QuicStreamKey) -> bool {
+        if self.streams.contains_key(key) {
+            return true;
+        }
+        if self.max_streams == 0 {
+            return false;
+        }
+        self.evict_until_room();
+        self.streams.insert(key.clone(), QuicStreamState::default());
+        self.insertion_order.push_back(key.clone());
+        true
+    }
+
+    fn evict_until_room(&mut self) {
+        while self.streams.len() >= self.max_streams {
+            let Some(oldest) = self.insertion_order.pop_front() else {
+                self.streams.clear();
+                break;
+            };
+            self.streams.remove(&oldest);
+        }
+    }
+
+    fn accept_final_offset(state: &mut QuicStreamState, end: u64, fin: bool) -> bool {
+        if state
+            .fin_offset
+            .is_some_and(|final_offset| end > final_offset || (fin && end != final_offset))
+        {
+            return false;
+        }
+        if fin {
+            if end < state.expected {
+                return false;
+            }
+            state.fin_offset = Some(end);
+        }
+        true
+    }
+
+    fn accept_payload(
+        state: &mut QuicStreamState,
+        offset: u64,
+        data: &[u8],
+        max_buffered_bytes: usize,
+        output: &mut Vec<u8>,
+    ) {
+        if data.is_empty() {
+            return;
+        }
+        if offset == state.expected {
+            output.extend_from_slice(data);
+            advance_quic_expected(state, data.len());
+            return;
+        }
+        if offset > state.expected {
+            Self::buffer_range(state, offset, data, max_buffered_bytes);
+            return;
+        }
+
+        let Some(consumed) = state.expected.checked_sub(offset) else {
+            return;
+        };
+        let Ok(consumed) = usize::try_from(consumed) else {
+            return;
+        };
+        let Some(contiguous) = data.get(consumed..) else {
+            return;
+        };
+        output.extend_from_slice(contiguous);
+        advance_quic_expected(state, contiguous.len());
+    }
+
+    fn buffer_range(
+        state: &mut QuicStreamState,
+        offset: u64,
+        data: &[u8],
+        max_buffered_bytes: usize,
+    ) {
+        let replaced = state.ranges.get(&offset).map_or(0, Vec::len);
+        let Some(without_replaced) = state.buffered_bytes.checked_sub(replaced) else {
+            state.ranges.clear();
+            state.buffered_bytes = 0;
+            return;
+        };
+        let Some(projected) = without_replaced.checked_add(data.len()) else {
+            state.ranges.clear();
+            state.buffered_bytes = 0;
+            return;
+        };
+        if projected > max_buffered_bytes {
+            state.ranges.clear();
+            state.buffered_bytes = 0;
+            return;
+        }
+        state.ranges.insert(offset, data.to_vec());
+        state.buffered_bytes = projected;
+    }
+
+    fn consume_contiguous(state: &mut QuicStreamState, output: &mut Vec<u8>) {
+        loop {
+            let expected = state.expected;
+            let candidate = state.ranges.iter().find_map(|(offset, bytes)| {
+                let consumed = expected.checked_sub(*offset)?;
+                let consumed = usize::try_from(consumed).ok()?;
+                (consumed < bytes.len()).then_some((*offset, consumed))
+            });
+            let Some((offset, consumed)) = candidate else {
+                Self::discard_stale_ranges(state);
+                return;
+            };
+            let Some(bytes) = state.ranges.remove(&offset) else {
+                return;
+            };
+            state.buffered_bytes = state.buffered_bytes.saturating_sub(bytes.len());
+            let Some(contiguous) = bytes.get(consumed..) else {
+                continue;
+            };
+            let contiguous = truncate_at_final_offset(state, contiguous);
+            if contiguous.is_empty() {
+                return;
+            }
+            output.extend_from_slice(contiguous);
+            advance_quic_expected(state, contiguous.len());
+        }
+    }
+
+    fn discard_stale_ranges(state: &mut QuicStreamState) {
+        let stale: Vec<u64> = state
+            .ranges
+            .iter()
+            .filter_map(|(offset, bytes)| {
+                let length = u64::try_from(bytes.len()).ok()?;
+                let end = offset.checked_add(length)?;
+                (end <= state.expected).then_some(*offset)
+            })
+            .collect();
+        for offset in stale {
+            if let Some(bytes) = state.ranges.remove(&offset) {
+                state.buffered_bytes = state.buffered_bytes.saturating_sub(bytes.len());
+            }
+        }
+    }
+
+    fn update_closed(state: &mut QuicStreamState) {
+        state.closed = state
+            .fin_offset
+            .is_some_and(|fin_offset| state.expected == fin_offset);
+    }
+}
+
+impl Default for QuicStreamReassembler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn normalized_quic_stream(
+    src: IpAddr,
+    src_port: u16,
+    dst: IpAddr,
+    dst_port: u16,
+    stream_id: u64,
+) -> QuicStreamKey {
+    let (flow, _) = normalized_flow(src, src_port, dst, dst_port);
+    QuicStreamKey {
+        first: flow.first,
+        second: flow.second,
+        stream_id,
+    }
+}
+
+fn offset_within_gap(expected: u64, offset: u64, max_gap: usize) -> bool {
+    let Some(gap) = offset.checked_sub(expected) else {
+        return true;
+    };
+    usize::try_from(gap).is_ok_and(|gap| gap <= max_gap)
+}
+
+fn advance_quic_expected(state: &mut QuicStreamState, byte_count: usize) {
+    let Ok(increment) = u64::try_from(byte_count) else {
+        return;
+    };
+    if let Some(expected) = state.expected.checked_add(increment) {
+        state.expected = expected;
+    }
+}
+
+fn truncate_at_final_offset<'a>(state: &QuicStreamState, bytes: &'a [u8]) -> &'a [u8] {
+    let Some(fin_offset) = state.fin_offset else {
+        return bytes;
+    };
+    let Some(remaining) = fin_offset.checked_sub(state.expected) else {
+        return &[];
+    };
+    let Ok(remaining) = usize::try_from(remaining) else {
+        return bytes;
+    };
+    bytes.get(..bytes.len().min(remaining)).unwrap_or_default()
+}
+
 fn normalized_flow(src: IpAddr, src_port: u16, dst: IpAddr, dst_port: u16) -> (TcpFlowKey, usize) {
     let source = Endpoint {
         address: src,
@@ -801,5 +1175,168 @@ mod tests {
             b"fresh"
         );
         assert_eq!(reassembler.flows.len(), 2);
+    }
+
+    #[test]
+    fn quic_in_order_frames_return_immediately_and_finish_on_fin() {
+        let (src, dst) = endpoints();
+        let mut reassembler = QuicStreamReassembler::new();
+
+        assert_eq!(
+            reassembler.offer(src, 4_432, dst, 443, 4, 0, false, b"one"),
+            b"one"
+        );
+        assert!(!reassembler.is_finished(src, 4_432, dst, 443, 4));
+        assert_eq!(
+            reassembler.offer(src, 4_432, dst, 443, 4, 3, false, b"two"),
+            b"two"
+        );
+        assert!(!reassembler.is_finished(src, 4_432, dst, 443, 4));
+        assert_eq!(
+            reassembler.offer(src, 4_432, dst, 443, 4, 6, true, b"three"),
+            b"three"
+        );
+        assert!(reassembler.is_finished(src, 4_432, dst, 443, 4));
+    }
+
+    #[test]
+    fn quic_out_of_order_frames_are_joined() {
+        let (src, dst) = endpoints();
+        let mut reassembler = QuicStreamReassembler::new();
+
+        assert!(
+            reassembler
+                .offer(src, 4_432, dst, 443, 8, 10, true, b"later")
+                .is_empty()
+        );
+        assert!(!reassembler.is_finished(src, 4_432, dst, 443, 8));
+        assert_eq!(
+            reassembler.offer(src, 4_432, dst, 443, 8, 0, false, b"0123456789"),
+            b"0123456789later"
+        );
+        assert!(reassembler.is_finished(src, 4_432, dst, 443, 8));
+    }
+
+    #[test]
+    fn quic_stream_ids_on_one_flow_are_independent() {
+        let (src, dst) = endpoints();
+        let mut reassembler = QuicStreamReassembler::new();
+
+        assert!(
+            reassembler
+                .offer(src, 4_432, dst, 443, 0, 3, true, b"zero")
+                .is_empty()
+        );
+        assert_eq!(
+            reassembler.offer(src, 4_432, dst, 443, 4, 0, true, b"four"),
+            b"four"
+        );
+        assert_eq!(
+            reassembler.offer(src, 4_432, dst, 443, 0, 0, false, b"abc"),
+            b"abczero"
+        );
+        assert!(reassembler.is_finished(src, 4_432, dst, 443, 0));
+        assert!(reassembler.is_finished(src, 4_432, dst, 443, 4));
+    }
+
+    #[test]
+    fn quic_matching_stream_ids_on_different_flows_are_independent() {
+        let (src, dst) = endpoints();
+        let mut reassembler = QuicStreamReassembler::new();
+
+        assert!(
+            reassembler
+                .offer(src, 4_432, dst, 443, 0, 3, true, b"first")
+                .is_empty()
+        );
+        assert!(
+            reassembler
+                .offer(src, 4_433, dst, 443, 0, 3, true, b"second")
+                .is_empty()
+        );
+        assert_eq!(
+            reassembler.offer(src, 4_432, dst, 443, 0, 0, false, b"one"),
+            b"onefirst"
+        );
+        assert_eq!(
+            reassembler.offer(src, 4_433, dst, 443, 0, 0, false, b"two"),
+            b"twosecond"
+        );
+    }
+
+    #[test]
+    fn quic_max_gap_refuses_distant_frames() {
+        let (src, dst) = endpoints();
+        let mut reassembler = QuicStreamReassembler::with_limits(64, 4);
+
+        assert!(
+            reassembler
+                .offer(src, 4_432, dst, 443, 0, 5, false, b"far")
+                .is_empty()
+        );
+        assert_eq!(
+            reassembler.offer(src, 4_432, dst, 443, 0, 0, false, b"abcde"),
+            b"abcde"
+        );
+        let key = normalized_quic_stream(src, 4_432, dst, 443, 0);
+        assert!(
+            reassembler
+                .streams
+                .get(&key)
+                .is_some_and(|state| state.ranges.is_empty())
+        );
+    }
+
+    #[test]
+    fn quic_stream_count_uses_fifo_eviction() {
+        let (src, dst) = endpoints();
+        let mut reassembler = QuicStreamReassembler::new().with_max_streams(2);
+
+        assert_eq!(
+            reassembler.offer(src, 4_432, dst, 443, 0, 0, true, b"old"),
+            b"old"
+        );
+        assert!(reassembler.is_finished(src, 4_432, dst, 443, 0));
+        assert!(
+            reassembler
+                .offer(src, 4_432, dst, 443, 4, 3, false, b"held")
+                .is_empty()
+        );
+        assert_eq!(
+            reassembler.offer(src, 4_432, dst, 443, 8, 0, false, b"third"),
+            b"third"
+        );
+
+        assert!(!reassembler.is_finished(src, 4_432, dst, 443, 0));
+        assert_eq!(
+            reassembler.offer(src, 4_432, dst, 443, 0, 0, false, b"fresh"),
+            b"fresh"
+        );
+        assert_eq!(reassembler.streams.len(), 2);
+    }
+
+    #[test]
+    fn parsed_quic_stream_frames_reassemble_end_to_end() {
+        use crate::layer::application::quic::iter_quic_frames;
+
+        let (src, dst) = endpoints();
+        let payload = [
+            0x0f, 9, 3, 3, b'd', b'e', b'f', 0x0a, 9, 3, b'a', b'b', b'c',
+        ];
+        let mut reassembler = QuicStreamReassembler::new();
+        let mut output = Vec::new();
+
+        for parsed in iter_quic_frames(&payload) {
+            let Ok(frame) = parsed else {
+                panic!("synthetic STREAM frame should parse");
+            };
+            let Some(contiguous) = reassembler.offer_frame(src, 4_432, dst, 443, &frame) else {
+                panic!("synthetic payload should contain only STREAM frames");
+            };
+            output.extend_from_slice(&contiguous);
+        }
+
+        assert_eq!(output, b"abcdef");
+        assert!(reassembler.is_finished(src, 4_432, dst, 443, 9));
     }
 }
