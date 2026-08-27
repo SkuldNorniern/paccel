@@ -231,6 +231,7 @@ impl TransportParse {
 
     fn with_sctp(sctp: SctpInfo) -> Self {
         Self {
+            transport: Some(TransportSegment::Sctp(sctp.clone())),
             sctp: Some(sctp),
             ..Self::default()
         }
@@ -2278,6 +2279,12 @@ mod tests {
         assert_eq!(sctp.verification_tag, 0x1122_3344);
         assert_eq!(sctp.chunks.len(), 1);
         assert_eq!(sctp.chunks[0].chunk_type, 1);
+        assert!(matches!(
+            parsed.transport,
+            Some(TransportSegment::Sctp(ref transport_sctp))
+                if transport_sctp.source_port == 5000
+                    && transport_sctp.destination_port == 5001
+        ));
     }
 
     #[test]

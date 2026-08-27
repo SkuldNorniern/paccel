@@ -5,12 +5,21 @@ use crate::layer::LayerError;
 use crate::layer::network::ipv4::Ipv4Header;
 use crate::layer::network::ipv6::Ipv6Header;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Ipv6FragmentHeader {
+    pub identification: u32,
+    /// Fragment offset in 8-byte units (the raw 13-bit field value).
+    pub offset: u16,
+    pub more_fragments: bool,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Ipv6TransportState {
     pub next_header: u8,
     pub l4_offset: usize,
     pub non_initial_fragment: bool,
     pub depth_limit_hit: bool,
+    pub fragment_header: Option<Ipv6FragmentHeader>,
 }
 
 pub(super) fn parse_ipv4_header(data: &[u8]) -> Result<Ipv4Header, LayerError> {
@@ -113,6 +122,7 @@ pub(super) fn resolve_ipv6_transport(
         l4_offset: 40,
         non_initial_fragment: false,
         depth_limit_hit: false,
+        fragment_header: None,
     };
     let mut depth = 0usize;
 
@@ -140,17 +150,29 @@ pub(super) fn resolve_ipv6_transport(
                 depth += 1;
             }
             44 => {
-                if state.l4_offset + 8 > packet.len() {
-                    return Err(LayerError::InvalidLength);
-                }
-
-                let ext_next = packet[state.l4_offset];
-                let frag_off_flags =
-                    u16::from_be_bytes([packet[state.l4_offset + 2], packet[state.l4_offset + 3]]);
+                let fragment_end = state
+                    .l4_offset
+                    .checked_add(8)
+                    .ok_or(LayerError::InvalidLength)?;
+                let fragment = packet
+                    .get(state.l4_offset..fragment_end)
+                    .ok_or(LayerError::InvalidLength)?;
+                let ext_next = fragment[0];
+                let frag_off_flags = u16::from_be_bytes([fragment[2], fragment[3]]);
                 let frag_offset = (frag_off_flags & 0xFFF8) >> 3;
+                state.fragment_header = Some(Ipv6FragmentHeader {
+                    identification: u32::from_be_bytes([
+                        fragment[4],
+                        fragment[5],
+                        fragment[6],
+                        fragment[7],
+                    ]),
+                    offset: frag_offset,
+                    more_fragments: frag_off_flags & 0x0001 != 0,
+                });
 
                 state.next_header = ext_next;
-                state.l4_offset += 8;
+                state.l4_offset = fragment_end;
                 depth += 1;
 
                 if frag_offset != 0 {
@@ -183,7 +205,9 @@ pub(super) fn resolve_ipv6_transport(
 #[cfg(test)]
 #[allow(clippy::absolute_paths)]
 mod tests {
-    use crate::engine::builtin::{BuiltinPacketParser, ParseWarningCode, TransportSegment};
+    use crate::engine::builtin::{
+        BuiltinPacketParser, Ipv6FragmentHeader, ParseWarningCode, TransportSegment,
+    };
 
     #[test]
     fn parses_ipv4_icmp() {
@@ -286,11 +310,41 @@ mod tests {
 
         let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
         assert!(parsed.ipv6.is_some());
+        assert_eq!(
+            parsed.ipv6_fragment,
+            Some(Ipv6FragmentHeader {
+                identification: 0x1234_5678,
+                offset: 1,
+                more_fragments: true,
+            })
+        );
         assert!(parsed.transport.is_none());
         assert_eq!(parsed.warnings.len(), 1);
         assert_eq!(
             parsed.warnings[0].code,
             ParseWarningCode::Ipv6NonInitialFragment
         );
+    }
+
+    #[test]
+    fn exposes_ipv6_fragment_header_on_initial_fragment() {
+        let frame = vec![
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0x86, 0xdd, 0x60, 0x00, 0x00, 0x00, 0x00, 0x10,
+            44, 64, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 2, 17, 0, 0x00, 0x01, 0x12, 0x34, 0x56, 0x78, 0x00, 0x35, 0x30, 0x39,
+            0x00, 0x08, 0x00, 0x00,
+        ];
+
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+        assert_eq!(
+            parsed.ipv6_fragment,
+            Some(Ipv6FragmentHeader {
+                identification: 0x1234_5678,
+                offset: 0,
+                more_fragments: true,
+            })
+        );
+        assert!(matches!(parsed.transport, Some(TransportSegment::Udp(_))));
+        assert!(parsed.warnings.is_empty());
     }
 }
