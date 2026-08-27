@@ -105,12 +105,10 @@ pub fn parse_quic_version_negotiation(payload: &[u8]) -> Option<QuicVersionNegot
 
     let supported_versions = payload
         .get(scid_end..)?
-        .chunks_exact(4)
-        .map(|chunk| {
-            let mut version = [0u8; 4];
-            version.copy_from_slice(chunk);
-            u32::from_be_bytes(version)
-        })
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|&chunk| u32::from_be_bytes(chunk))
         .collect();
 
     Some(QuicVersionNegotiation {
