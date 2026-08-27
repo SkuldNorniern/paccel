@@ -31,6 +31,7 @@ pub struct QuicConnectionTracker {
     max_flows: usize,
     flows: HashMap<FlowKey, QuicFlowState>,
     insertion_order: VecDeque<FlowKey>,
+    cid_index: HashMap<Vec<u8>, FlowKey>,
 }
 
 impl QuicConnectionTracker {
@@ -41,6 +42,7 @@ impl QuicConnectionTracker {
             max_flows: DEFAULT_MAX_FLOWS,
             flows: HashMap::new(),
             insertion_order: VecDeque::new(),
+            cid_index: HashMap::new(),
         }
     }
 
@@ -71,7 +73,30 @@ impl QuicConnectionTracker {
         }
         if let Some(flow) = self.flows.get_mut(&key) {
             flow.expected_dcids[1 - direction] = Some(scid.to_vec());
+            self.cid_index.insert(scid.to_vec(), key);
         }
+    }
+
+    /// Looks up which tracked connection issued `dcid` as one of its
+    /// connection IDs, if any - lets a short-header packet arriving on an
+    /// unfamiliar UDP 4-tuple (e.g. after connection migration, or NAT
+    /// rebinding) still be attributed to the connection that issued it,
+    /// without the caller needing to guess or already know the new tuple.
+    /// Returns the two endpoints of the flow that connection was last seen
+    /// on (not necessarily the tuple the migrated packet actually arrived
+    /// on - this only tells you "this CID belongs to a connection I've seen
+    /// before, here's where I last saw it", the caller decides how to react,
+    /// e.g. by calling `observe_long_header`-equivalent bookkeeping for the
+    /// new tuple itself, which this tracker doesn't do automatically).
+    #[must_use]
+    pub fn connection_for_dcid(&self, dcid: &[u8]) -> Option<(IpAddr, u16, IpAddr, u16)> {
+        let key = self.cid_index.get(dcid)?;
+        Some((
+            key.first.address,
+            key.first.port,
+            key.second.address,
+            key.second.port,
+        ))
     }
 
     /// Returns the connection ID length this direction's short-header packets
@@ -125,6 +150,7 @@ impl QuicConnectionTracker {
         let (key, _) = normalized_flow(src, src_port, dst, dst_port);
         let removed = self.flows.remove(&key).is_some();
         self.insertion_order.retain(|queued| queued != &key);
+        self.remove_indexed_cids(&key);
         removed
     }
 
@@ -132,6 +158,7 @@ impl QuicConnectionTracker {
     pub fn clear(&mut self) {
         self.flows.clear();
         self.insertion_order.clear();
+        self.cid_index.clear();
     }
 
     fn ensure_flow(&mut self, key: &FlowKey) -> bool {
@@ -151,10 +178,16 @@ impl QuicConnectionTracker {
         while self.flows.len() >= self.max_flows {
             let Some(oldest) = self.insertion_order.pop_front() else {
                 self.flows.clear();
+                self.cid_index.clear();
                 break;
             };
             self.flows.remove(&oldest);
+            self.remove_indexed_cids(&oldest);
         }
+    }
+
+    fn remove_indexed_cids(&mut self, key: &FlowKey) {
+        self.cid_index.retain(|_, indexed_flow| indexed_flow != key);
     }
 }
 
@@ -216,6 +249,21 @@ mod tests {
     }
 
     #[test]
+    fn resolves_connection_by_observed_cid() {
+        let (src, dst) = endpoints();
+        let mut tracker = QuicConnectionTracker::new();
+        let cid = [1, 2, 3, 4, 5, 6, 7, 8];
+
+        tracker.observe_long_header(src, 1_000, dst, 443, &cid);
+
+        assert_eq!(
+            tracker.connection_for_dcid(&cid),
+            Some((src, 1_000, dst, 443))
+        );
+        assert_eq!(tracker.connection_for_dcid(&[9, 9, 9, 9]), None);
+    }
+
+    #[test]
     fn reconstructs_packet_numbers_with_per_direction_state() {
         let (src, dst) = endpoints();
         let mut tracker = QuicConnectionTracker::new();
@@ -256,5 +304,22 @@ mod tests {
         let (newest, _) = normalized_flow(src, 1_003, dst, 443);
         assert!(!tracker.flows.contains_key(&oldest));
         assert!(tracker.flows.contains_key(&newest));
+    }
+
+    #[test]
+    fn fifo_eviction_removes_cid_index_entry() {
+        let (src, dst) = endpoints();
+        let mut tracker = QuicConnectionTracker::new().with_max_flows(2);
+        let oldest_cid = [1, 2, 3, 4];
+
+        tracker.observe_long_header(src, 1_000, dst, 443, &oldest_cid);
+        tracker.observe_long_header(src, 1_001, dst, 443, &[5, 6, 7, 8]);
+        tracker.observe_long_header(src, 1_002, dst, 443, &[9, 10, 11, 12]);
+
+        assert_eq!(tracker.connection_for_dcid(&oldest_cid), None);
+        assert_eq!(
+            tracker.connection_for_dcid(&[9, 10, 11, 12]),
+            Some((src, 1_002, dst, 443))
+        );
     }
 }
