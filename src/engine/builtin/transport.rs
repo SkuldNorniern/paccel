@@ -2835,6 +2835,29 @@ mod tests {
     }
 
     #[test]
+    fn vxlan_outer_and_innermost_flow_keys_differ() {
+        let inner = build_ethernet_ipv4_tcp_frame(23456, 8443, &[]);
+        let mut payload = vec![0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 100, 0];
+        payload.extend_from_slice(&inner);
+        let frame = build_ethernet_ipv4_udp_frame(4789, 4789, &payload);
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
+
+        let outer = parsed
+            .outer_flow_key()
+            .expect("VXLAN tunnel's own outer flow should resolve");
+        let innermost = parsed
+            .innermost_flow_key()
+            .expect("encapsulated TCP flow should resolve");
+        assert_ne!(outer, innermost);
+        assert_eq!(outer.protocol, 17); // UDP, the VXLAN tunnel itself
+        assert_eq!(innermost.protocol, 6); // TCP, the encapsulated traffic
+        assert_eq!(parsed.flow_key(), Some(innermost));
+
+        let path: Vec<_> = parsed.flow_path().collect();
+        assert_eq!(path, vec![outer, innermost]);
+    }
+
+    #[test]
     fn ipv4_in_ipv4_decodes_inner_packet() {
         let inner_frame = build_ethernet_ipv4_l4_frame(1, &[8, 0, 0, 0, 0, 1, 0, 1]);
         let frame = build_ethernet_ipv4_l4_frame(4, &inner_frame[14..]);

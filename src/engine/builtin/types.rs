@@ -1,3 +1,4 @@
+use std::iter::from_fn;
 use std::net::{IpAddr, Ipv4Addr};
 
 use crate::engine::constants::ethertype_name;
@@ -593,11 +594,22 @@ pub struct ParsedPacket {
 }
 
 impl ParsedPacket {
+    /// Alias for [`Self::innermost_flow_key`] - the flow key of the deepest
+    /// tunnel-decoded packet, not this `ParsedPacket`'s own network/transport
+    /// headers. For a plain (non-tunneled) packet these are the same thing.
+    /// Kept for backward compatibility; prefer [`Self::outer_flow_key`] or
+    /// [`Self::innermost_flow_key`] when the distinction matters (e.g. VXLAN/
+    /// GRE/GENEVE where the outer and inner flows are genuinely different
+    /// connections).
     pub fn flow_key(&self) -> Option<FlowKey> {
-        if let Some(inner) = self.inner.as_deref() {
-            return inner.flow_key();
-        }
+        self.innermost_flow_key()
+    }
 
+    /// This `ParsedPacket`'s own network/transport flow key, ignoring any
+    /// tunnel-decoded `inner` packet. For a VXLAN/GRE/GENEVE frame this is the
+    /// tunnel's outer flow (e.g. the two VTEPs), not the encapsulated traffic.
+    #[must_use]
+    pub fn outer_flow_key(&self) -> Option<FlowKey> {
         let (src_ip, dst_ip, protocol) = if let Some(ipv4) = self.ipv4.as_ref() {
             (
                 IpAddr::V4(ipv4.source),
@@ -626,6 +638,34 @@ impl ParsedPacket {
             src_port,
             dst_port,
             protocol,
+        })
+    }
+
+    /// The flow key of the deepest tunnel-decoded packet (recurses through
+    /// `inner` to the bottom). For a VXLAN/GRE/GENEVE frame this is the
+    /// encapsulated traffic's own flow, not the tunnel's outer endpoints.
+    #[must_use]
+    pub fn innermost_flow_key(&self) -> Option<FlowKey> {
+        if let Some(inner) = self.inner.as_deref() {
+            return inner.innermost_flow_key();
+        }
+        self.outer_flow_key()
+    }
+
+    /// Iterates every tunnel layer's own flow key, outermost first, skipping
+    /// layers that have no network/transport headers of their own (e.g. an
+    /// L2-only tunnel hop). For a plain (non-tunneled) packet this yields at
+    /// most one key, same as [`Self::outer_flow_key`].
+    pub fn flow_path(&self) -> impl Iterator<Item = FlowKey> + '_ {
+        let mut current = Some(self);
+        from_fn(move || {
+            while let Some(packet) = current {
+                current = packet.inner.as_deref();
+                if let Some(key) = packet.outer_flow_key() {
+                    return Some(key);
+                }
+            }
+            None
         })
     }
 
