@@ -54,6 +54,8 @@ use self::link::{
 use self::network::{parse_ipv4_header, parse_ipv6_header, resolve_ipv6_transport};
 use self::transport::parse_transport;
 
+pub use self::network::Ipv6FragmentHeader;
+
 pub use self::types::{
     AhInfo, EspInfo, EthernetFrame, FlowKey, GeneveInfo, GreInfo, IgmpInfo, L2tpInfo, LldpInfo,
     LldpTlv, MplsInfo, MplsLabel, OpenVpnInfo, OpenVpnOpcode, ParseConfig, ParseMode, ParseWarning,
@@ -319,6 +321,7 @@ impl BuiltinPacketParser {
 
                 ipv6.resolved_next_header = state.next_header;
                 ipv6.transport_header_offset = u16::try_from(state.l4_offset).unwrap_or(u16::MAX);
+                parsed.ipv6_fragment = state.fragment_header;
 
                 if state.depth_limit_hit {
                     parsed.warnings.push(ParseWarning {
@@ -690,7 +693,7 @@ fn recurse_transport_tunnel(
 fn udp_payload_end(parsed: &ParsedPacket, captured_len: usize) -> Option<usize> {
     match parsed.transport.as_ref()? {
         TransportSegment::Udp(udp) => Some((udp.length as usize).min(captured_len)),
-        TransportSegment::Tcp(_) => None,
+        TransportSegment::Tcp(_) | TransportSegment::Sctp(_) => None,
     }
 }
 

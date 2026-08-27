@@ -192,6 +192,7 @@ fn paccel_agrees_with_tshark_on_fixtures() {
                         &row.udp_dport,
                     );
                 }
+                Some(TransportSegment::Sctp(_)) => {}
                 None => {}
             }
 

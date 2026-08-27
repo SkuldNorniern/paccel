@@ -96,7 +96,7 @@ impl SessionTracker {
         let (src, dst) = ip_endpoints(&parsed)?;
         let tcp = match parsed.transport.as_ref()? {
             TransportSegment::Tcp(tcp) => tcp,
-            TransportSegment::Udp(_) => return None,
+            TransportSegment::Udp(_) | TransportSegment::Sctp(_) => return None,
         };
         let payload = tcp_payload(raw, &parsed, tcp)?;
         let src_port = tcp.source_port;

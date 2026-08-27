@@ -53,6 +53,8 @@ use crate::layer::network::ipv6::Ipv6Header;
 use crate::layer::transport::tcp::TcpHeader;
 use crate::layer::transport::udp::UdpHeader;
 
+use super::network::Ipv6FragmentHeader;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParseWarningCode {
     Ipv6NonInitialFragment,
@@ -491,6 +493,7 @@ pub struct EthernetFrame {
 pub enum TransportSegment {
     Tcp(TcpHeader),
     Udp(UdpHeader),
+    Sctp(SctpInfo),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -510,6 +513,7 @@ pub struct ParsedPacket {
     pub arp: Option<ArpPacket>,
     pub ipv4: Option<Ipv4Header>,
     pub ipv6: Option<Ipv6Header>,
+    pub ipv6_fragment: Option<Ipv6FragmentHeader>,
     pub transport: Option<TransportSegment>,
     pub icmp: Option<IcmpHeader>,
     pub icmpv6: Option<Icmpv6Header>,
@@ -603,6 +607,7 @@ impl ParsedPacket {
         let (src_port, dst_port) = match self.transport.as_ref() {
             Some(TransportSegment::Tcp(tcp)) => (tcp.source_port, tcp.destination_port),
             Some(TransportSegment::Udp(udp)) => (udp.source_port, udp.destination_port),
+            Some(TransportSegment::Sctp(sctp)) => (sctp.source_port, sctp.destination_port),
             None => (0, 0),
         };
 
@@ -647,6 +652,7 @@ impl ParsedPacket {
         match self.transport {
             Some(TransportSegment::Tcp(_)) => Some("tcp"),
             Some(TransportSegment::Udp(_)) => Some("udp"),
+            Some(TransportSegment::Sctp(_)) => Some("sctp"),
             None if self.sctp.is_some() => Some("sctp"),
             None => None,
         }
