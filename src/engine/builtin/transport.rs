@@ -526,8 +526,10 @@ fn parse_udp_transport(l4_bytes: &[u8], config: ParseConfig) -> Result<Transport
     let geneve = maybe_parse_geneve(&udp, app);
     let l2tp = maybe_parse_l2tp(&udp, app, &mut hints);
     // Fixed bit required here (unlike parse_quic_long_header) to avoid colliding with RTP v2's version bits.
-    let quic = (parse_application
-        && wireguard.is_none()
+    // Structural, not heuristic - runs whenever transport parsing runs at all (not
+    // gated to parse_application) so a caller stopping at StopLayer::Transport can
+    // still seed a QuicConnectionTracker's CID index from the long header's SCID.
+    let quic = (wireguard.is_none()
         && openvpn.is_none()
         && vxlan.is_none()
         && geneve.is_none()
@@ -2335,6 +2337,48 @@ mod tests {
                 protocol: 17,
             })
         );
+    }
+
+    #[test]
+    fn transport_mode_still_parses_quic_long_header() {
+        // 0xc0: long header, fixed bit set, Initial. version=1, dcid_len=0,
+        // scid_len=0, token_len=0 (varint), length=1 (varint), 1 PN byte.
+        let quic_initial = [0xc0, 0, 0, 0, 1, 0, 0, 0x00, 0x01, 0x00];
+        let frame = build_ethernet_ipv4_udp_frame(51_820, 443, &quic_initial);
+        let parsed = BuiltinPacketParser::parse_with_config(
+            &frame,
+            ParseConfig {
+                stop_after: StopLayer::Transport,
+                ..ParseConfig::default()
+            },
+        )
+        .expect("parse should succeed");
+
+        let quic = parsed
+            .quic
+            .as_ref()
+            .expect("QUIC long header should still be structurally parsed at Transport stop");
+        assert_eq!(quic.version, 1);
+    }
+
+    #[test]
+    fn transport_segment_offset_locates_udp_payload() {
+        let quic_initial = [0xc0, 0, 0, 0, 1, 0, 0, 0x00, 0x01, 0x00];
+        let frame = build_ethernet_ipv4_udp_frame(51_820, 443, &quic_initial);
+        let parsed = BuiltinPacketParser::parse_with_config(
+            &frame,
+            ParseConfig {
+                stop_after: StopLayer::Transport,
+                ..ParseConfig::default()
+            },
+        )
+        .expect("parse should succeed");
+
+        let segment_offset = parsed
+            .transport_segment_offset
+            .expect("transport_segment_offset should be set");
+        let udp_payload = &frame[segment_offset + 8..]; // 8 = fixed UDP header length
+        assert_eq!(udp_payload, quic_initial);
     }
 
     #[test]
