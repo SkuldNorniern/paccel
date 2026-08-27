@@ -51,6 +51,13 @@ pub struct QuicShortHeader<'a> {
     pub dcid: &'a [u8],
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuicVersionNegotiation {
+    pub dcid: Vec<u8>,
+    pub scid: Vec<u8>,
+    pub supported_versions: Vec<u32>,
+}
+
 /// Parses the structural (still header-protected) fields of a QUIC short-header
 /// (1-RTT) packet, given the DCID length the caller already knows from tracking
 /// this connection's handshake (for example, via `QuicConnectionTracker`).
@@ -71,6 +78,45 @@ pub fn parse_quic_short_header(payload: &[u8], dcid_len: usize) -> Option<QuicSh
     Some(QuicShortHeader {
         spin_bit: first_byte & 0x20 != 0,
         dcid,
+    })
+}
+
+/// Parses a QUIC Version Negotiation packet (RFC 9000 sec 17.2.1).
+/// `dcid`/`scid` here are the client's SCID/DCID echoed back - see the
+/// spec for why they're swapped relative to the packet that triggered
+/// this response. Returns `None` if `payload` isn't shaped like a VN
+/// packet (header form bit clear, or version field isn't exactly zero)
+/// or is too short to contain valid DCID/SCID length-prefixed fields.
+pub fn parse_quic_version_negotiation(payload: &[u8]) -> Option<QuicVersionNegotiation> {
+    let first_byte = *payload.first()?;
+    if first_byte & 0x80 == 0 || payload.get(1..5)? != [0, 0, 0, 0] {
+        return None;
+    }
+
+    let dcid_len = usize::from(*payload.get(5)?);
+    let dcid_start = 6usize;
+    let dcid_end = dcid_start.checked_add(dcid_len)?;
+    let dcid = payload.get(dcid_start..dcid_end)?.to_vec();
+
+    let scid_len = usize::from(*payload.get(dcid_end)?);
+    let scid_start = dcid_end.checked_add(1)?;
+    let scid_end = scid_start.checked_add(scid_len)?;
+    let scid = payload.get(scid_start..scid_end)?.to_vec();
+
+    let supported_versions = payload
+        .get(scid_end..)?
+        .chunks_exact(4)
+        .map(|chunk| {
+            let mut version = [0u8; 4];
+            version.copy_from_slice(chunk);
+            u32::from_be_bytes(version)
+        })
+        .collect();
+
+    Some(QuicVersionNegotiation {
+        dcid,
+        scid,
+        supported_versions,
     })
 }
 
@@ -274,13 +320,53 @@ pub fn parse_quic_long_header(payload: &[u8]) -> Result<QuicLongHeader, LayerErr
     })
 }
 
+/// Splits a UDP datagram into the individual QUIC packets it contains
+/// (RFC 9000 sec 12.2 - coalesced packets). Only long-header packets with
+/// an explicit Length field (Initial/0-RTT/Handshake) can be split from
+/// what follows them; a short-header, Retry, or Version Negotiation
+/// packet - or a long-header packet this function fails to parse -
+/// consumes the remainder of `datagram` and ends the split (matches the
+/// spec: those packet types are never followed by another coalesced
+/// packet, and an unparseable-remainder is returned as-is rather than
+/// dropped, so callers never lose bytes).
+pub fn split_coalesced_packets(datagram: &[u8]) -> Vec<&[u8]> {
+    let mut packets = Vec::new();
+    let mut remaining = datagram;
+
+    while !remaining.is_empty() {
+        let Some(total_len) = coalesced_packet_len(remaining) else {
+            packets.push(remaining);
+            break;
+        };
+        packets.push(&remaining[..total_len]);
+        remaining = &remaining[total_len..];
+    }
+
+    packets
+}
+
+fn coalesced_packet_len(packet: &[u8]) -> Option<usize> {
+    if *packet.first()? & 0x80 == 0 {
+        return None;
+    }
+
+    let header = parse_quic_long_header(packet).ok()?;
+    if header.kind == QuicPacketType::Retry || header.is_version_negotiation {
+        return None;
+    }
+
+    let length = usize::try_from(header.length?).ok()?;
+    let total_len = header.packet_number_offset?.checked_add(length)?;
+    (total_len != 0 && total_len <= packet.len()).then_some(total_len)
+}
+
 #[cfg(test)]
 mod tests {
     use std::iter::repeat_n;
 
     use super::{
         QuicPacketType, decode_packet_number, parse_quic_long_header, parse_quic_short_header,
-        quic_version_name,
+        parse_quic_version_negotiation, quic_version_name, split_coalesced_packets,
     };
 
     // token_length=0 (0x00), length=1 (0x01), 1 byte of (still-protected) packet number.
@@ -299,6 +385,72 @@ mod tests {
     fn rejects_long_or_truncated_short_header_payloads() {
         assert!(parse_quic_short_header(&[0xe0, 1, 2, 3], 3).is_none());
         assert!(parse_quic_short_header(&[0x40, 1, 2], 3).is_none());
+    }
+
+    #[test]
+    fn parses_version_negotiation_packet() {
+        let dcid = [0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17];
+        let scid = [0xa0, 0xa1, 0xa2, 0xa3];
+        let versions = [0x0000_0001u32, 0x6b33_43cf, 0xff00_001d];
+        let mut payload = vec![
+            0x80,
+            0,
+            0,
+            0,
+            0,
+            u8::try_from(dcid.len()).expect("DCID length fits"),
+        ];
+        payload.extend_from_slice(&dcid);
+        payload.push(u8::try_from(scid.len()).expect("SCID length fits"));
+        payload.extend_from_slice(&scid);
+        for version in versions {
+            payload.extend_from_slice(&version.to_be_bytes());
+        }
+
+        let negotiation = parse_quic_version_negotiation(&payload).expect("VN packet should parse");
+        assert_eq!(negotiation.dcid, dcid);
+        assert_eq!(negotiation.scid, scid);
+        assert_eq!(negotiation.supported_versions, versions);
+    }
+
+    #[test]
+    fn rejects_nonzero_version_as_version_negotiation() {
+        let mut payload = vec![0xc0, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00];
+        payload.extend(INITIAL_TAIL);
+
+        assert!(parse_quic_version_negotiation(&payload).is_none());
+    }
+
+    #[cfg(feature = "quic-decrypt")]
+    #[test]
+    fn splits_rfc_initial_followed_by_short_header() {
+        let initial = super::decrypt::from_hex(super::decrypt::PROTECTED_PACKET_HEX);
+        let short_header = [0x43, 0xde, 0xad, 0xbe, 0xef];
+        let mut datagram = initial.clone();
+        datagram.extend_from_slice(&short_header);
+
+        let header = parse_quic_long_header(&initial).expect("Initial header should parse");
+        let expected_initial_len = header.packet_number_offset.expect("PN offset")
+            + usize::try_from(header.length.expect("declared length")).expect("length fits");
+        let packets = split_coalesced_packets(&datagram);
+
+        assert_eq!(expected_initial_len, initial.len());
+        assert_eq!(packets, vec![initial.as_slice(), short_header.as_slice()]);
+    }
+
+    #[test]
+    fn keeps_single_long_header_packet_without_trailing_empty_slice() {
+        let mut packet = vec![0xc0, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00];
+        packet.extend(INITIAL_TAIL);
+
+        assert_eq!(split_coalesced_packets(&packet), vec![packet.as_slice()]);
+    }
+
+    #[test]
+    fn keeps_single_short_header_datagram_whole() {
+        let packet = [0x43, 0xde, 0xad, 0xbe, 0xef];
+
+        assert_eq!(split_coalesced_packets(&packet), vec![packet.as_slice()]);
     }
 
     #[test]
