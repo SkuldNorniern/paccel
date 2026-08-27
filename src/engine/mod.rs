@@ -26,5 +26,5 @@ pub use pcap::{
     iter_pcap_frames, iter_pcapng_frames, parse_capture_frames, parse_pcap_frames,
 };
 pub use quic_tracker::QuicConnectionTracker;
-pub use reassembly::{IpFragmentReassembler, TcpStreamReassembler};
+pub use reassembly::{IpFragmentReassembler, QuicStreamReassembler, TcpStreamReassembler};
 pub use session::{SessionTracker, StreamEvent, StreamL7};
