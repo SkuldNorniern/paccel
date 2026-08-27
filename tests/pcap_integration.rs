@@ -14,7 +14,9 @@ use paccel::engine::{
 };
 #[cfg(feature = "fingerprint")]
 use paccel::fingerprint;
-use paccel::layer::application::quic::{QuicPacketType, parse_quic_short_header};
+use paccel::layer::application::quic::{
+    QuicPacketType, parse_quic_long_header, parse_quic_short_header, split_coalesced_packets,
+};
 
 const SYNTHETIC_SOURCE_IP: [u8; 4] = [192, 0, 2, 1];
 const SYNTHETIC_SOURCE_IPV6: [u8; 16] =
@@ -326,6 +328,13 @@ fn build_quic_long_header(first_byte: u8, version: u32, dcid: &[u8], scid: &[u8]
 fn build_quic_initial(dcid: &[u8], scid: &[u8], declared_length: u16) -> Vec<u8> {
     let mut packet = build_quic_long_header(0xc0, 1, dcid, scid);
     packet.push(0); // empty token, encoded as a one-byte varint
+    packet.extend_from_slice(&encode_quic_varint(declared_length));
+    packet.extend(repeat_n(0x5a, usize::from(declared_length)));
+    packet
+}
+
+fn build_quic_handshake(dcid: &[u8], scid: &[u8], declared_length: u16) -> Vec<u8> {
+    let mut packet = build_quic_long_header(0xe0, 1, dcid, scid);
     packet.extend_from_slice(&encode_quic_varint(declared_length));
     packet.extend(repeat_n(0x5a, usize::from(declared_length)));
     packet
@@ -1920,6 +1929,37 @@ fn quic_connection_migration_resolves_via_cid_tracker() {
     assert_eq!(
         tracker.connection_for_dcid(short_header.dcid),
         Some((IpAddr::V4(ipv4.source), 51_820, IpAddr::V4(server), 443))
+    );
+}
+
+#[test]
+fn quic_coalesced_initial_and_handshake_feed_tracker_consistently() {
+    let dcid = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
+    let scid = [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00, 0x11];
+
+    let initial = build_quic_initial(&dcid, &scid, 64);
+    let handshake = build_quic_handshake(&dcid, &scid, 64);
+    let mut datagram = initial.clone();
+    datagram.extend_from_slice(&handshake);
+
+    let packets = split_coalesced_packets(&datagram);
+    assert_eq!(packets, vec![initial.as_slice(), handshake.as_slice()]);
+
+    let mut tracker = QuicConnectionTracker::new();
+    let client = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 30));
+    let server = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 40));
+
+    for packet in &packets {
+        let header = parse_quic_long_header(packet).expect("coalesced packet should parse");
+        assert_eq!(header.scid, scid);
+        tracker.observe_long_header(client, 55_001, server, 443, &header.scid);
+    }
+
+    // Both coalesced packets carry the same SCID - observing it twice must not
+    // create duplicate flow/CID-index bookkeeping.
+    assert_eq!(
+        tracker.connection_for_dcid(&scid),
+        Some((client, 55_001, server, 443))
     );
 }
 
