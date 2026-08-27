@@ -45,6 +45,35 @@ pub struct QuicLongHeader {
     pub retry_integrity_tag: Option<[u8; 16]>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QuicShortHeader<'a> {
+    pub spin_bit: bool,
+    pub dcid: &'a [u8],
+}
+
+/// Parses the structural (still header-protected) fields of a QUIC short-header
+/// (1-RTT) packet, given the DCID length the caller already knows from tracking
+/// this connection's handshake (for example, via `QuicConnectionTracker`).
+///
+/// Returns `None` if `payload` is not a short header or is too short to contain
+/// `dcid_len` bytes of DCID. As with [`parse_quic_long_header`], the fixed bit is
+/// treated as a hint rather than required because RFC 9287 permits endpoints to
+/// negotiate its removal.
+pub fn parse_quic_short_header(payload: &[u8], dcid_len: usize) -> Option<QuicShortHeader<'_>> {
+    let first_byte = *payload.first()?;
+    if first_byte & 0x80 != 0 {
+        return None;
+    }
+
+    // The fixed bit normally carries 0x40, but RFC 9287 can grease-flip it.
+    let dcid_end = 1usize.checked_add(dcid_len)?;
+    let dcid = payload.get(1..dcid_end)?;
+    Some(QuicShortHeader {
+        spin_bit: first_byte & 0x20 != 0,
+        dcid,
+    })
+}
+
 /// RFC 9000 sec 16 variable-length integer: top 2 bits of the first byte pick
 /// the encoding length (1/2/4/8 bytes), remaining bits (of all length bytes)
 /// are the value.
@@ -249,10 +278,28 @@ pub fn parse_quic_long_header(payload: &[u8]) -> Result<QuicLongHeader, LayerErr
 mod tests {
     use std::iter::repeat_n;
 
-    use super::{QuicPacketType, decode_packet_number, parse_quic_long_header, quic_version_name};
+    use super::{
+        QuicPacketType, decode_packet_number, parse_quic_long_header, parse_quic_short_header,
+        quic_version_name,
+    };
 
     // token_length=0 (0x00), length=1 (0x01), 1 byte of (still-protected) packet number.
     const INITIAL_TAIL: [u8; 3] = [0x00, 0x01, 0x00];
+
+    #[test]
+    fn parses_structural_short_header_fields() {
+        let payload = [0x60, 0xde, 0xad, 0xbe, 0xef, 0x9a, 0xbc, 0x01, 0x02];
+        let header = parse_quic_short_header(&payload, 6).expect("short header should parse");
+
+        assert!(header.spin_bit);
+        assert_eq!(header.dcid, &[0xde, 0xad, 0xbe, 0xef, 0x9a, 0xbc]);
+    }
+
+    #[test]
+    fn rejects_long_or_truncated_short_header_payloads() {
+        assert!(parse_quic_short_header(&[0xe0, 1, 2, 3], 3).is_none());
+        assert!(parse_quic_short_header(&[0x40, 1, 2], 3).is_none());
+    }
 
     #[test]
     fn decodes_rfc_packet_number_example() {
