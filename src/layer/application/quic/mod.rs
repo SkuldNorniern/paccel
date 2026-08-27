@@ -2,6 +2,7 @@ use crate::layer::LayerError;
 
 #[cfg(feature = "quic-decrypt")]
 pub mod decrypt;
+pub mod frame;
 #[cfg(feature = "quic-decrypt")]
 pub mod keylog;
 
@@ -10,6 +11,7 @@ pub use decrypt::{
     DecryptedInitial, decrypt_initial_client_hello, decrypt_initial_packet,
     decrypt_packet_with_secret, extract_crypto_stream,
 };
+pub use frame::{QuicFrame, QuicFrameIter, iter_quic_frames};
 #[cfg(feature = "quic-decrypt")]
 pub use keylog::{QuicKeyLog, QuicKeyLogLabel};
 
