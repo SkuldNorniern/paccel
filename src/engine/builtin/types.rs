@@ -581,6 +581,15 @@ pub struct ParsedPacket {
     pub udp_hints: Vec<UdpAppHint>,
     pub warnings: Vec<ParseWarning>,
     pub inner: Option<Box<ParsedPacket>>,
+    /// Byte offset where the transport-layer header (`transport`) begins within
+    /// the buffer passed to this `ParsedPacket`'s own `parse`/`parse_with_config`
+    /// call - lets a caller who stopped parsing before the application layer
+    /// slice out the raw L4 payload themselves (e.g. offset + 8 for UDP's fixed
+    /// header, to run `parse_quic_short_header` on what follows) without
+    /// recomputing link/network header lengths paccel already resolved. For a
+    /// nested/tunnel `inner` packet this is relative to that inner packet's own
+    /// buffer, not the outermost one.
+    pub transport_segment_offset: Option<usize>,
 }
 
 impl ParsedPacket {

@@ -272,6 +272,7 @@ impl BuiltinPacketParser {
                     let l4_bytes = &l3_bytes[ip_header_len..l4_end];
                     let transport_parse = parse_transport(ipv4.protocol, l4_bytes, config)?;
                     apply_transport_parse(&mut parsed, transport_parse);
+                    parsed.transport_segment_offset = Some(l3_offset + ip_header_len);
                     recurse_transport_tunnel(
                         &mut parsed,
                         ipv4.protocol,
@@ -348,6 +349,7 @@ impl BuiltinPacketParser {
                     let l4_bytes = &ipv6_payload[state.l4_offset..];
                     let transport_parse = parse_transport(state.next_header, l4_bytes, config)?;
                     apply_transport_parse(&mut parsed, transport_parse);
+                    parsed.transport_segment_offset = Some(l3_offset + state.l4_offset);
                     recurse_transport_tunnel(
                         &mut parsed,
                         state.next_header,
