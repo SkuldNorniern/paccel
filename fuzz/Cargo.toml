@@ -40,3 +40,31 @@ path = "fuzz_targets/fuzz_parse_linktype.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_parse_quic"
+path = "fuzz_targets/fuzz_parse_quic.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_quic_frames"
+path = "fuzz_targets/fuzz_quic_frames.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_quic_stream_reassembly"
+path = "fuzz_targets/fuzz_quic_stream_reassembly.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_tcp_reassembly"
+path = "fuzz_targets/fuzz_tcp_reassembly.rs"
+test = false
+doc = false
+bench = false

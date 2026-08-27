@@ -132,6 +132,6 @@ jobs:
         run: cargo install cargo-fuzz --locked
       - name: Smoke each target
         run: |
-          for t in fuzz_parse_packet fuzz_parse_capture fuzz_parse_dns fuzz_parse_linktype; do
+          for t in fuzz_parse_packet fuzz_parse_capture fuzz_parse_dns fuzz_parse_linktype fuzz_parse_quic fuzz_quic_frames fuzz_quic_stream_reassembly fuzz_tcp_reassembly; do
             cargo +nightly fuzz run "$t" -- -max_total_time=60
           done
