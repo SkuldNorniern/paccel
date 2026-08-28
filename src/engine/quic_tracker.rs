@@ -7,6 +7,25 @@ use crate::layer::application::quic::decode_packet_number;
 
 const DEFAULT_MAX_FLOWS: usize = 65_536;
 
+/// RFC 9000 sec 12.3: packet numbers are independent per space, not one
+/// sequence across a connection. 0-RTT and 1-RTT share the Application space.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum QuicPacketNumberSpace {
+    Initial,
+    Handshake,
+    Application,
+}
+
+impl QuicPacketNumberSpace {
+    fn index(self) -> usize {
+        match self {
+            Self::Initial => 0,
+            Self::Handshake => 1,
+            Self::Application => 2,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 struct Endpoint {
     address: IpAddr,
@@ -22,7 +41,7 @@ struct FlowKey {
 #[derive(Debug, Default)]
 struct QuicFlowState {
     expected_dcids: [Option<Vec<u8>>; 2],
-    largest_packet_numbers: [Option<u64>; 2],
+    largest_packet_numbers: [[Option<u64>; 3]; 2],
 }
 
 /// Tracks connection IDs and packet numbers for each direction of a UDP flow.
@@ -104,8 +123,9 @@ impl QuicConnectionTracker {
             .map(Vec::len)
     }
 
-    /// Reconstructs the packet number per RFC 9000 Appendix A.3 and updates the
-    /// direction's maximum.
+    /// Reconstructs the packet number per RFC 9000 Appendix A.3 and updates
+    /// that direction's maximum for `space` - Initial/Handshake/Application
+    /// track independent packet-number sequences, per RFC 9000 sec 12.3.
     #[allow(clippy::too_many_arguments)]
     pub fn reconstruct_packet_number(
         &mut self,
@@ -113,6 +133,7 @@ impl QuicConnectionTracker {
         src_port: u16,
         dst: IpAddr,
         dst_port: u16,
+        space: QuicPacketNumberSpace,
         truncated_pn: u32,
         pn_len: usize,
     ) -> u64 {
@@ -123,10 +144,11 @@ impl QuicConnectionTracker {
         let Some(flow) = self.flows.get_mut(&key) else {
             return decode_packet_number(None, truncated_pn, pn_len);
         };
-        let largest_pn = flow.largest_packet_numbers[direction];
+        let space_index = space.index();
+        let largest_pn = flow.largest_packet_numbers[direction][space_index];
         let packet_number = decode_packet_number(largest_pn, truncated_pn, pn_len);
         if largest_pn.is_none_or(|largest| packet_number >= largest) {
-            flow.largest_packet_numbers[direction] = Some(packet_number);
+            flow.largest_packet_numbers[direction][space_index] = Some(packet_number);
         }
         packet_number
     }
@@ -255,11 +277,27 @@ mod tests {
         let mut tracker = QuicConnectionTracker::new();
 
         assert_eq!(
-            tracker.reconstruct_packet_number(src, 1_000, dst, 443, 0xa82f_30ea, 4),
+            tracker.reconstruct_packet_number(
+                src,
+                1_000,
+                dst,
+                443,
+                QuicPacketNumberSpace::Application,
+                0xa82f_30ea,
+                4
+            ),
             0xa82f_30ea
         );
         assert_eq!(
-            tracker.reconstruct_packet_number(src, 1_000, dst, 443, 0x9b32, 2),
+            tracker.reconstruct_packet_number(
+                src,
+                1_000,
+                dst,
+                443,
+                QuicPacketNumberSpace::Application,
+                0x9b32,
+                2
+            ),
             0xa82f_9b32
         );
 
@@ -268,8 +306,44 @@ mod tests {
             tracker
                 .flows
                 .get(&key)
-                .and_then(|flow| flow.largest_packet_numbers[direction]),
+                .and_then(|flow| flow.largest_packet_numbers[direction]
+                    [QuicPacketNumberSpace::Application.index()]),
             Some(0xa82f_9b32)
+        );
+    }
+
+    #[test]
+    fn packet_number_spaces_are_independent() {
+        let (src, dst) = endpoints();
+        let mut tracker = QuicConnectionTracker::new();
+
+        // Push Initial's largest to 200.
+        assert_eq!(
+            tracker.reconstruct_packet_number(
+                src,
+                1_000,
+                dst,
+                443,
+                QuicPacketNumberSpace::Initial,
+                200,
+                1
+            ),
+            200
+        );
+        // Handshake, same direction, has no state of its own yet - a truncated
+        // PN of 5 must reconstruct to 5, not to a value inflated by treating
+        // Initial's largest-200 as this space's context (which would give 261).
+        assert_eq!(
+            tracker.reconstruct_packet_number(
+                src,
+                1_000,
+                dst,
+                443,
+                QuicPacketNumberSpace::Handshake,
+                5,
+                1
+            ),
+            5
         );
     }
 
@@ -280,7 +354,15 @@ mod tests {
 
         for src_port in [1_000, 1_001, 1_002, 1_003] {
             assert_eq!(
-                tracker.reconstruct_packet_number(src, src_port, dst, 443, 0, 1),
+                tracker.reconstruct_packet_number(
+                    src,
+                    src_port,
+                    dst,
+                    443,
+                    QuicPacketNumberSpace::Application,
+                    0,
+                    1
+                ),
                 0
             );
             assert!(tracker.flows.len() <= 2);
