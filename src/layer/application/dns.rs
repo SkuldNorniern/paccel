@@ -2,7 +2,7 @@ use std::convert::TryInto;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::str;
 
-use crate::layer::LayerError;
+use crate::layer::{Layer, LayerError, ParseError, ProbeResult};
 
 /// DNS header (the first 12 message bytes).
 #[derive(Debug)]
@@ -158,6 +158,42 @@ pub fn parse_dns_message(packet: &[u8]) -> Result<DnsMessage, LayerError> {
         authorities,
         additionals,
     })
+}
+
+/// Probes DNS without inventing a magic-byte mismatch signal.
+#[must_use]
+pub fn probe_dns(packet: &[u8]) -> ProbeResult<DnsMessage> {
+    if packet.len() < 12 {
+        return ProbeResult::Incomplete {
+            needed: Some(12),
+            available: packet.len(),
+        };
+    }
+
+    let minimum_length = dns_minimum_message_length(packet);
+    match parse_dns_message(packet) {
+        Ok(message) => ProbeResult::Match(message),
+        Err(LayerError::InvalidLength | LayerError::InsufficientData) => ProbeResult::Incomplete {
+            needed: minimum_length.filter(|needed| *needed > packet.len()),
+            available: packet.len(),
+        },
+        Err(error) => ProbeResult::Malformed(ParseError::from_layer_error(
+            &error,
+            Layer::Application,
+            Some("dns"),
+            0,
+        )),
+    }
+}
+
+fn dns_minimum_message_length(packet: &[u8]) -> Option<usize> {
+    let questions = usize::from(u16::from_be_bytes([packet[4], packet[5]]));
+    let records = usize::from(u16::from_be_bytes([packet[6], packet[7]]))
+        .checked_add(usize::from(u16::from_be_bytes([packet[8], packet[9]])))?
+        .checked_add(usize::from(u16::from_be_bytes([packet[10], packet[11]])))?;
+    12usize
+        .checked_add(questions.checked_mul(5)?)?
+        .checked_add(records.checked_mul(11)?)
 }
 
 /// Parses an RFC 1035 name, following compression pointers. Returns the name
@@ -826,5 +862,30 @@ mod tests {
         if let Ok(dns_msg) = result {
             assert_eq!(dns_msg.questions[0].qname, "www.example.com");
         }
+    }
+
+    #[test]
+    fn probe_matches_a_real_query() {
+        assert!(matches!(
+            probe_dns(&create_test_dns_query()),
+            ProbeResult::Match(_)
+        ));
+    }
+
+    #[test]
+    fn probe_reports_incomplete_for_a_truncated_query() {
+        let packet = create_test_dns_query();
+        let truncated = &packet[..20];
+        assert!(matches!(
+            probe_dns(truncated),
+            ProbeResult::Incomplete { available: 20, .. }
+        ));
+    }
+
+    #[test]
+    fn probe_reports_malformed_for_an_invalid_name() {
+        let mut packet = create_test_dns_query();
+        packet[12] = 64;
+        assert!(matches!(probe_dns(&packet), ProbeResult::Malformed(_)));
     }
 }

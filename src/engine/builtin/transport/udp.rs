@@ -458,7 +458,7 @@ fn maybe_probe_isakmp_udp(
 fn maybe_probe_llmnr_udp(udp: &UdpHeader, payload: &[u8], hints: &mut Vec<UdpAppHint>) {
     if is_udp_port_match(udp, UDP_PORT_LLMNR)
         && payload.len() >= 12
-        && parse_dns_message(payload).is_ok()
+        && probe_dns(payload).ok().is_some()
     {
         push_hint_unique(hints, UdpAppHint::Llmnr);
     }
@@ -467,7 +467,7 @@ fn maybe_probe_llmnr_udp(udp: &UdpHeader, payload: &[u8], hints: &mut Vec<UdpApp
 fn maybe_probe_nbns_udp(udp: &UdpHeader, payload: &[u8], hints: &mut Vec<UdpAppHint>) {
     if is_udp_port_match(udp, UDP_PORT_NBNS)
         && payload.len() >= 12
-        && parse_dns_message(payload).is_ok()
+        && probe_dns(payload).ok().is_some()
     {
         push_hint_unique(hints, UdpAppHint::Nbns);
     }
@@ -677,7 +677,7 @@ fn likely_dns_message(payload: &[u8]) -> bool {
 }
 
 fn try_parse_dns_message(payload: &[u8]) -> Option<DnsMessage> {
-    parse_dns_message(payload).ok()
+    probe_dns(payload).ok()
 }
 
 fn likely_dhcp_message(payload: &[u8]) -> bool {

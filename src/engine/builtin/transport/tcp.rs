@@ -24,13 +24,13 @@ pub(super) fn classify_tcp_application(
 ) {
     let is_tls_handshake_record = payload.len() >= 5 && payload[0] == 22;
     parsed.tls = is_tls_handshake_record
-        .then(|| parse_tls_client_hello(payload).ok())
+        .then(|| probe_tls_client_hello(payload).ok())
         .flatten();
     if parsed.tls.is_none() && is_tls_handshake_record {
         parsed.tls_server_hello = parse_tls_server_hello(payload).ok();
     }
     if parsed.tls.is_none() && parsed.tls_server_hello.is_none() {
-        parsed.http = parse_http(payload).ok();
+        parsed.http = probe_http(payload).ok();
         if parsed.http.is_none()
             && (source_port == UDP_PORT_SIP || destination_port == UDP_PORT_SIP)
         {
@@ -38,7 +38,7 @@ pub(super) fn classify_tcp_application(
         }
         if parsed.http.is_none() && parsed.sip.is_none() {
             if !payload.is_empty() {
-                parsed.ssh = parse_ssh_banner(payload).ok();
+                parsed.ssh = probe_ssh_banner(payload).ok();
             }
             if parsed.ssh.is_none() {
                 parsed.ssh_kex_init = parse_ssh_kex_init(payload).ok();
