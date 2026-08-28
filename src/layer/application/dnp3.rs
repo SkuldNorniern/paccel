@@ -125,6 +125,9 @@ pub fn parse_dnp3_message(payload: &[u8]) -> Result<Dnp3Message, LayerError> {
     let control = payload[3];
     let user_data_len = usize::from(length).saturating_sub(DATA_LINK_FIELDS_LEN);
     let user_data = dechunk_user_data(&payload[DATA_LINK_HEADER_LEN..], user_data_len);
+    if user_data.len() < user_data_len {
+        return Err(LayerError::InvalidLength);
+    }
     let Some(&transport_control) = user_data.first() else {
         return Err(LayerError::InvalidLength);
     };
@@ -275,6 +278,16 @@ mod tests {
     fn rejects_payload_shorter_than_data_link_header() {
         assert!(matches!(
             parse_dnp3_message(&FRAME_FOUR_PAYLOAD[..9]),
+            Err(LayerError::InvalidLength)
+        ));
+    }
+
+    #[test]
+    fn rejects_user_data_shorter_than_declared_length() {
+        // Full 10-byte header (length byte declares 6 user-data bytes) but
+        // only 3 bytes of user data follow - must not be treated as complete.
+        assert!(matches!(
+            parse_dnp3_message(&FRAME_FOUR_PAYLOAD[..13]),
             Err(LayerError::InvalidLength)
         ));
     }

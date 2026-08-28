@@ -39,7 +39,11 @@ pub(super) fn parse_udp_transport(
     config: ParseConfig,
 ) -> Result<TransportParse, LayerError> {
     let udp = parse_udp_header(l4_bytes)?;
-    let udp_end = (udp.length as usize).min(l4_bytes.len());
+    let declared_end = usize::from(udp.length);
+    if declared_end > l4_bytes.len() && config.mode == ParseMode::Strict {
+        return Err(LayerError::InvalidLength);
+    }
+    let udp_end = declared_end.min(l4_bytes.len());
     let app = &l4_bytes[UDP_HEADER_LEN..udp_end];
     let mut hints = Vec::new();
     let mut dns = None;

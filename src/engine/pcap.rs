@@ -428,16 +428,20 @@ fn parse_pcapng_enhanced_packet<'a>(
         return Err(LayerError::InvalidLength);
     }
 
+    // An EPB's Interface ID must refer to an already-seen IDB (pcapng spec
+    // sec 4.3); an out-of-range ID is an invalid capture, not "assume Ethernet".
+    let interface = interfaces
+        .get(interface_id)
+        .ok_or(LayerError::InvalidHeader)?;
     let raw_ts = (ts_high << 32) | ts_low;
-    let interface = interfaces.get(interface_id);
-    let ticks = interface.map_or(1_000_000, |i| i.ts_ticks_per_second);
+    let ticks = interface.ts_ticks_per_second;
     let (timestamp_sec, timestamp_subsec) = split_timestamp(raw_ts, ticks);
 
     Ok(PcapFrame {
         timestamp_sec,
         timestamp_subsec,
         ts_resolution: resolution_from_ticks(ticks),
-        linktype: interface.map_or(1, |i| i.linktype),
+        linktype: interface.linktype,
         data: &input[data_start..data_start + cap_len],
     })
 }
@@ -463,13 +467,15 @@ fn parse_pcapng_simple_packet<'a>(
         return Err(LayerError::InvalidLength);
     }
 
+    // An SPB implicitly refers to interface 0 (pcapng spec sec 4.4); no IDB
+    // means there's no interface 0 to refer to.
+    let interface = interfaces.first().ok_or(LayerError::InvalidHeader)?;
+
     Ok(PcapFrame {
         timestamp_sec: 0,
         timestamp_subsec: 0,
-        ts_resolution: interfaces.first().map_or(TsResolution::Micro, |i| {
-            resolution_from_ticks(i.ts_ticks_per_second)
-        }),
-        linktype: interfaces.first().map_or(1, |i| i.linktype),
+        ts_resolution: resolution_from_ticks(interface.ts_ticks_per_second),
+        linktype: interface.linktype,
         data: &input[data_start..data_start + cap_len],
     })
 }
@@ -660,6 +666,18 @@ mod tests {
         let first = iter.next().expect("one frame").expect("frame should parse");
         assert_eq!(first.data, frame);
         assert!(iter.next().is_none());
+    }
+
+    #[test]
+    fn epb_with_unknown_interface_id_errors_instead_of_assuming_ethernet() {
+        let mut bytes = build_minimal_pcapng_epb(&[0xaa, 0xbb, 0xcc, 0xdd]);
+        // EPB's Interface ID field, right after block type/length. SHB (28
+        // bytes) + IDB (20 bytes) precede the EPB. Only interface 0 exists.
+        let interface_id_offset = 28 + 20 + 8;
+        bytes[interface_id_offset..interface_id_offset + 4].copy_from_slice(&99u32.to_le_bytes());
+
+        let mut iter = iter_pcapng_frames(&bytes).expect("pcapng iterator should init");
+        assert!(iter.next().expect("one block").is_err());
     }
 
     // ── Additional pcap file tests ─────────────────────────────────────
