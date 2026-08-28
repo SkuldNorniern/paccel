@@ -10,6 +10,7 @@ use crate::layer::transport::tcp::TcpHeader;
 
 const DEFAULT_MAX_PROBE_BYTES: usize = 65_536;
 const DEFAULT_MAX_PROBE_FLOWS: usize = 65_536;
+const DEFAULT_MAX_TOTAL_PROBE_BYTES: usize = 64 * 1_048_576;
 
 /// Application message recognized in a reassembled TCP stream.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -61,6 +62,8 @@ pub struct SessionTracker {
     probes: HashMap<DirectionKey, ProbeState>,
     max_probe_bytes: usize,
     max_probe_flows: usize,
+    max_total_probe_bytes: usize,
+    total_probe_bytes: usize,
     insertion_order: VecDeque<DirectionKey>,
 }
 
@@ -79,6 +82,8 @@ impl SessionTracker {
             probes: HashMap::new(),
             max_probe_bytes,
             max_probe_flows: DEFAULT_MAX_PROBE_FLOWS,
+            max_total_probe_bytes: DEFAULT_MAX_TOTAL_PROBE_BYTES,
+            total_probe_bytes: 0,
             insertion_order: VecDeque::new(),
         }
     }
@@ -88,6 +93,20 @@ impl SessionTracker {
     pub fn with_max_probe_flows(mut self, max_probe_flows: usize) -> Self {
         self.max_probe_flows = max_probe_flows;
         self
+    }
+
+    /// Sets the total probe-byte cap across every direction combined -
+    /// `max_probe_bytes` alone only bounds one direction. Defaults to 64 MiB.
+    #[must_use]
+    pub fn with_max_total_probe_bytes(mut self, max_total_probe_bytes: usize) -> Self {
+        self.max_total_probe_bytes = max_total_probe_bytes;
+        self
+    }
+
+    /// Bytes currently held for in-progress probes across every direction.
+    #[must_use]
+    pub fn probe_bytes(&self) -> usize {
+        self.total_probe_bytes
     }
 
     /// Returns the first HTTP or TLS message found in the frame's direction.
@@ -135,14 +154,21 @@ impl SessionTracker {
         if state.done {
             return None;
         }
-        let remaining = self.max_probe_bytes.saturating_sub(state.bytes.len());
-        let append_len = remaining.min(contiguous.len());
+        let per_direction_remaining = self.max_probe_bytes.saturating_sub(state.bytes.len());
+        let total_remaining = self
+            .max_total_probe_bytes
+            .saturating_sub(self.total_probe_bytes);
+        let append_len = per_direction_remaining
+            .min(total_remaining)
+            .min(contiguous.len());
         if let Some(bytes) = contiguous.get(..append_len) {
             state.bytes.extend_from_slice(bytes);
+            self.total_probe_bytes = self.total_probe_bytes.saturating_add(bytes.len());
         }
 
         let l7 = probe_l7(&state.bytes)?;
         state.done = true;
+        self.total_probe_bytes = self.total_probe_bytes.saturating_sub(state.bytes.len());
         state.bytes.clear();
         state.bytes.shrink_to_fit();
         Some(StreamEvent {
@@ -158,7 +184,15 @@ impl SessionTracker {
     pub fn remove_flow(&mut self, src: IpAddr, src_port: u16, dst: IpAddr, dst_port: u16) -> bool {
         let flow = normalized_flow(src, src_port, dst, dst_port);
         let previous_len = self.probes.len();
-        self.probes.retain(|key, _| key.flow != flow);
+        let mut freed = 0usize;
+        self.probes.retain(|key, state| {
+            let keep = key.flow != flow;
+            if !keep {
+                freed += state.bytes.len();
+            }
+            keep
+        });
+        self.total_probe_bytes = self.total_probe_bytes.saturating_sub(freed);
         self.insertion_order.retain(|key| key.flow != flow);
         self.tcp.remove_flow(src, src_port, dst, dst_port) || self.probes.len() != previous_len
     }
@@ -168,15 +202,19 @@ impl SessionTracker {
         self.tcp.clear();
         self.probes.clear();
         self.insertion_order.clear();
+        self.total_probe_bytes = 0;
     }
 
     fn evict_until_room(&mut self) {
         while self.probes.len() >= self.max_probe_flows {
             let Some(oldest) = self.insertion_order.pop_front() else {
                 self.probes.clear();
+                self.total_probe_bytes = 0;
                 break;
             };
-            self.probes.remove(&oldest);
+            if let Some(state) = self.probes.remove(&oldest) {
+                self.total_probe_bytes = self.total_probe_bytes.saturating_sub(state.bytes.len());
+            }
 
             // Clear stale TCP sequence state after both probe directions are gone.
             let flow = &oldest.flow;
@@ -496,6 +534,29 @@ mod tests {
             }
             _ => panic!("expected HTTP request"),
         }
+    }
+
+    #[test]
+    fn total_probe_bytes_cap_applies_across_flows() {
+        let mut tracker = SessionTracker::new().with_max_total_probe_bytes(10);
+
+        // Incomplete request (no \r\n\r\n yet): 6 bytes held, under budget.
+        assert!(
+            tracker
+                .offer_frame(&tcp_frame(SRC_PORT, 1_000, false, b"GET /a"))
+                .is_none()
+        );
+        assert_eq!(tracker.probe_bytes(), 6);
+
+        // A different flow's incomplete probe pushes the combined total to
+        // the 10-byte cap - only the remaining budget (4 bytes) is accepted,
+        // even though this flow alone is well under any per-direction limit.
+        assert!(
+            tracker
+                .offer_frame(&tcp_frame(2_000, 1_000, false, b"GET /b"))
+                .is_none()
+        );
+        assert_eq!(tracker.probe_bytes(), 10);
     }
 
     #[test]
