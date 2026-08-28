@@ -11,11 +11,11 @@ use crate::layer::application::coap::{CoapMessage, parse_coap_message};
 use crate::layer::application::dhcp::{DhcpMessage, parse_dhcp_message};
 use crate::layer::application::dhcp6::{Dhcp6Message, parse_dhcp6_message};
 use crate::layer::application::dnp3::{Dnp3Message, probe_dnp3};
-use crate::layer::application::dns::{DnsMessage, parse_dns_message};
+use crate::layer::application::dns::{DnsMessage, probe_dns};
 use crate::layer::application::eigrp::{EigrpHeader, parse_eigrp_header};
 use crate::layer::application::ftp::{FtpMessage, parse_ftp};
 use crate::layer::application::hsrp::{HsrpHeader, parse_hsrp_header};
-use crate::layer::application::http::{HttpMessage, parse_http};
+use crate::layer::application::http::{HttpMessage, probe_http};
 use crate::layer::application::imap::{ImapMessage, parse_imap_message};
 use crate::layer::application::isakmp::{IsakmpHeader, parse_isakmp_header};
 use crate::layer::application::kerberos::{
@@ -42,13 +42,13 @@ use crate::layer::application::smb2::{Smb2Header, parse_smb2_message};
 use crate::layer::application::smtp::{SmtpMessage, parse_smtp};
 use crate::layer::application::snmp::{SnmpMessage, parse_snmp_message};
 use crate::layer::application::ssdp::{SsdpMessage, parse_ssdp};
-use crate::layer::application::ssh::{SshBanner, SshKexInit, parse_ssh_banner, parse_ssh_kex_init};
+use crate::layer::application::ssh::{SshBanner, SshKexInit, parse_ssh_kex_init, probe_ssh_banner};
 use crate::layer::application::stun::{StunMessage, parse_stun_message};
 use crate::layer::application::syslog::{SyslogMessage, parse_syslog_message};
 use crate::layer::application::telnet::{TelnetCommand, parse_telnet_command};
 use crate::layer::application::tftp::{TftpMessage, parse_tftp_message};
 use crate::layer::application::tls::{
-    TlsClientHello, TlsServerHello, parse_tls_client_hello, parse_tls_server_hello,
+    TlsClientHello, TlsServerHello, parse_tls_server_hello, probe_tls_client_hello,
 };
 use crate::layer::application::vrrp::{VrrpHeader, parse_vrrp_header};
 use crate::layer::network::icmp::IcmpHeader;

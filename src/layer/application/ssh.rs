@@ -1,6 +1,6 @@
 use std::str;
 
-use crate::layer::LayerError;
+use crate::layer::{Layer, LayerError, ParseError, ProbeResult};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SshBanner {
@@ -109,10 +109,44 @@ pub fn parse_ssh_banner(payload: &[u8]) -> Result<SshBanner, LayerError> {
     })
 }
 
+/// Probes an SSH identification banner using its required line prefix.
+#[must_use]
+pub fn probe_ssh_banner(payload: &[u8]) -> ProbeResult<SshBanner> {
+    if payload.len() < 4 {
+        return if b"SSH-".starts_with(payload) {
+            ProbeResult::Incomplete {
+                needed: Some(4),
+                available: payload.len(),
+            }
+        } else {
+            ProbeResult::NoMatch
+        };
+    }
+    if !payload.starts_with(b"SSH-") {
+        return ProbeResult::NoMatch;
+    }
+    if !payload.contains(&b'\n') {
+        return ProbeResult::Incomplete {
+            needed: None,
+            available: payload.len(),
+        };
+    }
+
+    match parse_ssh_banner(payload) {
+        Ok(banner) => ProbeResult::Match(banner),
+        Err(error) => ProbeResult::Malformed(ParseError::from_layer_error(
+            &error,
+            Layer::Application,
+            Some("ssh"),
+            0,
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::parse_ssh_kex_init;
-    use crate::layer::LayerError;
+    use super::{parse_ssh_kex_init, probe_ssh_banner};
+    use crate::layer::{LayerError, ProbeResult};
 
     // OpenSSH SSH_MSG_KEXINIT payload verified against tshark field extraction.
     const KEXINIT: &str = "000000e40814cc19299decf0e8ff36bd64a590cd7fac0000001c637572766532353531392d7368613235362c6578742d696e666f2d63000000077373682d727361000000166165733132382d67636d406f70656e7373682e636f6d000000166165733132382d67636d406f70656e7373682e636f6d0000000d686d61632d736861322d3235360000000d686d61632d736861322d3235360000001a6e6f6e652c7a6c6962406f70656e7373682e636f6d2c7a6c69620000001a6e6f6e652c7a6c6962406f70656e7373682e636f6d2c7a6c6962000000000000000000000000000000000000000000";
@@ -149,5 +183,33 @@ mod tests {
             parse_ssh_kex_init(&payload),
             Err(LayerError::InvalidHeader)
         ));
+    }
+
+    #[test]
+    fn probe_matches_a_real_openssh_banner() {
+        assert!(matches!(
+            probe_ssh_banner(b"SSH-2.0-OpenSSH_7.6p1 Ubuntu-4ubuntu0.5\r\n"),
+            ProbeResult::Match(_)
+        ));
+    }
+
+    #[test]
+    fn probe_reports_no_match_for_a_non_ssh_line() {
+        assert_eq!(
+            probe_ssh_banner(b"HTTP/1.1 200 OK\r\n"),
+            ProbeResult::NoMatch
+        );
+    }
+
+    #[test]
+    fn probe_reports_incomplete_for_an_unterminated_banner() {
+        let banner = b"SSH-2.0-OpenSSH_7.6p1";
+        assert_eq!(
+            probe_ssh_banner(banner),
+            ProbeResult::Incomplete {
+                needed: None,
+                available: banner.len(),
+            }
+        );
     }
 }

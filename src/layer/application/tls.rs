@@ -1,4 +1,4 @@
-use crate::layer::LayerError;
+use crate::layer::{Layer, LayerError, ParseError, ProbeResult};
 
 const TLS_HANDSHAKE_CONTENT_TYPE: u8 = 22;
 const CLIENT_HELLO_HANDSHAKE_TYPE: u8 = 1;
@@ -115,6 +115,80 @@ pub fn parse_tls_client_hello(payload: &[u8]) -> Result<TlsClientHello, LayerErr
         return Err(LayerError::InsufficientData);
     }
     Ok(parsed)
+}
+
+/// Probes a TLS ClientHello using the record and handshake framing signals.
+#[must_use]
+pub fn probe_tls_client_hello(payload: &[u8]) -> ProbeResult<TlsClientHello> {
+    let Some(&content_type) = payload.first() else {
+        return ProbeResult::Incomplete {
+            needed: Some(1),
+            available: 0,
+        };
+    };
+    if content_type != TLS_HANDSHAKE_CONTENT_TYPE {
+        return ProbeResult::NoMatch;
+    }
+    if payload.len() < 5 {
+        return ProbeResult::Incomplete {
+            needed: Some(5),
+            available: payload.len(),
+        };
+    }
+
+    let record_length = usize::from(u16::from_be_bytes([payload[3], payload[4]]));
+    let Some(record_end) = 5usize.checked_add(record_length) else {
+        return malformed_tls_probe(LayerError::InvalidLength);
+    };
+    if record_end > payload.len() {
+        return ProbeResult::Incomplete {
+            needed: Some(record_end),
+            available: payload.len(),
+        };
+    }
+    let record = &payload[5..record_end];
+    let Some(&handshake_type) = record.first() else {
+        return malformed_tls_probe(LayerError::InvalidLength);
+    };
+    if handshake_type != CLIENT_HELLO_HANDSHAKE_TYPE {
+        return ProbeResult::NoMatch;
+    }
+    if record.len() < 4 {
+        return malformed_tls_probe(LayerError::InvalidLength);
+    }
+
+    let handshake_length =
+        (usize::from(record[1]) << 16) | (usize::from(record[2]) << 8) | usize::from(record[3]);
+    let Some(handshake_end) = 4usize.checked_add(handshake_length) else {
+        return malformed_tls_probe(LayerError::InvalidLength);
+    };
+    if handshake_end > record.len() {
+        let Some(needed) = 5usize.checked_add(handshake_end) else {
+            return malformed_tls_probe(LayerError::InvalidLength);
+        };
+        return if needed > payload.len() {
+            ProbeResult::Incomplete {
+                needed: Some(needed),
+                available: payload.len(),
+            }
+        } else {
+            malformed_tls_probe(LayerError::InvalidLength)
+        };
+    }
+
+    match parse_tls_client_hello(payload) {
+        Ok(hello) => ProbeResult::Match(hello),
+        Err(error) => malformed_tls_probe(error),
+    }
+}
+
+fn malformed_tls_probe(error: LayerError) -> ProbeResult<TlsClientHello> {
+    ProbeResult::Malformed(ParseError::from_layer_error(
+        &error,
+        Layer::Application,
+        Some("tls"),
+        0,
+    ))
 }
 
 pub fn parse_tls_server_hello(payload: &[u8]) -> Result<TlsServerHello, LayerError> {
@@ -418,6 +492,7 @@ fn take<'a>(data: &'a [u8], offset: &mut usize, length: usize) -> Result<&'a [u8
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::layer::ProbeResult;
 
     fn client_hello() -> TlsClientHello {
         TlsClientHello {
@@ -580,5 +655,48 @@ mod tests {
         assert!(hello.supported_groups.is_empty());
         assert!(hello.signature_algorithms.is_empty());
         assert!(hello.ec_point_formats.is_empty());
+    }
+
+    #[test]
+    fn probe_matches_a_client_hello_record() {
+        assert!(matches!(
+            probe_tls_client_hello(&client_hello_record(&[])),
+            ProbeResult::Match(_)
+        ));
+    }
+
+    #[test]
+    fn probe_reports_no_match_for_a_server_hello() {
+        assert_eq!(
+            probe_tls_client_hello(&server_hello_record(&[])),
+            ProbeResult::NoMatch
+        );
+    }
+
+    #[test]
+    fn probe_reports_incomplete_for_a_truncated_record() {
+        let mut client = client_hello_record(&[]);
+        let needed = client.len();
+        client.pop();
+        assert_eq!(
+            probe_tls_client_hello(&client),
+            ProbeResult::Incomplete {
+                needed: Some(needed),
+                available: client.len(),
+            }
+        );
+    }
+
+    #[test]
+    fn probe_reports_incomplete_for_a_truncated_handshake() {
+        let mut client = client_hello_record(&[]);
+        client[8] += 1;
+        assert_eq!(
+            probe_tls_client_hello(&client),
+            ProbeResult::Incomplete {
+                needed: Some(client.len() + 1),
+                available: client.len(),
+            }
+        );
     }
 }
