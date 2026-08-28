@@ -37,7 +37,7 @@ pub mod packet;
 
 pub use engine::{
     IpFragmentReassembler, QuicConnectionTracker, QuicStreamReassembler, SessionTracker,
-    StreamEvent, StreamL7, TcpStreamReassembler,
+    StreamEvent, StreamL7, TcpOverlapPolicy, TcpStreamReassembler,
 };
 pub use layer::LayerError;
 pub use packet::{Packet, PacketError, PacketMetadata, PacketView};

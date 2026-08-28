@@ -31,6 +31,7 @@ fuzz_target!(|data: &[u8]| {
 
         let syn = flags & 1 != 0;
         let fin = flags & 2 != 0;
-        let _ = reassembler.offer(src, 51_820, dst, 443, seq, syn, fin, payload);
+        let rst = flags & 4 != 0;
+        let _ = reassembler.offer(src, 51_820, dst, 443, seq, syn, fin, rst, payload);
     }
 });

@@ -272,6 +272,21 @@ struct TcpFlowKey {
     second: Endpoint,
 }
 
+/// How [`TcpStreamReassembler`] resolves an out-of-order segment whose byte
+/// range overlaps one already buffered (a retransmission with different
+/// content, or adversarial overlap). Default is [`Self::Reject`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TcpOverlapPolicy {
+    /// Drop the incoming segment's overlapping bytes entirely; only its
+    /// genuinely non-overlapping portion (if any) is buffered.
+    #[default]
+    Reject,
+    /// Keep whichever bytes were buffered first for the overlapping range.
+    FirstWins,
+    /// The incoming segment's bytes win the overlapping range.
+    LastWins,
+}
+
 #[derive(Debug, Default)]
 struct TcpDirectionState {
     expected: Option<u32>,
@@ -292,6 +307,7 @@ pub struct TcpStreamReassembler {
     max_buffered_bytes: usize,
     max_gap: usize,
     max_flows: usize,
+    overlap_policy: TcpOverlapPolicy,
     flows: HashMap<TcpFlowKey, TcpFlowState>,
     insertion_order: VecDeque<TcpFlowKey>,
 }
@@ -310,6 +326,7 @@ impl TcpStreamReassembler {
             max_buffered_bytes,
             max_gap,
             max_flows: DEFAULT_MAX_FLOWS,
+            overlap_policy: TcpOverlapPolicy::default(),
             flows: HashMap::new(),
             insertion_order: VecDeque::new(),
         }
@@ -322,7 +339,23 @@ impl TcpStreamReassembler {
         self
     }
 
+    /// Overrides the policy applied when an out-of-order segment's byte range
+    /// overlaps one already buffered. Default is [`TcpOverlapPolicy::Reject`].
+    #[must_use]
+    pub fn with_overlap_policy(mut self, policy: TcpOverlapPolicy) -> Self {
+        self.overlap_policy = policy;
+        self
+    }
+
     /// Offers one TCP segment and returns all newly contiguous payload bytes for its direction.
+    ///
+    /// `rst` tears down the entire flow (both directions) immediately, matching
+    /// TCP semantics where either side can abort the connection - no output is
+    /// returned for the segment carrying it. A `syn` on a direction that's
+    /// already established is treated as a connection restart on a reused
+    /// 4-tuple: that direction's buffered/consumed state resets before the
+    /// segment is processed, rather than being silently appended to the old
+    /// stream.
     #[allow(clippy::too_many_arguments)]
     pub fn offer(
         &mut self,
@@ -333,12 +366,20 @@ impl TcpStreamReassembler {
         seq: u32,
         syn: bool,
         fin: bool,
+        rst: bool,
         payload: &[u8],
     ) -> Vec<u8> {
         let Ok(payload_sequence_length) = u32::try_from(payload.len()) else {
             return Vec::new();
         };
         let (key, direction) = normalized_flow(src, src_port, dst, dst_port);
+
+        if rst {
+            self.flows.remove(&key);
+            self.insertion_order.retain(|queued| queued != &key);
+            return Vec::new();
+        }
+
         if !self.flows.contains_key(&key) {
             if self.max_flows == 0 {
                 return Vec::new();
@@ -352,6 +393,9 @@ impl TcpStreamReassembler {
         };
         let state = &mut flow.directions[direction];
 
+        if syn && state.expected.is_some() {
+            *state = TcpDirectionState::default();
+        }
         if state.expected.is_none() {
             state.expected = Some(if syn { seq.wrapping_add(1) } else { seq });
         }
@@ -368,6 +412,7 @@ impl TcpStreamReassembler {
             payload,
             self.max_buffered_bytes,
             self.max_gap,
+            self.overlap_policy,
             &mut output,
         );
         Self::consume_contiguous(state, &mut output);
@@ -405,6 +450,7 @@ impl TcpStreamReassembler {
         payload: &[u8],
         max_buffered_bytes: usize,
         max_gap: usize,
+        overlap_policy: TcpOverlapPolicy,
         output: &mut Vec<u8>,
     ) {
         if payload.is_empty() {
@@ -423,7 +469,7 @@ impl TcpStreamReassembler {
             if u32_to_usize(delta) > max_gap {
                 return;
             }
-            Self::buffer_segment(state, sequence, payload, max_buffered_bytes);
+            Self::buffer_segment(state, sequence, payload, max_buffered_bytes, overlap_policy);
             return;
         }
 
@@ -434,19 +480,135 @@ impl TcpStreamReassembler {
         }
     }
 
+    /// Buffers an out-of-order segment, resolving any overlap with already
+    /// buffered segments per `policy`. Works in byte-distance-from-`expected`
+    /// space (all buffered segments are within `max_gap` of `expected`, so
+    /// this stays a small bounded window - no TCP sequence wraparound concern
+    /// within it, unlike the wrapping-arithmetic comparisons used elsewhere).
     fn buffer_segment(
         state: &mut TcpDirectionState,
         sequence: u32,
         payload: &[u8],
         max_buffered_bytes: usize,
+        policy: TcpOverlapPolicy,
     ) {
+        let Some(expected) = state.expected else {
+            return;
+        };
+        let new_start = u32_to_usize(sequence.wrapping_sub(expected));
+        let new_end = new_start + payload.len();
+
+        let overlaps: Vec<(u32, usize, usize)> = state
+            .segments
+            .iter()
+            .filter_map(|(seq2, bytes2)| {
+                let start2 = u32_to_usize(seq2.wrapping_sub(expected));
+                let end2 = start2 + bytes2.len();
+                (new_start < end2 && start2 < new_end).then_some((*seq2, start2, end2))
+            })
+            .collect();
+
+        if overlaps.is_empty() {
+            Self::insert_segment(state, sequence, payload.to_vec(), max_buffered_bytes);
+            return;
+        }
+
+        match policy {
+            TcpOverlapPolicy::Reject => {}
+            TcpOverlapPolicy::FirstWins => {
+                let mut covered: Vec<(usize, usize)> = overlaps
+                    .iter()
+                    .map(|&(_, s, e)| (s.max(new_start), e.min(new_end)))
+                    .collect();
+                covered.sort_unstable();
+                let mut cursor = new_start;
+                for (covered_start, covered_end) in covered {
+                    if cursor < covered_start {
+                        Self::insert_relative_segment(
+                            state,
+                            expected,
+                            cursor,
+                            &payload[cursor - new_start..covered_start - new_start],
+                            max_buffered_bytes,
+                        );
+                    }
+                    cursor = cursor.max(covered_end);
+                }
+                if cursor < new_end {
+                    Self::insert_relative_segment(
+                        state,
+                        expected,
+                        cursor,
+                        &payload[cursor - new_start..],
+                        max_buffered_bytes,
+                    );
+                }
+            }
+            TcpOverlapPolicy::LastWins => {
+                for (seq2, start2, end2) in overlaps {
+                    let Some(bytes2) = state.segments.remove(&seq2) else {
+                        continue;
+                    };
+                    state.buffered_bytes = state.buffered_bytes.saturating_sub(bytes2.len());
+                    if start2 < new_start {
+                        Self::insert_relative_segment(
+                            state,
+                            expected,
+                            start2,
+                            &bytes2[..new_start - start2],
+                            max_buffered_bytes,
+                        );
+                    }
+                    if end2 > new_end {
+                        let right_offset = new_end.saturating_sub(start2);
+                        Self::insert_relative_segment(
+                            state,
+                            expected,
+                            new_end,
+                            &bytes2[right_offset..],
+                            max_buffered_bytes,
+                        );
+                    }
+                }
+                Self::insert_segment(state, sequence, payload.to_vec(), max_buffered_bytes);
+            }
+        }
+    }
+
+    fn insert_relative_segment(
+        state: &mut TcpDirectionState,
+        expected: u32,
+        offset: usize,
+        bytes: &[u8],
+        max_buffered_bytes: usize,
+    ) {
+        let Ok(offset_u32) = u32::try_from(offset) else {
+            return;
+        };
+        Self::insert_segment(
+            state,
+            expected.wrapping_add(offset_u32),
+            bytes.to_vec(),
+            max_buffered_bytes,
+        );
+    }
+
+    fn insert_segment(
+        state: &mut TcpDirectionState,
+        sequence: u32,
+        bytes: Vec<u8>,
+        max_buffered_bytes: usize,
+    ) {
+        if bytes.is_empty() {
+            return;
+        }
         let replaced = state.segments.get(&sequence).map_or(0, Vec::len);
         let Some(without_replaced) = state.buffered_bytes.checked_sub(replaced) else {
             state.segments.clear();
             state.buffered_bytes = 0;
             return;
         };
-        let Some(projected) = without_replaced.checked_add(payload.len()) else {
+        let Some(projected) = without_replaced.checked_add(bytes.len()) else {
             state.segments.clear();
             state.buffered_bytes = 0;
             return;
@@ -456,7 +618,7 @@ impl TcpStreamReassembler {
             state.buffered_bytes = 0;
             return;
         }
-        state.segments.insert(sequence, payload.to_vec());
+        state.segments.insert(sequence, bytes);
         state.buffered_bytes = projected;
     }
 
@@ -1064,11 +1226,11 @@ mod tests {
         let (src, dst) = endpoints();
         let mut reassembler = TcpStreamReassembler::new();
         assert_eq!(
-            reassembler.offer(src, 1000, dst, 80, 1, false, false, b"abc"),
+            reassembler.offer(src, 1000, dst, 80, 1, false, false, false, b"abc"),
             b"abc"
         );
         assert_eq!(
-            reassembler.offer(src, 1000, dst, 80, 4, false, false, b"def"),
+            reassembler.offer(src, 1000, dst, 80, 4, false, false, false, b"def"),
             b"def"
         );
     }
@@ -1079,19 +1241,19 @@ mod tests {
         let mut reassembler = TcpStreamReassembler::new();
         assert!(
             reassembler
-                .offer(src, 1000, dst, 80, 0, true, false, b"")
+                .offer(src, 1000, dst, 80, 0, true, false, false, b"")
                 .is_empty()
         );
         assert!(
             reassembler
-                .offer(src, 1000, dst, 80, 1_001, false, false, b"late")
+                .offer(src, 1000, dst, 80, 1_001, false, false, false, b"late")
                 .is_empty()
         );
         let prefix = vec![b'a'; 1_000];
         let mut expected = prefix.clone();
         expected.extend_from_slice(b"late");
         assert_eq!(
-            reassembler.offer(src, 1000, dst, 80, 1, false, false, &prefix),
+            reassembler.offer(src, 1000, dst, 80, 1, false, false, false, &prefix),
             expected
         );
     }
@@ -1102,15 +1264,15 @@ mod tests {
         let mut reassembler = TcpStreamReassembler::new();
         assert!(
             reassembler
-                .offer(src, 1000, dst, 80, u32::MAX - 1, true, false, b"")
+                .offer(src, 1000, dst, 80, u32::MAX - 1, true, false, false, b"")
                 .is_empty()
         );
         assert_eq!(
-            reassembler.offer(src, 1000, dst, 80, u32::MAX, false, false, b"x"),
+            reassembler.offer(src, 1000, dst, 80, u32::MAX, false, false, false, b"x"),
             b"x"
         );
         assert_eq!(
-            reassembler.offer(src, 1000, dst, 80, 0, false, true, b"y"),
+            reassembler.offer(src, 1000, dst, 80, 0, false, true, false, b"y"),
             b"y"
         );
     }
@@ -1121,16 +1283,16 @@ mod tests {
         let mut reassembler = TcpStreamReassembler::with_limits(4, 65_535);
         assert!(
             reassembler
-                .offer(src, 1000, dst, 80, 0, true, false, b"")
+                .offer(src, 1000, dst, 80, 0, true, false, false, b"")
                 .is_empty()
         );
         assert!(
             reassembler
-                .offer(src, 1000, dst, 80, 10, false, false, b"12345")
+                .offer(src, 1000, dst, 80, 10, false, false, false, b"12345")
                 .is_empty()
         );
         assert_eq!(
-            reassembler.offer(src, 1000, dst, 80, 1, false, false, b"ok"),
+            reassembler.offer(src, 1000, dst, 80, 1, false, false, false, b"ok"),
             b"ok"
         );
     }
@@ -1143,7 +1305,7 @@ mod tests {
         for src_port in [1_000, 1_001, 1_002, 1_003] {
             assert!(
                 reassembler
-                    .offer(src, src_port, dst, 80, 100, true, false, b"")
+                    .offer(src, src_port, dst, 80, 100, true, false, false, b"")
                     .is_empty()
             );
             assert!(reassembler.flows.len() <= 2);
@@ -1156,25 +1318,164 @@ mod tests {
         let mut reassembler = TcpStreamReassembler::new().with_max_flows(2);
 
         assert_eq!(
-            reassembler.offer(src, 1_000, dst, 80, 100, true, false, b"old"),
+            reassembler.offer(src, 1_000, dst, 80, 100, true, false, false, b"old"),
             b"old"
         );
         assert!(
             reassembler
-                .offer(src, 1_001, dst, 80, 200, true, false, b"")
+                .offer(src, 1_001, dst, 80, 200, true, false, false, b"")
                 .is_empty()
         );
         assert!(
             reassembler
-                .offer(src, 1_002, dst, 80, 300, true, false, b"")
+                .offer(src, 1_002, dst, 80, 300, true, false, false, b"")
                 .is_empty()
         );
 
         assert_eq!(
-            reassembler.offer(src, 1_000, dst, 80, 100, true, false, b"fresh"),
+            reassembler.offer(src, 1_000, dst, 80, 100, true, false, false, b"fresh"),
             b"fresh"
         );
         assert_eq!(reassembler.flows.len(), 2);
+    }
+
+    #[test]
+    fn tcp_rst_tears_down_the_whole_flow() {
+        let (src, dst) = endpoints();
+        let mut reassembler = TcpStreamReassembler::new();
+
+        assert_eq!(
+            reassembler.offer(src, 1_000, dst, 80, 1, false, false, false, b"abc"),
+            b"abc"
+        );
+        assert!(
+            reassembler
+                .offer(src, 1_000, dst, 80, 4, false, false, true, b"")
+                .is_empty()
+        );
+        assert_eq!(reassembler.flows.len(), 0);
+
+        // The flow is gone, so this is treated as a fresh connection, not a
+        // continuation of the pre-RST stream.
+        assert_eq!(
+            reassembler.offer(src, 1_000, dst, 80, 100, false, false, false, b"new"),
+            b"new"
+        );
+    }
+
+    #[test]
+    fn tcp_syn_on_established_direction_restarts_that_direction() {
+        let (src, dst) = endpoints();
+        let mut reassembler = TcpStreamReassembler::new();
+
+        assert_eq!(
+            reassembler.offer(src, 1_000, dst, 80, 0, true, false, false, b"old"),
+            b"old"
+        );
+        // A held out-of-order segment from the old stream should not survive
+        // a SYN restart on the same 4-tuple/direction.
+        assert!(
+            reassembler
+                .offer(src, 1_000, dst, 80, 1_000, false, false, false, b"stale")
+                .is_empty()
+        );
+
+        assert_eq!(
+            reassembler.offer(src, 1_000, dst, 80, 500, true, false, false, b"new"),
+            b"new"
+        );
+        // The stale pre-restart segment must not resurface after the restart.
+        assert!(
+            reassembler
+                .offer(src, 1_000, dst, 80, 505, false, false, false, b"")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn tcp_overlap_reject_drops_the_whole_conflicting_segment() {
+        let (src, dst) = endpoints();
+        let mut reassembler =
+            TcpStreamReassembler::new().with_overlap_policy(TcpOverlapPolicy::Reject);
+
+        assert!(
+            reassembler
+                .offer(src, 1_000, dst, 80, 0, true, false, false, b"")
+                .is_empty()
+        );
+        assert!(
+            reassembler
+                .offer(src, 1_000, dst, 80, 5, false, false, false, b"XXXXX")
+                .is_empty()
+        );
+        // Overlaps [5,10) with the buffered segment above - rejected whole,
+        // including its genuinely non-overlapping [10,13) tail.
+        assert!(
+            reassembler
+                .offer(src, 1_000, dst, 80, 8, false, false, false, b"YYYYY")
+                .is_empty()
+        );
+        assert_eq!(
+            reassembler.offer(src, 1_000, dst, 80, 1, false, false, false, b"aaaa"),
+            b"aaaaXXXXX"
+        );
+    }
+
+    #[test]
+    fn tcp_overlap_first_wins_keeps_original_bytes_but_buffers_new_tail() {
+        let (src, dst) = endpoints();
+        let mut reassembler =
+            TcpStreamReassembler::new().with_overlap_policy(TcpOverlapPolicy::FirstWins);
+
+        assert!(
+            reassembler
+                .offer(src, 1_000, dst, 80, 0, true, false, false, b"")
+                .is_empty()
+        );
+        assert!(
+            reassembler
+                .offer(src, 1_000, dst, 80, 5, false, false, false, b"XXXXX")
+                .is_empty()
+        );
+        // Overlaps [5,10), non-overlapping tail is [10,13).
+        assert!(
+            reassembler
+                .offer(src, 1_000, dst, 80, 8, false, false, false, b"YYYYY")
+                .is_empty()
+        );
+        assert_eq!(
+            reassembler.offer(src, 1_000, dst, 80, 1, false, false, false, b"aaaa"),
+            b"aaaaXXXXXYYY"
+        );
+    }
+
+    #[test]
+    fn tcp_overlap_last_wins_lets_new_segment_overwrite() {
+        let (src, dst) = endpoints();
+        let mut reassembler =
+            TcpStreamReassembler::new().with_overlap_policy(TcpOverlapPolicy::LastWins);
+
+        assert!(
+            reassembler
+                .offer(src, 1_000, dst, 80, 0, true, false, false, b"")
+                .is_empty()
+        );
+        assert!(
+            reassembler
+                .offer(src, 1_000, dst, 80, 5, false, false, false, b"XXXXX")
+                .is_empty()
+        );
+        // New segment [8,13) wins its overlap with [5,10); [5,8) survives from
+        // the original.
+        assert!(
+            reassembler
+                .offer(src, 1_000, dst, 80, 8, false, false, false, b"YYYYY")
+                .is_empty()
+        );
+        assert_eq!(
+            reassembler.offer(src, 1_000, dst, 80, 1, false, false, false, b"aaaa"),
+            b"aaaaXXXYYYYY"
+        );
     }
 
     #[test]

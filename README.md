@@ -58,7 +58,7 @@ The parser is designed to handle malformed input without panicking; it is fuzz-,
 - `quic-decrypt` and `fingerprint` features: off by default, RFC/reference-vector verified, not yet seen real-world traffic diversity.
 - HTTP/2: frame-header only (type/length/flags/stream ID), no HPACK, no `ParsedPacket` wiring.
 - QUIC: STREAM frames parseable (`iter_quic_frames`) and reassemblable (`QuicStreamReassembler`), standalone, not wired into `ParsedPacket`. HTTP/3 not built (needs QPACK on top of this). Handshake/1-RTT decrypt needs an externally-supplied `SSLKEYLOGFILE` secret — not derivable from a passive capture, by design of TLS 1.3.
-- TCP stream reassembly / `SessionTracker`: opt-in, bounded FIFO eviction, but overlapping out-of-order segments have no explicit reject policy yet (earliest-sequence segment wins the bytes it covers).
+- TCP stream reassembly / `SessionTracker`: opt-in, bounded FIFO eviction, explicit overlap policy (`TcpOverlapPolicy::Reject`/`FirstWins`/`LastWins`, default `Reject`), `RST` tears down the flow, a `SYN` on an already-established direction resets it (tuple-reuse safe).
 - Not supported: HTTP/3, GTP, Diameter, JA4S/JA4X/JA4H/JA4SSH.
 - tshark differential and pcap-vs-scapy parity coverage still small/expanding.
 - Hot path still uses some intermediate allocations.

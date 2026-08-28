@@ -111,6 +111,7 @@ impl SessionTracker {
             tcp.sequence_number,
             tcp.flags.syn,
             tcp.flags.fin,
+            tcp.flags.rst,
             payload,
         );
 
