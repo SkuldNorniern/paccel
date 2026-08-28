@@ -60,6 +60,7 @@ The parser is designed to handle malformed input without panicking; it is fuzz-,
 - QUIC: STREAM frames parseable (`iter_quic_frames`) and reassemblable (`QuicStreamReassembler`), standalone, not wired into `ParsedPacket`. HTTP/3 not built (needs QPACK on top of this). Handshake/1-RTT decrypt needs an externally-supplied `SSLKEYLOGFILE` secret — not derivable from a passive capture, by design of TLS 1.3.
 - TCP stream reassembly / `SessionTracker`: opt-in, bounded FIFO eviction, explicit overlap policy (`TcpOverlapPolicy::Reject`/`FirstWins`/`LastWins`, default `Reject`), `RST` tears down the flow, a `SYN` on an already-established direction resets it (tuple-reuse safe).
 - `ParseError`/`ParseErrorKind`/`Layer`: the emerging richer error model (layer/protocol/offset/kind), additive alongside `LayerError` - most parsers still return `LayerError`, convertible via `ParseError::from_layer_error`.
+- `ProbeResult<T>`: distinguishes not-this-protocol/incomplete/malformed, which `Option<T>`/`.ok()` collapse into the same `None`. One real caller so far (`dnp3::probe_dnp3`, wired into `BuiltinPacketParser`'s DNP3 classification) - most protocol probes still return `Option<T>` directly.
 - Not supported: HTTP/3, GTP, Diameter, JA4S/JA4X/JA4H/JA4SSH.
 - tshark differential and pcap-vs-scapy parity coverage still small/expanding.
 - Hot path still uses some intermediate allocations.
