@@ -146,10 +146,19 @@ pub fn parse_dnp3_message(payload: &[u8]) -> Result<Dnp3Message, LayerError> {
 /// Parses DNP3 while distinguishing bad magic from incomplete data.
 #[must_use]
 pub fn probe_dnp3(payload: &[u8]) -> ProbeResult<Dnp3Message> {
+    if payload.len() < DATA_LINK_HEADER_LEN {
+        return ProbeResult::Incomplete {
+            needed: Some(DATA_LINK_HEADER_LEN),
+            available: payload.len(),
+        };
+    }
     match parse_dnp3_message(payload) {
         Ok(message) => ProbeResult::Match(message),
         Err(LayerError::InvalidHeader) => ProbeResult::NoMatch,
-        Err(LayerError::InvalidLength) => ProbeResult::Incomplete,
+        Err(LayerError::InvalidLength) => ProbeResult::Incomplete {
+            needed: None,
+            available: payload.len(),
+        },
         Err(error) => ProbeResult::Malformed(ParseError::from_layer_error(
             &error,
             Layer::Application,
@@ -213,7 +222,8 @@ fn parse_application(payload: &[u8]) -> Option<Dnp3Application> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Dnp3AppFunctionCode, Dnp3FunctionCode, dechunk_user_data, parse_dnp3_message, probe_dnp3,
+        DATA_LINK_HEADER_LEN, Dnp3AppFunctionCode, Dnp3FunctionCode, dechunk_user_data,
+        parse_dnp3_message, probe_dnp3,
     };
     use crate::layer::{LayerError, ProbeResult};
 
@@ -289,7 +299,10 @@ mod tests {
     fn probe_reports_incomplete_for_a_short_buffer() {
         assert_eq!(
             probe_dnp3(&FRAME_FOUR_PAYLOAD[..9]),
-            ProbeResult::Incomplete
+            ProbeResult::Incomplete {
+                needed: Some(DATA_LINK_HEADER_LEN),
+                available: 9,
+            }
         );
     }
 
