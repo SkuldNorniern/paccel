@@ -40,11 +40,12 @@ jobs:
 
           FEATS=$(section feat)
           FIXES=$(section fix)
+          PERFS=$(section perf)
           DOCS=$(section docs)
           REFACTORS=$(section refactor)
           TESTS=$(section test)
           OTHERS=$(git log "$RANGE" --pretty=format:"%s" \
-            | grep -Ev "^(feat|fix|docs|refactor|test|style|ci|chore|perf|build)(\([^)]*\))?: " \
+            | grep -Ev "^(feat|fix|perf|docs|refactor|test|style|ci|chore|build)(\([^)]*\))?: " \
             || true)
 
           {
@@ -52,6 +53,7 @@ jobs:
             echo ""
             if [ -n "$FEATS" ];     then echo "### Features";      echo "$FEATS";     echo ""; fi
             if [ -n "$FIXES" ];     then echo "### Bug Fixes";     echo "$FIXES";     echo ""; fi
+            if [ -n "$PERFS" ];     then echo "### Performance";   echo "$PERFS";     echo ""; fi
             if [ -n "$REFACTORS" ]; then echo "### Refactor";      echo "$REFACTORS"; echo ""; fi
             if [ -n "$DOCS" ];      then echo "### Documentation"; echo "$DOCS";      echo ""; fi
             if [ -n "$TESTS" ];     then echo "### Tests";         echo "$TESTS";     echo ""; fi
