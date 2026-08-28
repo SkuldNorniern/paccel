@@ -76,6 +76,29 @@ pub enum ParseWarningCode {
     TunnelDepthLimit,
 }
 
+impl ParseWarningCode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ipv6NonInitialFragment => "ipv6-non-initial-fragment",
+            Self::Ipv6ExtensionDepthLimit => "ipv6-ext-depth-limit",
+            Self::Ipv6Truncated => "ipv6-truncated",
+            Self::UnsupportedEthertype(_) => "unsupported-ethertype",
+            Self::Ipv4Truncated => "ipv4-truncated",
+            Self::Ipv4Fragmented => "ipv4-fragmented",
+            Self::IpipInner => "ipip-inner",
+            Self::GreInner => "gre-inner",
+            Self::PppoeNoPayload => "pppoe-no-payload",
+            Self::VxlanInner => "vxlan-inner",
+            Self::GeneveInner => "geneve-inner",
+            Self::AhInner => "ah-inner",
+            Self::EspInner => "esp-inner",
+            Self::MplsInner => "mpls-inner",
+            Self::MplsLabelDepthLimit => "mpls-label-depth-limit",
+            Self::TunnelDepthLimit => "tunnel-depth-limit",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParseWarningProtocol {
     Link,
@@ -91,49 +114,6 @@ impl ParseWarningProtocol {
             Self::Network => "network",
             Self::Transport => "transport",
             Self::Tunnel => "tunnel",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ParseWarningSubcode {
-    UnsupportedEthertype,
-    Ipv4Truncated,
-    Ipv4Fragmented,
-    Ipv6Truncated,
-    Ipv6ExtensionDepthLimit,
-    Ipv6NonInitialFragment,
-    IpipInner,
-    PppoeNoPayload,
-    MplsInner,
-    MplsLabelDepthLimit,
-    TunnelDepthLimit,
-    GreInner,
-    VxlanInner,
-    GeneveInner,
-    AhInner,
-    EspInner,
-}
-
-impl ParseWarningSubcode {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::UnsupportedEthertype => "unsupported-ethertype",
-            Self::Ipv4Truncated => "ipv4-truncated",
-            Self::Ipv4Fragmented => "ipv4-fragmented",
-            Self::Ipv6Truncated => "ipv6-truncated",
-            Self::Ipv6ExtensionDepthLimit => "ipv6-ext-depth-limit",
-            Self::Ipv6NonInitialFragment => "ipv6-non-initial-fragment",
-            Self::IpipInner => "ipip-inner",
-            Self::PppoeNoPayload => "pppoe-no-payload",
-            Self::MplsInner => "mpls-inner",
-            Self::MplsLabelDepthLimit => "mpls-label-depth-limit",
-            Self::TunnelDepthLimit => "tunnel-depth-limit",
-            Self::GreInner => "gre-inner",
-            Self::VxlanInner => "vxlan-inner",
-            Self::GeneveInner => "geneve-inner",
-            Self::AhInner => "ah-inner",
-            Self::EspInner => "esp-inner",
         }
     }
 }
@@ -348,7 +328,6 @@ pub struct MplsInfo {
 pub struct ParseWarning {
     pub code: ParseWarningCode,
     pub protocol: ParseWarningProtocol,
-    pub subcode: ParseWarningSubcode,
     pub offset: usize,
     pub message: &'static str,
 }
@@ -357,14 +336,12 @@ impl ParseWarning {
     pub fn new(
         code: ParseWarningCode,
         protocol: ParseWarningProtocol,
-        subcode: ParseWarningSubcode,
         offset: usize,
         message: &'static str,
     ) -> Self {
         Self {
             code,
             protocol,
-            subcode,
             offset,
             message,
         }
@@ -786,8 +763,8 @@ impl ParsedPacket {
         }
     }
 
-    pub fn warning_subcode_names(&self) -> impl Iterator<Item = &'static str> + '_ {
-        self.warnings.iter().map(|w| w.subcode.as_str())
+    pub fn warning_code_names(&self) -> impl Iterator<Item = &'static str> + '_ {
+        self.warnings.iter().map(|w| w.code.as_str())
     }
 
     pub fn tunnel_protocol_names(&self) -> impl Iterator<Item = &'static str> {
@@ -811,7 +788,7 @@ impl ParsedPacket {
 #[cfg(test)]
 mod tests {
     use super::{
-        OpenVpnOpcode, ParseMode, ParseWarningProtocol, ParseWarningSubcode, UdpAppHint,
+        OpenVpnOpcode, ParseMode, ParseWarningCode, ParseWarningProtocol, UdpAppHint,
         WireGuardMessageType,
     };
 
@@ -819,7 +796,7 @@ mod tests {
     fn stable_name_helpers_are_exposed() {
         assert_eq!(ParseMode::Permissive.as_str(), "permissive");
         assert_eq!(ParseWarningProtocol::Tunnel.as_str(), "tunnel");
-        assert_eq!(ParseWarningSubcode::VxlanInner.as_str(), "vxlan-inner");
+        assert_eq!(ParseWarningCode::VxlanInner.as_str(), "vxlan-inner");
         assert_eq!(UdpAppHint::L2tp.as_str(), "l2tp");
         assert_eq!(UdpAppHint::Dhcpv6.as_str(), "dhcpv6");
         assert_eq!(UdpAppHint::WireGuard.as_str(), "wireguard");
