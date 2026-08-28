@@ -61,13 +61,10 @@ pub struct QuicVersionNegotiation {
 }
 
 /// Parses the structural (still header-protected) fields of a QUIC short-header
-/// (1-RTT) packet, given the DCID length the caller already knows from tracking
-/// this connection's handshake (for example, via `QuicConnectionTracker`).
-///
-/// Returns `None` if `payload` is not a short header or is too short to contain
-/// `dcid_len` bytes of DCID. As with [`parse_quic_long_header`], the fixed bit is
-/// treated as a hint rather than required because RFC 9287 permits endpoints to
-/// negotiate its removal.
+/// (1-RTT) packet, given the DCID length the caller already knows (e.g. from
+/// `QuicConnectionTracker`). Returns `None` if `payload` isn't a short header
+/// or is too short for `dcid_len` bytes of DCID. Fixed bit is a hint, not
+/// required - RFC 9287 lets endpoints negotiate its removal.
 pub fn parse_quic_short_header(payload: &[u8], dcid_len: usize) -> Option<QuicShortHeader<'_>> {
     let first_byte = *payload.first()?;
     if first_byte & 0x80 != 0 {

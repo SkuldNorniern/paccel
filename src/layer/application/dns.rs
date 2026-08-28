@@ -15,12 +15,8 @@ pub struct DnsHeader {
     pub additionals: u16,
 }
 
-/// Represents a DNS question section.
-///
-/// A question comprises a queried domain name (qname), a query type (qtype)
-/// and a query class (qclass). For simplicity the qname is stored as a `String`
-/// (in many cases a borrowed slice might be used, but here we build an owned string
-/// due to the non-contiguous layout of labels in the DNS message).
+/// A DNS question: queried name, query type, query class. `qname` is owned
+/// since DNS labels are non-contiguous in the wire format.
 #[derive(Debug)]
 pub struct DnsQuestion {
     // TASK: TODO: change the qname to a borrowed slice rather than an owned string
@@ -82,9 +78,8 @@ pub enum DnsData {
 /// Alternate name for decoded DNS resource record data.
 pub type DnsRdata = DnsData;
 
-/// Represents a parsed DNS message.
-///
-/// Includes the header, questions, answers, authority records, and additional records.
+/// A parsed DNS message: header, questions, answers, authority and
+/// additional records.
 #[derive(Debug)]
 pub struct DnsMessage {
     pub header: DnsHeader,
@@ -94,9 +89,7 @@ pub struct DnsMessage {
     pub additionals: Vec<DnsRecord>,
 }
 
-/// Parses a DNS message directly from a byte slice.
-///
-/// This is the core parser used by the engine path.
+/// Parses a DNS message from a byte slice. The core parser used by the engine path.
 pub fn parse_dns_message(packet: &[u8]) -> Result<DnsMessage, LayerError> {
     if packet.len() < 12 {
         return Err(LayerError::InvalidLength);
@@ -167,20 +160,13 @@ pub fn parse_dns_message(packet: &[u8]) -> Result<DnsMessage, LayerError> {
     })
 }
 
-/// Parses a domain name from the DNS message.
-///
-/// DNS names are represented as a sequence of labels. Each label is prefixed with
-/// its length, and the sequence is terminated with a zero-length byte (0).
-/// Pointers (when the high two bits are 1) are also supported as per RFC 1035.
-///
-/// This function returns the decoded domain name as a `String` and the position
-/// in the packet immediately after the name.
-///
-/// Note: This implementation builds a new `String` to hold the fully qualified name.
+/// Parses a length-prefixed, zero-terminated DNS name (RFC 1035), following
+/// compression pointers (high two bits set). Returns the decoded name and
+/// the offset right after it in the packet.
 ///
 /// # Errors
-/// Returns `LayerError::InvalidLength` if the packet is too short, or
-/// `LayerError::MalformedPacket` if the name cannot be parsed.
+/// `InvalidLength` if the packet is too short, `MalformedPacket` if the
+/// name itself doesn't parse.
 fn parse_domain_name(packet: &[u8], mut pos: usize) -> Result<(String, usize), LayerError> {
     let mut name = String::new();
     let mut jumped = false;

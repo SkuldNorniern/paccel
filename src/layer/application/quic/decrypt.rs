@@ -132,9 +132,8 @@ pub struct DecryptedInitial {
 }
 
 /// Decrypts a client-sent Initial packet using only publicly derivable keys
-/// (RFC 9001 sec 5.2 - the whole point of Initial protection is that DCID
-/// alone is sufficient, by design, not a secret). This entry point supports
-/// client-sent Initial packets; other encryption levels need real key material.
+/// (RFC 9001 sec 5.2 - Initial protection is designed so the DCID alone is
+/// enough, it's not a secret). Other encryption levels need real key material.
 pub fn decrypt_initial_packet(
     header: &QuicLongHeader,
     raw_packet: &[u8],
@@ -146,11 +145,10 @@ pub fn decrypt_initial_packet(
     decrypt_with_keys(&keys, header, raw_packet)
 }
 
-/// Decrypts a QUIC Handshake or 1-RTT packet using a traffic secret supplied
-/// externally (e.g. from a `QuicKeyLog`, matching how Wireshark/curl/browsers
-/// expose this - Handshake/1-RTT keys derive from a live TLS 1.3 ECDHE
-/// exchange and cannot be recovered from a passive capture alone, unlike
-/// Initial packets).
+/// Decrypts a QUIC Handshake or 1-RTT packet using an externally supplied
+/// traffic secret (e.g. from a `QuicKeyLog`) - unlike Initial, these keys
+/// come from a live TLS 1.3 ECDHE exchange and can't be derived from a
+/// passive capture.
 pub fn decrypt_packet_with_secret(
     header: &QuicLongHeader,
     raw_packet: &[u8],
