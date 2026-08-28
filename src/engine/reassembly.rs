@@ -334,6 +334,7 @@ struct TcpDirectionState {
 #[derive(Debug, Default)]
 struct TcpFlowState {
     directions: [TcpDirectionState; 2],
+    generation: u64,
 }
 
 /// Reassembles each direction of a TCP flow independently with capped out-of-order storage.
@@ -401,10 +402,23 @@ impl TcpStreamReassembler {
         self.total_buffered_bytes
     }
 
+    /// Returns the current connection generation for a tracked flow.
+    #[must_use]
+    pub fn generation(
+        &self,
+        src: IpAddr,
+        src_port: u16,
+        dst: IpAddr,
+        dst_port: u16,
+    ) -> Option<u64> {
+        let (key, _) = normalized_flow(src, src_port, dst, dst_port);
+        self.flows.get(&key).map(|flow| flow.generation)
+    }
+
     /// Returns newly contiguous payload after accepting one TCP segment.
     ///
     /// `rst` tears down both directions without output. `syn` resets an
-    /// established direction as a new connection on the same 4-tuple.
+    /// established flow as a new connection on the same 4-tuple.
     #[allow(clippy::too_many_arguments)]
     pub fn offer(
         &mut self,
@@ -444,14 +458,15 @@ impl TcpStreamReassembler {
         let Some(flow) = self.flows.get_mut(&key) else {
             return Vec::new();
         };
-        let state = &mut flow.directions[direction];
 
-        if syn && state.expected.is_some() {
+        if syn && flow.directions[direction].expected.is_some() {
             self.total_buffered_bytes = self
                 .total_buffered_bytes
-                .saturating_sub(state.buffered_bytes);
-            *state = TcpDirectionState::default();
+                .saturating_sub(flow_buffered_bytes(flow));
+            flow.generation = flow.generation.wrapping_add(1);
+            flow.directions = Default::default();
         }
+        let state = &mut flow.directions[direction];
         if state.expected.is_none() {
             state.expected = Some(if syn { seq.wrapping_add(1) } else { seq });
         }
@@ -1645,6 +1660,71 @@ mod tests {
             b"new"
         );
         assert_eq!(reassembler.buffered_bytes(), 0);
+    }
+
+    #[test]
+    fn tcp_syn_restart_resets_both_directions() {
+        let (src, dst) = endpoints();
+        let mut reassembler = TcpStreamReassembler::new();
+
+        assert!(
+            reassembler
+                .offer(src, 1_000, dst, 80, 100, true, false, false, b"")
+                .is_empty()
+        );
+        assert!(
+            reassembler
+                .offer(dst, 80, src, 1_000, 200, true, false, false, b"")
+                .is_empty()
+        );
+        assert!(
+            reassembler
+                .offer(dst, 80, src, 1_000, 210, false, false, false, b"stale")
+                .is_empty()
+        );
+        assert_eq!(reassembler.buffered_bytes(), 5);
+
+        assert!(
+            reassembler
+                .offer(src, 1_000, dst, 80, 1_000, true, false, false, b"")
+                .is_empty()
+        );
+        assert_eq!(reassembler.buffered_bytes(), 0);
+        assert_eq!(
+            reassembler.offer(dst, 80, src, 1_000, 201, false, false, false, b"123456789",),
+            b"123456789"
+        );
+    }
+
+    #[test]
+    fn tcp_generation_tracks_syn_restarts_only() {
+        let (src, dst) = endpoints();
+        let mut reassembler = TcpStreamReassembler::new();
+
+        assert_eq!(reassembler.generation(src, 1_000, dst, 80), None);
+        assert!(
+            reassembler
+                .offer(src, 1_000, dst, 80, 100, true, false, false, b"")
+                .is_empty()
+        );
+        assert_eq!(reassembler.generation(src, 1_000, dst, 80), Some(0));
+        assert_eq!(
+            reassembler.offer(src, 1_000, dst, 80, 101, false, false, false, b"data"),
+            b"data"
+        );
+        assert_eq!(reassembler.generation(src, 1_000, dst, 80), Some(0));
+
+        assert!(
+            reassembler
+                .offer(src, 1_000, dst, 80, 500, true, false, false, b"")
+                .is_empty()
+        );
+        assert_eq!(reassembler.generation(src, 1_000, dst, 80), Some(1));
+        assert_eq!(
+            reassembler.offer(src, 1_000, dst, 80, 501, false, false, false, b"new"),
+            b"new"
+        );
+        assert_eq!(reassembler.generation(src, 1_000, dst, 80), Some(1));
     }
 
     #[test]

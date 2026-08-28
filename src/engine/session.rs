@@ -60,6 +60,7 @@ struct ProbeState {
 pub struct SessionTracker {
     tcp: TcpStreamReassembler,
     probes: HashMap<DirectionKey, ProbeState>,
+    generations: HashMap<FlowKey, u64>,
     max_probe_bytes: usize,
     max_probe_flows: usize,
     max_total_probe_bytes: usize,
@@ -80,6 +81,7 @@ impl SessionTracker {
         Self {
             tcp: TcpStreamReassembler::new(),
             probes: HashMap::new(),
+            generations: HashMap::new(),
             max_probe_bytes,
             max_probe_flows: DEFAULT_MAX_PROBE_FLOWS,
             max_total_probe_bytes: DEFAULT_MAX_TOTAL_PROBE_BYTES,
@@ -142,6 +144,11 @@ impl SessionTracker {
             return None;
         }
 
+        let generation = self.tcp.generation(src, src_port, dst, dst_port)?;
+        if self.generations.get(&key.flow).copied() != Some(generation) {
+            self.remove_probe_flow(&key.flow);
+        }
+
         if !self.probes.contains_key(&key) {
             if self.max_probe_flows == 0 {
                 return None;
@@ -150,6 +157,7 @@ impl SessionTracker {
             self.probes.insert(key.clone(), ProbeState::default());
             self.insertion_order.push_back(key.clone());
         }
+        self.generations.insert(key.flow.clone(), generation);
         let state = self.probes.get_mut(&key)?;
         if state.done {
             return None;
@@ -183,24 +191,31 @@ impl SessionTracker {
     /// Removes both directions of a flow, returning whether any state existed.
     pub fn remove_flow(&mut self, src: IpAddr, src_port: u16, dst: IpAddr, dst_port: u16) -> bool {
         let flow = normalized_flow(src, src_port, dst, dst_port);
+        let probes_removed = self.remove_probe_flow(&flow);
+        let generation_removed = self.generations.remove(&flow).is_some();
+        self.tcp.remove_flow(src, src_port, dst, dst_port) || probes_removed || generation_removed
+    }
+
+    fn remove_probe_flow(&mut self, flow: &FlowKey) -> bool {
         let previous_len = self.probes.len();
         let mut freed = 0usize;
         self.probes.retain(|key, state| {
-            let keep = key.flow != flow;
+            let keep = &key.flow != flow;
             if !keep {
-                freed += state.bytes.len();
+                freed = freed.saturating_add(state.bytes.len());
             }
             keep
         });
         self.total_probe_bytes = self.total_probe_bytes.saturating_sub(freed);
-        self.insertion_order.retain(|key| key.flow != flow);
-        self.tcp.remove_flow(src, src_port, dst, dst_port) || self.probes.len() != previous_len
+        self.insertion_order.retain(|key| &key.flow != flow);
+        self.probes.len() != previous_len
     }
 
     /// Releases all TCP and application probe state.
     pub fn clear(&mut self) {
         self.tcp.clear();
         self.probes.clear();
+        self.generations.clear();
         self.insertion_order.clear();
         self.total_probe_bytes = 0;
     }
@@ -229,6 +244,7 @@ impl SessionTracker {
                     flow.second.address,
                     flow.second.port,
                 );
+                self.generations.remove(flow);
             }
         }
     }
@@ -528,6 +544,37 @@ mod tests {
         let event = tracker
             .offer_frame(&tcp_frame(SRC_PORT, 3_000, false, second_payload))
             .expect("HTTP stream event after RST should be probed fresh");
+        match event.l7 {
+            StreamL7::Http(HttpMessage::Request { target, .. }) => {
+                assert_eq!(target, "/other.html");
+            }
+            _ => panic!("expected HTTP request"),
+        }
+    }
+
+    #[test]
+    fn syn_restart_clears_probe_state_so_next_connection_starts_fresh() {
+        let mut tracker = SessionTracker::new();
+
+        let first_payload = b"GET /index.html HTTP/1.1\r\nHost: example.com\r\n\r\n";
+        let event = tracker
+            .offer_frame(&tcp_frame(SRC_PORT, 1_000, false, first_payload))
+            .expect("HTTP stream event");
+        assert!(matches!(
+            event.l7,
+            StreamL7::Http(HttpMessage::Request { .. })
+        ));
+
+        assert!(
+            tracker
+                .offer_frame(&tcp_frame(SRC_PORT, 3_000, true, &[]))
+                .is_none()
+        );
+
+        let second_payload = b"GET /other.html HTTP/1.1\r\nHost: example.com\r\n\r\n";
+        let event = tracker
+            .offer_frame(&tcp_frame(SRC_PORT, 3_001, false, second_payload))
+            .expect("HTTP stream event after SYN restart should be probed fresh");
         match event.l7 {
             StreamL7::Http(HttpMessage::Request { target, .. }) => {
                 assert_eq!(target, "/other.html");
