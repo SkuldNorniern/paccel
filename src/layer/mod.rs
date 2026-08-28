@@ -202,7 +202,12 @@ pub enum ProbeResult<T> {
     /// Wrong protocol, such as bad magic or version.
     NoMatch,
     /// Too little data to decide; more bytes may produce a match.
-    Incomplete,
+    Incomplete {
+        /// Bytes needed to decide, if known.
+        needed: Option<usize>,
+        /// Bytes actually available.
+        available: usize,
+    },
     /// Matched (magic/version checked out) but the rest fails to parse.
     Malformed(ParseError),
 }
@@ -213,7 +218,7 @@ impl<T> ProbeResult<T> {
     pub fn ok(self) -> Option<T> {
         match self {
             Self::Match(value) => Some(value),
-            Self::NoMatch | Self::Incomplete | Self::Malformed(_) => None,
+            Self::NoMatch | Self::Incomplete { .. } | Self::Malformed(_) => None,
         }
     }
 
@@ -224,14 +229,14 @@ impl<T> ProbeResult<T> {
 
     #[must_use]
     pub fn is_incomplete(&self) -> bool {
-        matches!(self, Self::Incomplete)
+        matches!(self, Self::Incomplete { .. })
     }
 
     #[must_use]
     pub fn as_malformed(&self) -> Option<&ParseError> {
         match self {
             Self::Malformed(error) => Some(error),
-            Self::Match(_) | Self::NoMatch | Self::Incomplete => None,
+            Self::Match(_) | Self::NoMatch | Self::Incomplete { .. } => None,
         }
     }
 }
@@ -244,7 +249,14 @@ mod probe_result_tests {
     fn ok_bridges_only_match_to_some() {
         assert_eq!(ProbeResult::Match(7).ok(), Some(7));
         assert_eq!(ProbeResult::<i32>::NoMatch.ok(), None);
-        assert_eq!(ProbeResult::<i32>::Incomplete.ok(), None);
+        assert_eq!(
+            ProbeResult::<i32>::Incomplete {
+                needed: None,
+                available: 0
+            }
+            .ok(),
+            None
+        );
         let malformed = ProbeResult::<i32>::Malformed(ParseError::new(
             Layer::Application,
             None,
@@ -258,7 +270,13 @@ mod probe_result_tests {
     fn predicates_match_their_variant() {
         assert!(ProbeResult::Match(1).is_match());
         assert!(!ProbeResult::<i32>::NoMatch.is_match());
-        assert!(ProbeResult::<i32>::Incomplete.is_incomplete());
+        assert!(
+            ProbeResult::<i32>::Incomplete {
+                needed: Some(4),
+                available: 1
+            }
+            .is_incomplete()
+        );
         assert!(!ProbeResult::Match(1).is_incomplete());
 
         let error = ParseError::new(Layer::Transport, Some("dnp3"), 3, ParseErrorKind::Malformed);
