@@ -6,11 +6,11 @@ use std::{
 };
 
 use paccel::engine::{
-    BgpMessageType, BuiltinPacketParser, CoapType, Dnp3AppFunctionCode, Dnp3FunctionCode,
-    FtpMessage, ImapMessage, KerberosMessageType, LdapProtocolOp, MqttPacketType, NntpMessage,
-    OpenVpnOpcode, QuicConnectionTracker, RpcMessage, SipMessage, SmtpMessage, SnmpMessage,
-    SnmpPduType, SsdpMessage, TelnetCommand, TftpMessage, TransportSegment, UdpAppHint,
-    WireGuardMessageType, iter_capture_frames, parse_capture_frames, parse_pcap_frames,
+    ApplicationLayer, BgpMessageType, BuiltinPacketParser, CoapType, Dnp3AppFunctionCode,
+    Dnp3FunctionCode, FtpMessage, ImapMessage, KerberosMessageType, LdapProtocolOp, MqttPacketType,
+    NntpMessage, OpenVpnOpcode, QuicConnectionTracker, RpcMessage, SipMessage, SmtpMessage,
+    SnmpMessage, SnmpPduType, SsdpMessage, TelnetCommand, TftpMessage, TransportSegment,
+    UdpAppHint, WireGuardMessageType, iter_capture_frames, parse_capture_frames, parse_pcap_frames,
 };
 #[cfg(feature = "fingerprint")]
 use paccel::fingerprint;
@@ -1973,4 +1973,33 @@ fn dns_query_pcapng_parses_with_builtin_parser() {
     let dns = parsed.dns.as_ref().expect("dns");
     assert_eq!(dns.header.transaction_id, 0x1234);
     assert_eq!(dns.questions[0].qname, "www.example.com");
+
+    match parsed.application() {
+        Some(ApplicationLayer::Dns(matched)) => {
+            assert_eq!(matched.header.transaction_id, 0x1234);
+        }
+        other => panic!("expected ApplicationLayer::Dns, got {other:?}"),
+    }
+}
+
+#[test]
+fn application_accessor_matches_tls_client_hello() {
+    let client_hello = build_tls_client_hello(0x0303, 0xcca8, Some("app-layer.paccel.test"), None);
+    let frame = build_ethernet_ipv4_tcp_frame([198, 51, 100, 90], 45_100, 443, &client_hello);
+    let parsed = BuiltinPacketParser::parse(&frame).expect("packet should parse");
+
+    match parsed.application() {
+        Some(ApplicationLayer::TlsClientHello(hello)) => {
+            assert_eq!(hello.server_name.as_deref(), Some("app-layer.paccel.test"));
+        }
+        other => panic!("expected ApplicationLayer::TlsClientHello, got {other:?}"),
+    }
+}
+
+#[test]
+fn application_accessor_is_none_without_an_application_layer_match() {
+    let frame = build_ethernet_ipv4_tcp_frame([198, 51, 100, 91], 45_101, 12_345, &[]);
+    let parsed = BuiltinPacketParser::parse(&frame).expect("packet should parse");
+
+    assert!(parsed.application().is_none());
 }
