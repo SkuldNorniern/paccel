@@ -54,6 +54,8 @@ pub struct IpFragmentReassembler {
     max_fragments_per_datagram: usize,
     max_datagram_bytes: usize,
     max_concurrent_datagrams: usize,
+    max_total_bytes: usize,
+    total_bytes: usize,
     datagrams: HashMap<IpDatagramKey, IpDatagramState>,
     insertion_order: VecDeque<IpDatagramKey>,
 }
@@ -80,9 +82,25 @@ impl IpFragmentReassembler {
             max_fragments_per_datagram,
             max_datagram_bytes,
             max_concurrent_datagrams,
+            max_total_bytes: DEFAULT_MAX_TOTAL_BUFFERED_BYTES,
+            total_bytes: 0,
             datagrams: HashMap::new(),
             insertion_order: VecDeque::new(),
         }
+    }
+
+    /// Sets the total byte cap across every in-progress datagram combined -
+    /// `max_datagram_bytes` alone only bounds one datagram. Defaults to 64 MiB.
+    #[must_use]
+    pub fn with_max_total_bytes(mut self, max_total_bytes: usize) -> Self {
+        self.max_total_bytes = max_total_bytes;
+        self
+    }
+
+    /// Bytes currently held across every in-progress datagram.
+    #[must_use]
+    pub fn total_bytes(&self) -> usize {
+        self.total_bytes
     }
 
     /// Returns the complete transport payload after accepting an IPv4 fragment.
@@ -160,6 +178,8 @@ impl IpFragmentReassembler {
                 more_fragments,
                 payload,
                 self.max_fragments_per_datagram,
+                self.max_total_bytes,
+                &mut self.total_bytes,
             ),
             None => FragmentResult::Drop,
         };
@@ -177,6 +197,7 @@ impl IpFragmentReassembler {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn insert_fragment(
         state: &mut IpDatagramState,
         offset: usize,
@@ -184,6 +205,8 @@ impl IpFragmentReassembler {
         more_fragments: bool,
         payload: &[u8],
         max_fragments: usize,
+        max_total_bytes: usize,
+        total_bytes: &mut usize,
     ) -> FragmentResult {
         if state.fragment_count >= max_fragments {
             return FragmentResult::Drop;
@@ -204,8 +227,16 @@ impl IpFragmentReassembler {
 
         state.fragment_count += 1;
         if state.bytes.len() < end {
+            let growth = end - state.bytes.len();
+            let Some(projected_total) = total_bytes.checked_add(growth) else {
+                return FragmentResult::Drop;
+            };
+            if projected_total > max_total_bytes {
+                return FragmentResult::Drop;
+            }
             state.bytes.resize(end, 0);
             state.received.resize(end, false);
+            *total_bytes = projected_total;
         }
         if state
             .received
@@ -243,14 +274,19 @@ impl IpFragmentReassembler {
         while self.datagrams.len() >= self.max_concurrent_datagrams {
             let Some(oldest) = self.insertion_order.pop_front() else {
                 self.datagrams.clear();
+                self.total_bytes = 0;
                 break;
             };
-            self.datagrams.remove(&oldest);
+            if let Some(state) = self.datagrams.remove(&oldest) {
+                self.total_bytes = self.total_bytes.saturating_sub(state.bytes.len());
+            }
         }
     }
 
     fn remove_datagram(&mut self, key: &IpDatagramKey) {
-        self.datagrams.remove(key);
+        if let Some(state) = self.datagrams.remove(key) {
+            self.total_bytes = self.total_bytes.saturating_sub(state.bytes.len());
+        }
         self.insertion_order.retain(|queued| queued != key);
     }
 }
@@ -1304,6 +1340,25 @@ mod tests {
             reassembler.offer_ipv4(&ipv4_header(2, false), &payload[16..]),
             Some(payload.to_vec())
         );
+    }
+
+    #[test]
+    fn ip_fragment_total_bytes_cap_applies_across_datagrams() {
+        let mut reassembler = IpFragmentReassembler::new().with_max_total_bytes(10);
+
+        assert_eq!(
+            reassembler.offer_ipv4(&ipv4_header(0, true), b"aaaaaaaa"),
+            None
+        );
+        assert_eq!(reassembler.total_bytes(), 8);
+
+        // A different datagram's fragment would push the combined total past
+        // the 10-byte cap - dropped, even though it's well under any
+        // per-datagram limit on its own.
+        let mut other = ipv4_header(0, true);
+        other.identification = 99;
+        assert_eq!(reassembler.offer_ipv4(&other, b"bbbbbbbb"), None);
+        assert_eq!(reassembler.total_bytes(), 8);
     }
 
     #[test]
