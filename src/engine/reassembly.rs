@@ -16,6 +16,7 @@ const DEFAULT_MAX_BUFFERED_BYTES: usize = 1_048_576;
 const DEFAULT_MAX_GAP: usize = 65_535;
 const DEFAULT_MAX_FLOWS: usize = 65_536;
 const DEFAULT_MAX_STREAMS: usize = 65_536;
+const DEFAULT_MAX_TOTAL_BUFFERED_BYTES: usize = 64 * 1_048_576;
 const TCP_SEQUENCE_HALF_RANGE: u32 = 1 << 31;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -305,6 +306,8 @@ pub struct TcpStreamReassembler {
     max_buffered_bytes: usize,
     max_gap: usize,
     max_flows: usize,
+    max_total_buffered_bytes: usize,
+    total_buffered_bytes: usize,
     overlap_policy: TcpOverlapPolicy,
     flows: HashMap<TcpFlowKey, TcpFlowState>,
     insertion_order: VecDeque<TcpFlowKey>,
@@ -324,6 +327,8 @@ impl TcpStreamReassembler {
             max_buffered_bytes,
             max_gap,
             max_flows: DEFAULT_MAX_FLOWS,
+            max_total_buffered_bytes: DEFAULT_MAX_TOTAL_BUFFERED_BYTES,
+            total_buffered_bytes: 0,
             overlap_policy: TcpOverlapPolicy::default(),
             flows: HashMap::new(),
             insertion_order: VecDeque::new(),
@@ -342,6 +347,22 @@ impl TcpStreamReassembler {
     pub fn with_overlap_policy(mut self, policy: TcpOverlapPolicy) -> Self {
         self.overlap_policy = policy;
         self
+    }
+
+    /// Sets the total out-of-order byte cap across every flow/direction
+    /// combined - `max_buffered_bytes` alone only bounds one direction, so
+    /// worst case with default limits (65,536 flows x 2 directions x 1 MiB)
+    /// is unbounded in practice. Defaults to 64 MiB.
+    #[must_use]
+    pub fn with_max_total_buffered_bytes(mut self, max_total_buffered_bytes: usize) -> Self {
+        self.max_total_buffered_bytes = max_total_buffered_bytes;
+        self
+    }
+
+    /// Bytes currently buffered out-of-order across every flow and direction.
+    #[must_use]
+    pub fn buffered_bytes(&self) -> usize {
+        self.total_buffered_bytes
     }
 
     /// Returns newly contiguous payload after accepting one TCP segment.
@@ -386,6 +407,9 @@ impl TcpStreamReassembler {
         let state = &mut flow.directions[direction];
 
         if syn && state.expected.is_some() {
+            self.total_buffered_bytes = self
+                .total_buffered_bytes
+                .saturating_sub(state.buffered_bytes);
             *state = TcpDirectionState::default();
         }
         if state.expected.is_none() {
@@ -404,10 +428,12 @@ impl TcpStreamReassembler {
             payload,
             self.max_buffered_bytes,
             self.max_gap,
+            self.max_total_buffered_bytes,
+            &mut self.total_buffered_bytes,
             self.overlap_policy,
             &mut output,
         );
-        Self::consume_contiguous(state, &mut output);
+        Self::consume_contiguous(state, &mut self.total_buffered_bytes, &mut output);
         Self::consume_fin(state);
         output
     }
@@ -415,33 +441,47 @@ impl TcpStreamReassembler {
     /// Removes both directions of a normalized flow, returning whether it existed.
     pub fn remove_flow(&mut self, src: IpAddr, src_port: u16, dst: IpAddr, dst_port: u16) -> bool {
         let (key, _) = normalized_flow(src, src_port, dst, dst_port);
-        let removed = self.flows.remove(&key).is_some();
+        let Some(flow) = self.flows.remove(&key) else {
+            return false;
+        };
+        self.total_buffered_bytes = self
+            .total_buffered_bytes
+            .saturating_sub(flow_buffered_bytes(&flow));
         self.insertion_order.retain(|queued| queued != &key);
-        removed
+        true
     }
 
     /// Removes all flow state.
     pub fn clear(&mut self) {
         self.flows.clear();
         self.insertion_order.clear();
+        self.total_buffered_bytes = 0;
     }
 
     fn evict_until_room(&mut self) {
         while self.flows.len() >= self.max_flows {
             let Some(oldest) = self.insertion_order.pop_front() else {
                 self.flows.clear();
+                self.total_buffered_bytes = 0;
                 break;
             };
-            self.flows.remove(&oldest);
+            if let Some(flow) = self.flows.remove(&oldest) {
+                self.total_buffered_bytes = self
+                    .total_buffered_bytes
+                    .saturating_sub(flow_buffered_bytes(&flow));
+            }
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn accept_payload(
         state: &mut TcpDirectionState,
         sequence: u32,
         payload: &[u8],
         max_buffered_bytes: usize,
         max_gap: usize,
+        max_total_buffered_bytes: usize,
+        total_buffered_bytes: &mut usize,
         overlap_policy: TcpOverlapPolicy,
         output: &mut Vec<u8>,
     ) {
@@ -461,7 +501,15 @@ impl TcpStreamReassembler {
             if u32_to_usize(delta) > max_gap {
                 return;
             }
-            Self::buffer_segment(state, sequence, payload, max_buffered_bytes, overlap_policy);
+            Self::buffer_segment(
+                state,
+                sequence,
+                payload,
+                max_buffered_bytes,
+                max_total_buffered_bytes,
+                total_buffered_bytes,
+                overlap_policy,
+            );
             return;
         }
 
@@ -475,11 +523,14 @@ impl TcpStreamReassembler {
     /// Buffers an out-of-order segment and applies `policy` to overlaps. Byte
     /// distances from `expected` stay within `max_gap`, avoiding sequence
     /// wraparound inside this window.
+    #[allow(clippy::too_many_arguments)]
     fn buffer_segment(
         state: &mut TcpDirectionState,
         sequence: u32,
         payload: &[u8],
         max_buffered_bytes: usize,
+        max_total_buffered_bytes: usize,
+        total_buffered_bytes: &mut usize,
         policy: TcpOverlapPolicy,
     ) {
         let Some(expected) = state.expected else {
@@ -499,7 +550,14 @@ impl TcpStreamReassembler {
             .collect();
 
         if overlaps.is_empty() {
-            Self::insert_segment(state, sequence, payload.to_vec(), max_buffered_bytes);
+            Self::insert_segment(
+                state,
+                sequence,
+                payload.to_vec(),
+                max_buffered_bytes,
+                max_total_buffered_bytes,
+                total_buffered_bytes,
+            );
             return;
         }
 
@@ -520,6 +578,8 @@ impl TcpStreamReassembler {
                             cursor,
                             &payload[cursor - new_start..covered_start - new_start],
                             max_buffered_bytes,
+                            max_total_buffered_bytes,
+                            total_buffered_bytes,
                         );
                     }
                     cursor = cursor.max(covered_end);
@@ -531,6 +591,8 @@ impl TcpStreamReassembler {
                         cursor,
                         &payload[cursor - new_start..],
                         max_buffered_bytes,
+                        max_total_buffered_bytes,
+                        total_buffered_bytes,
                     );
                 }
             }
@@ -540,6 +602,7 @@ impl TcpStreamReassembler {
                         continue;
                     };
                     state.buffered_bytes = state.buffered_bytes.saturating_sub(bytes2.len());
+                    *total_buffered_bytes = total_buffered_bytes.saturating_sub(bytes2.len());
                     if start2 < new_start {
                         Self::insert_relative_segment(
                             state,
@@ -547,6 +610,8 @@ impl TcpStreamReassembler {
                             start2,
                             &bytes2[..new_start - start2],
                             max_buffered_bytes,
+                            max_total_buffered_bytes,
+                            total_buffered_bytes,
                         );
                     }
                     if end2 > new_end {
@@ -557,20 +622,32 @@ impl TcpStreamReassembler {
                             new_end,
                             &bytes2[right_offset..],
                             max_buffered_bytes,
+                            max_total_buffered_bytes,
+                            total_buffered_bytes,
                         );
                     }
                 }
-                Self::insert_segment(state, sequence, payload.to_vec(), max_buffered_bytes);
+                Self::insert_segment(
+                    state,
+                    sequence,
+                    payload.to_vec(),
+                    max_buffered_bytes,
+                    max_total_buffered_bytes,
+                    total_buffered_bytes,
+                );
             }
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn insert_relative_segment(
         state: &mut TcpDirectionState,
         expected: u32,
         offset: usize,
         bytes: &[u8],
         max_buffered_bytes: usize,
+        max_total_buffered_bytes: usize,
+        total_buffered_bytes: &mut usize,
     ) {
         let Ok(offset_u32) = u32::try_from(offset) else {
             return;
@@ -580,39 +657,62 @@ impl TcpStreamReassembler {
             expected.wrapping_add(offset_u32),
             bytes.to_vec(),
             max_buffered_bytes,
+            max_total_buffered_bytes,
+            total_buffered_bytes,
         );
     }
 
+    /// Inserts a buffered segment, enforcing both the per-direction cap and
+    /// the reassembler-wide total. Exceeding either drops this direction's
+    /// whole buffer rather than silently under-buffering (same as before the
+    /// total budget existed).
     fn insert_segment(
         state: &mut TcpDirectionState,
         sequence: u32,
         bytes: Vec<u8>,
         max_buffered_bytes: usize,
+        max_total_buffered_bytes: usize,
+        total_buffered_bytes: &mut usize,
     ) {
         if bytes.is_empty() {
             return;
         }
         let replaced = state.segments.get(&sequence).map_or(0, Vec::len);
         let Some(without_replaced) = state.buffered_bytes.checked_sub(replaced) else {
+            *total_buffered_bytes = total_buffered_bytes.saturating_sub(state.buffered_bytes);
             state.segments.clear();
             state.buffered_bytes = 0;
             return;
         };
         let Some(projected) = without_replaced.checked_add(bytes.len()) else {
+            *total_buffered_bytes = total_buffered_bytes.saturating_sub(state.buffered_bytes);
             state.segments.clear();
             state.buffered_bytes = 0;
             return;
         };
         if projected > max_buffered_bytes {
+            *total_buffered_bytes = total_buffered_bytes.saturating_sub(state.buffered_bytes);
             state.segments.clear();
             state.buffered_bytes = 0;
             return;
         }
+        let without_replaced_total = total_buffered_bytes.saturating_sub(replaced);
+        let Some(projected_total) = without_replaced_total.checked_add(bytes.len()) else {
+            return;
+        };
+        if projected_total > max_total_buffered_bytes {
+            return;
+        }
         state.segments.insert(sequence, bytes);
         state.buffered_bytes = projected;
+        *total_buffered_bytes = projected_total;
     }
 
-    fn consume_contiguous(state: &mut TcpDirectionState, output: &mut Vec<u8>) {
+    fn consume_contiguous(
+        state: &mut TcpDirectionState,
+        total_buffered_bytes: &mut usize,
+        output: &mut Vec<u8>,
+    ) {
         loop {
             let Some(expected) = state.expected else {
                 return;
@@ -626,13 +726,14 @@ impl TcpStreamReassembler {
                 }
             });
             let Some((sequence, consumed)) = candidate else {
-                Self::discard_stale_segments(state, expected);
+                Self::discard_stale_segments(state, total_buffered_bytes, expected);
                 return;
             };
             let Some(bytes) = state.segments.remove(&sequence) else {
                 return;
             };
             state.buffered_bytes = state.buffered_bytes.saturating_sub(bytes.len());
+            *total_buffered_bytes = total_buffered_bytes.saturating_sub(bytes.len());
             let Some(contiguous) = bytes.get(consumed..) else {
                 continue;
             };
@@ -641,7 +742,11 @@ impl TcpStreamReassembler {
         }
     }
 
-    fn discard_stale_segments(state: &mut TcpDirectionState, expected: u32) {
+    fn discard_stale_segments(
+        state: &mut TcpDirectionState,
+        total_buffered_bytes: &mut usize,
+        expected: u32,
+    ) {
         let stale: Vec<u32> = state
             .segments
             .iter()
@@ -654,6 +759,7 @@ impl TcpStreamReassembler {
         for sequence in stale {
             if let Some(bytes) = state.segments.remove(&sequence) {
                 state.buffered_bytes = state.buffered_bytes.saturating_sub(bytes.len());
+                *total_buffered_bytes = total_buffered_bytes.saturating_sub(bytes.len());
             }
         }
     }
@@ -696,6 +802,8 @@ pub struct QuicStreamReassembler {
     max_buffered_bytes_per_stream: usize,
     max_gap: usize,
     max_streams: usize,
+    max_total_buffered_bytes: usize,
+    total_buffered_bytes: usize,
     streams: HashMap<QuicStreamKey, QuicStreamState>,
     insertion_order: VecDeque<QuicStreamKey>,
 }
@@ -714,6 +822,8 @@ impl QuicStreamReassembler {
             max_buffered_bytes_per_stream,
             max_gap,
             max_streams: DEFAULT_MAX_STREAMS,
+            max_total_buffered_bytes: DEFAULT_MAX_TOTAL_BUFFERED_BYTES,
+            total_buffered_bytes: 0,
             streams: HashMap::new(),
             insertion_order: VecDeque::new(),
         }
@@ -724,6 +834,21 @@ impl QuicStreamReassembler {
     pub fn with_max_streams(mut self, max_streams: usize) -> Self {
         self.max_streams = max_streams;
         self
+    }
+
+    /// Sets the total out-of-order byte cap across every stream combined -
+    /// `max_buffered_bytes_per_stream` alone only bounds one stream.
+    /// Defaults to 64 MiB.
+    #[must_use]
+    pub fn with_max_total_buffered_bytes(mut self, max_total_buffered_bytes: usize) -> Self {
+        self.max_total_buffered_bytes = max_total_buffered_bytes;
+        self
+    }
+
+    /// Bytes currently buffered out-of-order across every stream.
+    #[must_use]
+    pub fn buffered_bytes(&self) -> usize {
+        self.total_buffered_bytes
     }
 
     /// Returns newly contiguous bytes after accepting one QUIC STREAM frame.
@@ -765,9 +890,11 @@ impl QuicStreamReassembler {
             offset,
             data,
             self.max_buffered_bytes_per_stream,
+            self.max_total_buffered_bytes,
+            &mut self.total_buffered_bytes,
             &mut output,
         );
-        Self::consume_contiguous(state, &mut output);
+        Self::consume_contiguous(state, &mut self.total_buffered_bytes, &mut output);
         Self::update_closed(state);
         output
     }
@@ -823,17 +950,29 @@ impl QuicStreamReassembler {
         stream_id: u64,
     ) -> bool {
         let key = normalized_quic_stream(src, src_port, dst, dst_port, stream_id);
-        let removed = self.streams.remove(&key).is_some();
+        let Some(state) = self.streams.remove(&key) else {
+            return false;
+        };
+        self.total_buffered_bytes = self
+            .total_buffered_bytes
+            .saturating_sub(state.buffered_bytes);
         self.insertion_order.retain(|queued| queued != &key);
-        removed
+        true
     }
 
     /// Removes every stream for a normalized UDP flow, returning whether any existed.
     pub fn remove_flow(&mut self, src: IpAddr, src_port: u16, dst: IpAddr, dst_port: u16) -> bool {
         let flow = normalized_flow(src, src_port, dst, dst_port).0;
         let previous_len = self.streams.len();
-        self.streams
-            .retain(|key, _| key.first != flow.first || key.second != flow.second);
+        let mut freed = 0usize;
+        self.streams.retain(|key, state| {
+            let keep = key.first != flow.first || key.second != flow.second;
+            if !keep {
+                freed += state.buffered_bytes;
+            }
+            keep
+        });
+        self.total_buffered_bytes = self.total_buffered_bytes.saturating_sub(freed);
         self.insertion_order
             .retain(|key| key.first != flow.first || key.second != flow.second);
         self.streams.len() != previous_len
@@ -843,6 +982,7 @@ impl QuicStreamReassembler {
     pub fn clear(&mut self) {
         self.streams.clear();
         self.insertion_order.clear();
+        self.total_buffered_bytes = 0;
     }
 
     fn ensure_stream(&mut self, key: &QuicStreamKey) -> bool {
@@ -862,9 +1002,14 @@ impl QuicStreamReassembler {
         while self.streams.len() >= self.max_streams {
             let Some(oldest) = self.insertion_order.pop_front() else {
                 self.streams.clear();
+                self.total_buffered_bytes = 0;
                 break;
             };
-            self.streams.remove(&oldest);
+            if let Some(state) = self.streams.remove(&oldest) {
+                self.total_buffered_bytes = self
+                    .total_buffered_bytes
+                    .saturating_sub(state.buffered_bytes);
+            }
         }
     }
 
@@ -884,11 +1029,14 @@ impl QuicStreamReassembler {
         true
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn accept_payload(
         state: &mut QuicStreamState,
         offset: u64,
         data: &[u8],
         max_buffered_bytes: usize,
+        max_total_buffered_bytes: usize,
+        total_buffered_bytes: &mut usize,
         output: &mut Vec<u8>,
     ) {
         if data.is_empty() {
@@ -900,7 +1048,14 @@ impl QuicStreamReassembler {
             return;
         }
         if offset > state.expected {
-            Self::buffer_range(state, offset, data, max_buffered_bytes);
+            Self::buffer_range(
+                state,
+                offset,
+                data,
+                max_buffered_bytes,
+                max_total_buffered_bytes,
+                total_buffered_bytes,
+            );
             return;
         }
 
@@ -922,28 +1077,45 @@ impl QuicStreamReassembler {
         offset: u64,
         data: &[u8],
         max_buffered_bytes: usize,
+        max_total_buffered_bytes: usize,
+        total_buffered_bytes: &mut usize,
     ) {
         let replaced = state.ranges.get(&offset).map_or(0, Vec::len);
         let Some(without_replaced) = state.buffered_bytes.checked_sub(replaced) else {
+            *total_buffered_bytes = total_buffered_bytes.saturating_sub(state.buffered_bytes);
             state.ranges.clear();
             state.buffered_bytes = 0;
             return;
         };
         let Some(projected) = without_replaced.checked_add(data.len()) else {
+            *total_buffered_bytes = total_buffered_bytes.saturating_sub(state.buffered_bytes);
             state.ranges.clear();
             state.buffered_bytes = 0;
             return;
         };
         if projected > max_buffered_bytes {
+            *total_buffered_bytes = total_buffered_bytes.saturating_sub(state.buffered_bytes);
             state.ranges.clear();
             state.buffered_bytes = 0;
             return;
         }
+        let without_replaced_total = total_buffered_bytes.saturating_sub(replaced);
+        let Some(projected_total) = without_replaced_total.checked_add(data.len()) else {
+            return;
+        };
+        if projected_total > max_total_buffered_bytes {
+            return;
+        }
         state.ranges.insert(offset, data.to_vec());
         state.buffered_bytes = projected;
+        *total_buffered_bytes = projected_total;
     }
 
-    fn consume_contiguous(state: &mut QuicStreamState, output: &mut Vec<u8>) {
+    fn consume_contiguous(
+        state: &mut QuicStreamState,
+        total_buffered_bytes: &mut usize,
+        output: &mut Vec<u8>,
+    ) {
         loop {
             let expected = state.expected;
             let candidate = state.ranges.iter().find_map(|(offset, bytes)| {
@@ -952,13 +1124,14 @@ impl QuicStreamReassembler {
                 (consumed < bytes.len()).then_some((*offset, consumed))
             });
             let Some((offset, consumed)) = candidate else {
-                Self::discard_stale_ranges(state);
+                Self::discard_stale_ranges(state, total_buffered_bytes);
                 return;
             };
             let Some(bytes) = state.ranges.remove(&offset) else {
                 return;
             };
             state.buffered_bytes = state.buffered_bytes.saturating_sub(bytes.len());
+            *total_buffered_bytes = total_buffered_bytes.saturating_sub(bytes.len());
             let Some(contiguous) = bytes.get(consumed..) else {
                 continue;
             };
@@ -971,7 +1144,7 @@ impl QuicStreamReassembler {
         }
     }
 
-    fn discard_stale_ranges(state: &mut QuicStreamState) {
+    fn discard_stale_ranges(state: &mut QuicStreamState, total_buffered_bytes: &mut usize) {
         let stale: Vec<u64> = state
             .ranges
             .iter()
@@ -984,6 +1157,7 @@ impl QuicStreamReassembler {
         for offset in stale {
             if let Some(bytes) = state.ranges.remove(&offset) {
                 state.buffered_bytes = state.buffered_bytes.saturating_sub(bytes.len());
+                *total_buffered_bytes = total_buffered_bytes.saturating_sub(bytes.len());
             }
         }
     }
@@ -1071,6 +1245,10 @@ fn normalized_flow(src: IpAddr, src_port: u16, dst: IpAddr, dst_port: u16) -> (T
             1,
         )
     }
+}
+
+fn flow_buffered_bytes(flow: &TcpFlowState) -> usize {
+    flow.directions[0].buffered_bytes + flow.directions[1].buffered_bytes
 }
 
 fn advance_expected(state: &mut TcpDirectionState, byte_count: usize) {
@@ -1326,6 +1504,107 @@ mod tests {
             b"fresh"
         );
         assert_eq!(reassembler.flows.len(), 2);
+    }
+
+    #[test]
+    fn tcp_total_buffered_bytes_cap_applies_across_flows() {
+        let (src, dst) = endpoints();
+        let mut reassembler = TcpStreamReassembler::new().with_max_total_buffered_bytes(10);
+
+        // Out-of-order segment on flow A: 6 buffered bytes, under the total cap.
+        assert!(
+            reassembler
+                .offer(src, 1_000, dst, 80, 0, true, false, false, b"")
+                .is_empty()
+        );
+        assert!(
+            reassembler
+                .offer(src, 1_000, dst, 80, 5, false, false, false, b"aaaaaa")
+                .is_empty()
+        );
+        assert_eq!(reassembler.buffered_bytes(), 6);
+
+        // Out-of-order segment on a different flow: 6 more bytes would push
+        // the combined total to 12, over the 10-byte cap - refused, even
+        // though each flow is well under any per-direction limit on its own.
+        assert!(
+            reassembler
+                .offer(src, 2_000, dst, 80, 0, true, false, false, b"")
+                .is_empty()
+        );
+        assert!(
+            reassembler
+                .offer(src, 2_000, dst, 80, 5, false, false, false, b"bbbbbb")
+                .is_empty()
+        );
+        assert_eq!(reassembler.buffered_bytes(), 6);
+    }
+
+    #[test]
+    fn tcp_total_buffered_bytes_drops_on_consume() {
+        let (src, dst) = endpoints();
+        let mut reassembler = TcpStreamReassembler::new();
+
+        assert!(
+            reassembler
+                .offer(src, 1_000, dst, 80, 0, true, false, false, b"")
+                .is_empty()
+        );
+        assert!(
+            reassembler
+                .offer(src, 1_000, dst, 80, 5, false, false, false, b"late")
+                .is_empty()
+        );
+        assert_eq!(reassembler.buffered_bytes(), 4);
+        reassembler.offer(src, 1_000, dst, 80, 1, false, false, false, b"aaaa");
+        assert_eq!(reassembler.buffered_bytes(), 0);
+    }
+
+    #[test]
+    fn tcp_total_buffered_bytes_drops_on_syn_restart() {
+        let (src, dst) = endpoints();
+        let mut reassembler = TcpStreamReassembler::new();
+
+        assert!(
+            reassembler
+                .offer(src, 1_000, dst, 80, 0, true, false, false, b"")
+                .is_empty()
+        );
+        assert!(
+            reassembler
+                .offer(src, 1_000, dst, 80, 20, false, false, false, b"stale")
+                .is_empty()
+        );
+        assert_eq!(reassembler.buffered_bytes(), 5);
+        assert_eq!(
+            reassembler.offer(src, 1_000, dst, 80, 100, true, false, false, b"new"),
+            b"new"
+        );
+        assert_eq!(reassembler.buffered_bytes(), 0);
+    }
+
+    #[test]
+    fn tcp_total_buffered_bytes_drops_on_evict() {
+        let (src, dst) = endpoints();
+        let mut reassembler = TcpStreamReassembler::new().with_max_flows(1);
+
+        assert!(
+            reassembler
+                .offer(src, 1_000, dst, 80, 0, true, false, false, b"")
+                .is_empty()
+        );
+        assert!(
+            reassembler
+                .offer(src, 1_000, dst, 80, 200, false, false, false, b"held")
+                .is_empty()
+        );
+        assert_eq!(reassembler.buffered_bytes(), 4);
+        assert!(
+            reassembler
+                .offer(src, 2_000, dst, 80, 0, true, false, false, b"")
+                .is_empty()
+        );
+        assert_eq!(reassembler.buffered_bytes(), 0);
     }
 
     #[test]
@@ -1599,6 +1878,74 @@ mod tests {
             b"fresh"
         );
         assert_eq!(reassembler.streams.len(), 2);
+    }
+
+    #[test]
+    fn quic_total_buffered_bytes_cap_applies_across_streams() {
+        let (src, dst) = endpoints();
+        let mut reassembler = QuicStreamReassembler::new().with_max_total_buffered_bytes(10);
+
+        assert!(
+            reassembler
+                .offer(src, 4_432, dst, 443, 0, 5, false, b"aaaaaa")
+                .is_empty()
+        );
+        assert_eq!(reassembler.buffered_bytes(), 6);
+
+        assert!(
+            reassembler
+                .offer(src, 4_432, dst, 443, 1, 5, false, b"bbbbbb")
+                .is_empty()
+        );
+        assert_eq!(reassembler.buffered_bytes(), 6);
+    }
+
+    #[test]
+    fn quic_total_buffered_bytes_drops_on_consume() {
+        let (src, dst) = endpoints();
+        let mut reassembler = QuicStreamReassembler::new();
+
+        assert!(
+            reassembler
+                .offer(src, 4_432, dst, 443, 0, 5, false, b"late")
+                .is_empty()
+        );
+        assert_eq!(reassembler.buffered_bytes(), 4);
+        reassembler.offer(src, 4_432, dst, 443, 0, 0, false, b"aaaaa");
+        assert_eq!(reassembler.buffered_bytes(), 0);
+    }
+
+    #[test]
+    fn quic_total_buffered_bytes_drops_on_remove_stream() {
+        let (src, dst) = endpoints();
+        let mut reassembler = QuicStreamReassembler::new();
+
+        assert!(
+            reassembler
+                .offer(src, 4_432, dst, 443, 0, 20, false, b"held")
+                .is_empty()
+        );
+        assert_eq!(reassembler.buffered_bytes(), 4);
+        assert!(reassembler.remove_stream(src, 4_432, dst, 443, 0));
+        assert_eq!(reassembler.buffered_bytes(), 0);
+    }
+
+    #[test]
+    fn quic_total_buffered_bytes_drops_on_evict() {
+        let (src, dst) = endpoints();
+        let mut reassembler = QuicStreamReassembler::new().with_max_streams(1);
+
+        assert!(
+            reassembler
+                .offer(src, 4_432, dst, 443, 0, 20, false, b"held")
+                .is_empty()
+        );
+        assert_eq!(reassembler.buffered_bytes(), 4);
+        assert_eq!(
+            reassembler.offer(src, 4_433, dst, 443, 1, 0, false, b"x"),
+            b"x"
+        );
+        assert_eq!(reassembler.buffered_bytes(), 0);
     }
 
     #[test]
