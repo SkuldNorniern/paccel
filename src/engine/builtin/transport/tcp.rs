@@ -81,7 +81,7 @@ fn classify_tcp_app_by_port(
         return;
     }
     if source_port == TCP_PORT_BGP || destination_port == TCP_PORT_BGP {
-        parsed.bgp = parse_bgp_message(payload).ok();
+        parsed.bgp = probe_bgp(payload).ok();
     }
     if parsed.bgp.is_none()
         && (source_port == TCP_PORT_LDAP
@@ -105,7 +105,7 @@ fn classify_tcp_app_by_port(
         && parsed.nntp.is_none()
         && (source_port == TCP_PORT_MQTT || destination_port == TCP_PORT_MQTT)
     {
-        parsed.mqtt = parse_mqtt_message(payload).ok();
+        parsed.mqtt = probe_mqtt(payload).ok();
     }
     if parsed.bgp.is_none()
         && parsed.ldap.is_none()
@@ -127,9 +127,9 @@ fn classify_tcp_app_by_port(
 }
 
 fn classify_smb(payload: &[u8], parsed: &mut TransportParse) {
-    parsed.smb2 = parse_smb2_message(payload).ok();
+    parsed.smb2 = probe_smb2(payload).ok();
     if parsed.smb2.is_none() {
-        parsed.smb1 = parse_smb1_message(payload).ok();
+        parsed.smb1 = probe_smb1(payload).ok();
     }
 }
 

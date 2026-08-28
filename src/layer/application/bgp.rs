@@ -1,4 +1,4 @@
-use crate::layer::LayerError;
+use crate::layer::{Layer, LayerError, ParseError, ProbeResult};
 
 const HEADER_LEN: usize = 19;
 const MARKER_LEN: usize = 16;
@@ -46,10 +46,34 @@ pub fn parse_bgp_message(payload: &[u8]) -> Result<BgpMessage, LayerError> {
     })
 }
 
+/// Probes a BGP message using the marker and complete fixed header.
+#[must_use]
+pub fn probe_bgp(payload: &[u8]) -> ProbeResult<BgpMessage> {
+    if payload.len() < HEADER_LEN {
+        return ProbeResult::Incomplete {
+            needed: Some(HEADER_LEN),
+            available: payload.len(),
+        };
+    }
+    if payload[..MARKER_LEN].iter().any(|byte| *byte != 0xff) {
+        return ProbeResult::NoMatch;
+    }
+
+    match parse_bgp_message(payload) {
+        Ok(message) => ProbeResult::Match(message),
+        Err(error) => ProbeResult::Malformed(ParseError::from_layer_error(
+            &error,
+            Layer::Application,
+            Some("bgp"),
+            0,
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{BgpMessageType, parse_bgp_message};
-    use crate::layer::LayerError;
+    use super::{BgpMessageType, parse_bgp_message, probe_bgp};
+    use crate::layer::{LayerError, ProbeResult};
 
     fn header(msg_type: u8, length: u16) -> Vec<u8> {
         let mut bytes = vec![0xff; MARKER_LEN];
@@ -58,7 +82,7 @@ mod tests {
         bytes
     }
 
-    use super::MARKER_LEN;
+    use super::{HEADER_LEN, MARKER_LEN};
 
     #[test]
     fn parses_keepalive() {
@@ -99,6 +123,38 @@ mod tests {
         assert!(matches!(
             parse_bgp_message(&[0xff; 10]),
             Err(LayerError::InvalidLength)
+        ));
+    }
+
+    #[test]
+    fn probe_matches_a_keepalive() {
+        assert!(matches!(probe_bgp(&header(4, 19)), ProbeResult::Match(_)));
+    }
+
+    #[test]
+    fn probe_reports_no_match_for_a_bad_marker() {
+        let mut bytes = header(4, 19);
+        bytes[0] = 0;
+        assert_eq!(probe_bgp(&bytes), ProbeResult::NoMatch);
+    }
+
+    #[test]
+    fn probe_reports_incomplete_for_a_truncated_header() {
+        let bytes = header(4, 19);
+        assert_eq!(
+            probe_bgp(&bytes[..18]),
+            ProbeResult::Incomplete {
+                needed: Some(HEADER_LEN),
+                available: 18,
+            }
+        );
+    }
+
+    #[test]
+    fn probe_reports_malformed_for_an_invalid_message_type() {
+        assert!(matches!(
+            probe_bgp(&header(9, 19)),
+            ProbeResult::Malformed(_)
         ));
     }
 }
