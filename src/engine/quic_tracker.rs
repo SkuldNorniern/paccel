@@ -77,17 +77,11 @@ impl QuicConnectionTracker {
         }
     }
 
-    /// Looks up which tracked connection issued `dcid` as one of its
-    /// connection IDs, if any - lets a short-header packet arriving on an
-    /// unfamiliar UDP 4-tuple (e.g. after connection migration, or NAT
-    /// rebinding) still be attributed to the connection that issued it,
-    /// without the caller needing to guess or already know the new tuple.
-    /// Returns the two endpoints of the flow that connection was last seen
-    /// on (not necessarily the tuple the migrated packet actually arrived
-    /// on - this only tells you "this CID belongs to a connection I've seen
-    /// before, here's where I last saw it", the caller decides how to react,
-    /// e.g. by calling `observe_long_header`-equivalent bookkeeping for the
-    /// new tuple itself, which this tracker doesn't do automatically).
+    /// Looks up which tracked connection issued `dcid`, if any - lets a
+    /// short-header packet on an unfamiliar UDP 4-tuple (migration, NAT
+    /// rebind) still resolve to the connection that issued the CID. Returns
+    /// that connection's last-seen endpoints, not necessarily the tuple the
+    /// packet arrived on; the caller decides what to do with that.
     #[must_use]
     pub fn connection_for_dcid(&self, dcid: &[u8]) -> Option<(IpAddr, u16, IpAddr, u16)> {
         let key = self.cid_index.get(dcid)?;

@@ -85,19 +85,13 @@ pub enum ParseErrorKind {
     Malformed,
 }
 
-/// A parse failure with enough context to act on programmatically - which
-/// layer and (when known) which protocol, where in the buffer, and why -
-/// unlike [`LayerError`], which carries none of that.
+/// A parse failure with layer, protocol, and offset context - unlike
+/// [`LayerError`], which carries none of that.
 ///
-/// This is additive: existing parsers still return `LayerError`/`Result<T,
-/// LayerError>` unchanged. `ParseError` is the emerging direction for
-/// richer error context; construct one at a call site that has the
-/// necessary offset/protocol information, or convert a `LayerError` via
-/// [`ParseError::from_layer_error`] when only the coarser kind is available
-/// (this loses precision - `Incomplete`'s `needed`/`available` fields come
-/// back as `None`/`0` since a bare `LayerError` never carried byte counts;
-/// prefer constructing `ParseError` directly wherever the real counts are
-/// on hand).
+/// Most parsers still return `LayerError`. Convert one via
+/// [`ParseError::from_layer_error`] when that's all you have; it can't
+/// recover `Incomplete`'s byte counts, since `LayerError` never had them -
+/// construct `ParseError` directly where the real counts are available.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParseError {
     pub layer: Layer,
@@ -122,9 +116,8 @@ impl ParseError {
         }
     }
 
-    /// Converts a coarse [`LayerError`] into a [`ParseError`], filling in the
-    /// layer/protocol/offset the caller supplies. See the type-level doc for
-    /// what's lost in this direction (byte counts on `Incomplete`).
+    /// Converts a [`LayerError`] into a [`ParseError`] with the given
+    /// layer/protocol/offset. See the type doc for what's lost.
     #[must_use]
     pub fn from_layer_error(
         error: &LayerError,
@@ -201,37 +194,29 @@ impl fmt::Display for ParseError {
 
 impl Error for ParseError {}
 
-/// The outcome of trying to recognize/parse one protocol against a buffer
-/// that might not even be that protocol - distinguishes "not this protocol"
-/// from "truncated" from "malformed", which a bare `Option<T>` (or a
-/// `Result<T, E>` collapsed via `.ok()`) cannot: all three read as `None`.
+/// The outcome of probing a buffer for one protocol. Separates "not this
+/// protocol" from "truncated" from "malformed" - a bare `Option<T>` (or a
+/// `Result<T, E>` collapsed via `.ok()`) reads all three as `None`.
 ///
-/// A probe function returning this makes the distinction available to
-/// classification logic (e.g. keep listening on this UDP flow because the
-/// data was merely incomplete, vs stop probing this protocol because the
-/// bytes definitively don't match it) without forcing every caller to
-/// consume it - [`Self::ok`] bridges back to the familiar `Option<T>` shape.
+/// [`Self::ok`] bridges back to `Option<T>` for callers that don't need
+/// the distinction.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProbeResult<T> {
-    /// The buffer matched and was fully parsed.
+    /// Buffer matched and fully parsed.
     Match(T),
-    /// The buffer definitively isn't this protocol (e.g. a magic/version
-    /// field didn't match) - trying other protocols against it is sensible.
+    /// Buffer definitely isn't this protocol (bad magic/version) - trying
+    /// other protocols is reasonable.
     NoMatch,
-    /// Too little data to tell yet; more bytes might turn this into `Match`
-    /// or `NoMatch`. Distinct from `NoMatch`: retrying with more data is
-    /// worthwhile, re-probing a fixed buffer that already failed isn't.
+    /// Too little data to tell yet. Unlike `NoMatch`, more bytes could
+    /// still turn this into a match.
     Incomplete,
-    /// Recognized as this protocol (e.g. a magic/version field matched) but
-    /// the rest of the buffer fails to parse - not a "try another protocol"
-    /// case, this is malformed input for the protocol it committed to.
+    /// Matched (magic/version checked out) but the rest fails to parse.
     Malformed(ParseError),
 }
 
 impl<T> ProbeResult<T> {
-    /// Bridges to the coarser `Option<T>` shape existing `.ok()`-style
-    /// callers already use, discarding the `NoMatch`/`Incomplete`/
-    /// `Malformed` distinction.
+    /// Drops the `NoMatch`/`Incomplete`/`Malformed` distinction back to
+    /// `Option<T>`.
     #[must_use]
     pub fn ok(self) -> Option<T> {
         match self {
