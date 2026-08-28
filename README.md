@@ -61,6 +61,8 @@ Still `0.x`, API can move before `1.0`.
 
 **New, not fully wired in yet:** `ParseError`/`ParseErrorKind`/`Layer` add offset/protocol context that `LayerError` doesn't carry, but most parsers still return plain `LayerError`. `ProbeResult<T>` separates "not this protocol" from "truncated" from "malformed" (DNP3's probe uses it; the rest still return `Option<T>`). `ParsedPacket::application()` is one accessor over the ~40 `Option<T>` application fields — the fields themselves aren't going anywhere.
 
+`ParseWarning` dropped its redundant `subcode` field — `code`/`subcode` were exact duplicates (`ParseWarningCode::VxlanInner` / `ParseWarningSubcode::VxlanInner`, one per variant). `code.as_str()` now gives the stable string name directly.
+
 **Not there yet:** HTTP/2 has no HPACK. No HTTP/3, GTP, or Diameter. Fingerprinting stops at JA3/JA4/JA3S/HASSH — no JA4S/JA4X/JA4H/JA4SSH. tshark differential and pcap-vs-scapy coverage is still growing. The hot path still allocates more than it needs to.
 
 ## Quick usage
@@ -85,7 +87,7 @@ fn parse_frame(frame: &[u8]) {
                 println!(
                     "warning [{}:{}@{}]: {}",
                     warning.protocol.as_str(),
-                    warning.subcode.as_str(),
+                    warning.code.as_str(),
                     warning.offset,
                     warning.message
                 );

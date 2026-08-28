@@ -59,9 +59,9 @@ pub use self::network::Ipv6FragmentHeader;
 pub use self::types::{
     AhInfo, ApplicationLayer, EspInfo, EthernetFrame, FlowKey, GeneveInfo, GreInfo, IgmpInfo,
     L2tpInfo, LldpInfo, LldpTlv, MplsInfo, MplsLabel, OpenVpnInfo, OpenVpnOpcode, ParseConfig,
-    ParseMode, ParseWarning, ParseWarningCode, ParseWarningProtocol, ParseWarningSubcode,
-    ParsedPacket, PppoeInfo, SctpChunk, SctpInfo, StopLayer, StpBpdu, TcpOptionsParsed,
-    TransportSegment, UdpAppHint, VxlanInfo, WireGuardInfo, WireGuardMessageType,
+    ParseMode, ParseWarning, ParseWarningCode, ParseWarningProtocol, ParsedPacket, PppoeInfo,
+    SctpChunk, SctpInfo, StopLayer, StpBpdu, TcpOptionsParsed, TransportSegment, UdpAppHint,
+    VxlanInfo, WireGuardInfo, WireGuardMessageType,
 };
 
 pub struct BuiltinPacketParser;
@@ -246,7 +246,6 @@ impl BuiltinPacketParser {
                     parsed.warnings.push(ParseWarning {
                         code: ParseWarningCode::Ipv4Truncated,
                         protocol: ParseWarningProtocol::Network,
-                        subcode: ParseWarningSubcode::Ipv4Truncated,
                         offset: l3_offset,
                         message: "IPv4 total length exceeds capture; L4 may be truncated",
                     });
@@ -256,7 +255,6 @@ impl BuiltinPacketParser {
                     parsed.warnings.push(ParseWarning {
                         code: ParseWarningCode::Ipv4Fragmented,
                         protocol: ParseWarningProtocol::Network,
-                        subcode: ParseWarningSubcode::Ipv4Fragmented,
                         offset: l3_offset + 6,
                         message: "IPv4 fragment; no reassembly, L4 may be incomplete",
                     });
@@ -297,7 +295,6 @@ impl BuiltinPacketParser {
                     parsed.warnings.push(ParseWarning {
                         code: ParseWarningCode::Ipv6Truncated,
                         protocol: ParseWarningProtocol::Network,
-                        subcode: ParseWarningSubcode::Ipv6Truncated,
                         offset: l3_offset,
                         message: "IPv6 payload length exceeds capture; L4 may be truncated",
                     });
@@ -328,7 +325,6 @@ impl BuiltinPacketParser {
                     parsed.warnings.push(ParseWarning {
                         code: ParseWarningCode::Ipv6ExtensionDepthLimit,
                         protocol: ParseWarningProtocol::Network,
-                        subcode: ParseWarningSubcode::Ipv6ExtensionDepthLimit,
                         offset: l3_offset + state.l4_offset,
                         message: "IPv6 extension header depth limit reached; skipping L4/L7 parse",
                     });
@@ -338,7 +334,6 @@ impl BuiltinPacketParser {
                     parsed.warnings.push(ParseWarning {
                         code: ParseWarningCode::Ipv6NonInitialFragment,
                         protocol: ParseWarningProtocol::Network,
-                        subcode: ParseWarningSubcode::Ipv6NonInitialFragment,
                         offset: l3_offset + state.l4_offset,
                         message:
                             "IPv6 non-initial fragment encountered; skipping L4/L7 parse without reassembly",
@@ -369,7 +364,6 @@ impl BuiltinPacketParser {
                 parsed.warnings.push(ParseWarning {
                     code: ParseWarningCode::PppoeNoPayload,
                     protocol: ParseWarningProtocol::Tunnel,
-                    subcode: ParseWarningSubcode::PppoeNoPayload,
                     offset: l3_offset,
                     message: "PPPoE header only; payload not decoded",
                 });
@@ -389,7 +383,6 @@ impl BuiltinPacketParser {
                     parsed.warnings.push(ParseWarning {
                         code: ParseWarningCode::MplsLabelDepthLimit,
                         protocol: ParseWarningProtocol::Tunnel,
-                        subcode: ParseWarningSubcode::MplsLabelDepthLimit,
                         offset: l3_offset + mpls_payload_offset,
                         message: "MPLS label depth limit reached; skipping inner payload decode",
                     });
@@ -421,7 +414,6 @@ impl BuiltinPacketParser {
                             result,
                             tunnel_depth_limited,
                             ParseWarningCode::MplsInner,
-                            ParseWarningSubcode::MplsInner,
                             l3_offset + mpls_payload_offset,
                             "MPLS inner payload; nested decode failed",
                         );
@@ -429,7 +421,6 @@ impl BuiltinPacketParser {
                         push_inner_warning(
                             &mut parsed,
                             ParseWarningCode::MplsInner,
-                            ParseWarningSubcode::MplsInner,
                             l3_offset + mpls_payload_offset,
                             "MPLS inner payload; nested decode skipped",
                         );
@@ -454,7 +445,6 @@ impl BuiltinPacketParser {
                 parsed.warnings.push(ParseWarning {
                     code: ParseWarningCode::UnsupportedEthertype(other),
                     protocol: ParseWarningProtocol::Link,
-                    subcode: ParseWarningSubcode::UnsupportedEthertype,
                     offset: 12,
                     message: "L2 only; unsupported ethertype, L3+ not parsed",
                 });
@@ -491,7 +481,6 @@ fn decode_pppoe_session(
         push_inner_warning(
             parsed,
             ParseWarningCode::PppoeNoPayload,
-            ParseWarningSubcode::PppoeNoPayload,
             offset + PPPOE_HEADER_LEN,
             "PPPoE session has no complete PPP protocol field",
         );
@@ -512,7 +501,6 @@ fn decode_pppoe_session(
             push_inner_warning(
                 parsed,
                 ParseWarningCode::PppoeNoPayload,
-                ParseWarningSubcode::PppoeNoPayload,
                 offset + PPPOE_HEADER_LEN,
                 "PPPoE session has a truncated PPP protocol field",
             );
@@ -531,7 +519,6 @@ fn decode_pppoe_session(
         push_inner_warning(
             parsed,
             ParseWarningCode::PppoeNoPayload,
-            ParseWarningSubcode::PppoeNoPayload,
             offset + PPPOE_HEADER_LEN,
             "PPPoE PPP control or unsupported protocol; payload not decoded",
         );
@@ -561,7 +548,6 @@ fn decode_pppoe_session(
         result,
         depth_limited,
         ParseWarningCode::PppoeNoPayload,
-        ParseWarningSubcode::PppoeNoPayload,
         offset + inner_offset,
         "PPPoE PPP payload; nested decode failed",
     );
@@ -583,7 +569,6 @@ fn recurse_transport_tunnel(
             gre.protocol_type,
             gre.protocol_type == ethertype::TRANSPARENT_ETHERNET_BRIDGING,
             ParseWarningCode::GreInner,
-            ParseWarningSubcode::GreInner,
             offset + gre.header_len,
             "GRE inner payload; nested decode failed",
         ))
@@ -594,7 +579,6 @@ fn recurse_transport_tunnel(
             0,
             true,
             ParseWarningCode::VxlanInner,
-            ParseWarningSubcode::VxlanInner,
             offset + 16,
             "VXLAN inner payload; nested decode failed",
         ))
@@ -606,7 +590,6 @@ fn recurse_transport_tunnel(
             geneve.protocol_type,
             geneve.protocol_type == ethertype::TRANSPARENT_ETHERNET_BRIDGING,
             ParseWarningCode::GeneveInner,
-            ParseWarningSubcode::GeneveInner,
             offset + inner_offset,
             "GENEVE inner payload; nested decode failed",
         ))
@@ -616,7 +599,6 @@ fn recurse_transport_tunnel(
             ethertype::IPV4,
             false,
             ParseWarningCode::IpipInner,
-            ParseWarningSubcode::IpipInner,
             offset,
             "IP-in-IP inner payload; nested decode failed",
         ))
@@ -626,7 +608,6 @@ fn recurse_transport_tunnel(
             ethertype::IPV6,
             false,
             ParseWarningCode::IpipInner,
-            ParseWarningSubcode::IpipInner,
             offset,
             "IP-in-IP inner payload; nested decode failed",
         ))
@@ -636,7 +617,6 @@ fn recurse_transport_tunnel(
             ethertype::MPLS_UNICAST,
             false,
             ParseWarningCode::MplsInner,
-            ParseWarningSubcode::MplsInner,
             offset,
             "MPLS-in-IP inner payload; nested decode failed",
         ))
@@ -644,7 +624,7 @@ fn recurse_transport_tunnel(
         None
     };
 
-    if let Some((inner, inner_ethertype, is_l2, code, subcode, inner_offset, message)) = candidate {
+    if let Some((inner, inner_ethertype, is_l2, code, inner_offset, message)) = candidate {
         let has_payload = inner.is_some_and(|bytes| !bytes.is_empty());
         let depth_limited = has_payload && depth >= config.max_tunnel_depth;
         let result = inner.filter(|bytes| !bytes.is_empty()).and_then(|bytes| {
@@ -661,22 +641,13 @@ fn recurse_transport_tunnel(
                 ))
             }
         });
-        recurse_or_warn(
-            parsed,
-            result,
-            depth_limited,
-            code,
-            subcode,
-            inner_offset,
-            message,
-        );
+        recurse_or_warn(parsed, result, depth_limited, code, inner_offset, message);
     }
 
     if parsed.ah.is_some() {
         parsed.warnings.push(ParseWarning {
             code: ParseWarningCode::AhInner,
             protocol: ParseWarningProtocol::Tunnel,
-            subcode: ParseWarningSubcode::AhInner,
             offset,
             message: "AH payload present; no nested decode yet",
         });
@@ -685,7 +656,6 @@ fn recurse_transport_tunnel(
         parsed.warnings.push(ParseWarning {
             code: ParseWarningCode::EspInner,
             protocol: ParseWarningProtocol::Tunnel,
-            subcode: ParseWarningSubcode::EspInner,
             offset,
             message: "ESP payload present; no nested decode yet",
         });
@@ -704,7 +674,6 @@ fn recurse_or_warn(
     result: Option<Result<ParsedPacket, LayerError>>,
     depth_limited: bool,
     code: ParseWarningCode,
-    subcode: ParseWarningSubcode,
     offset: usize,
     message: &'static str,
 ) {
@@ -712,28 +681,25 @@ fn recurse_or_warn(
         parsed.warnings.push(ParseWarning {
             code: ParseWarningCode::TunnelDepthLimit,
             protocol: ParseWarningProtocol::Tunnel,
-            subcode: ParseWarningSubcode::TunnelDepthLimit,
             offset,
             message: "tunnel depth limit reached; skipping inner payload decode",
         });
     } else if let Some(Ok(inner)) = result {
         parsed.inner = Some(Box::new(inner));
     } else {
-        push_inner_warning(parsed, code, subcode, offset, message);
+        push_inner_warning(parsed, code, offset, message);
     }
 }
 
 fn push_inner_warning(
     parsed: &mut ParsedPacket,
     code: ParseWarningCode,
-    subcode: ParseWarningSubcode,
     offset: usize,
     message: &'static str,
 ) {
     parsed.warnings.push(ParseWarning {
         code,
         protocol: ParseWarningProtocol::Tunnel,
-        subcode,
         offset,
         message,
     });
@@ -893,7 +859,7 @@ fn parse_stp(data: &[u8]) -> Result<StpBpdu, LayerError> {
 mod tests {
     use super::{
         BuiltinPacketParser, ParseConfig, ParseMode, ParseWarningCode, ParseWarningProtocol,
-        ParseWarningSubcode, TransportSegment,
+        TransportSegment,
     };
 
     fn truncated_ipv4_udp_frame() -> Vec<u8> {
@@ -1070,13 +1036,16 @@ mod tests {
     }
 
     #[test]
-    fn warning_metadata_contains_protocol_subcode_and_offset() {
+    fn warning_metadata_contains_protocol_code_and_offset() {
         let frame = vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0x12, 0x34, 0x00, 0x00];
         let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
         let warning = parsed.warnings.first().expect("warning expected");
 
         assert_eq!(warning.protocol, ParseWarningProtocol::Link);
-        assert_eq!(warning.subcode, ParseWarningSubcode::UnsupportedEthertype);
+        assert!(matches!(
+            warning.code,
+            ParseWarningCode::UnsupportedEthertype(_)
+        ));
         assert_eq!(warning.offset, 12);
     }
 
