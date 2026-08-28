@@ -96,8 +96,14 @@ pub fn parse_quic_version_negotiation(payload: &[u8]) -> Option<QuicVersionNegot
     let scid_end = scid_start.checked_add(scid_len)?;
     let scid = payload.get(scid_start..scid_end)?.to_vec();
 
-    let supported_versions = payload
-        .get(scid_end..)?
+    // RFC 8999: a VN packet must carry at least one Supported Version, each
+    // exactly 4 bytes - reject a truncated tail or an empty list rather than
+    // silently dropping the remainder.
+    let versions_bytes = payload.get(scid_end..)?;
+    if versions_bytes.is_empty() || versions_bytes.len() % 4 != 0 {
+        return None;
+    }
+    let supported_versions = versions_bytes
         .as_chunks::<4>()
         .0
         .iter()
@@ -394,6 +400,20 @@ mod tests {
         assert_eq!(negotiation.dcid, dcid);
         assert_eq!(negotiation.scid, scid);
         assert_eq!(negotiation.supported_versions, versions);
+    }
+
+    #[test]
+    fn rejects_version_negotiation_with_truncated_or_empty_version_list() {
+        let header = |extra: &[u8]| {
+            let mut payload = vec![0x80, 0, 0, 0, 0, 0, 0]; // no DCID, no SCID
+            payload.extend_from_slice(extra);
+            payload
+        };
+
+        // Empty list: RFC 8999 requires at least one Supported Version.
+        assert!(parse_quic_version_negotiation(&header(&[])).is_none());
+        // 3-byte remainder: not a whole 4-byte version.
+        assert!(parse_quic_version_negotiation(&header(&[0, 0, 0, 1, 0xaa, 0xbb, 0xcc])).is_none());
     }
 
     #[test]

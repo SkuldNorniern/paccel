@@ -58,8 +58,8 @@ use crate::layer::transport::udp::UdpHeader;
 
 use super::types::{
     AhInfo, EspInfo, GeneveInfo, GreInfo, IgmpInfo, L2tpInfo, OpenVpnInfo, OpenVpnOpcode,
-    ParseConfig, SctpChunk, SctpInfo, StopLayer, TcpOptionsParsed, TransportSegment, UdpAppHint,
-    VxlanInfo, WireGuardInfo, WireGuardMessageType,
+    ParseConfig, ParseMode, SctpChunk, SctpInfo, StopLayer, TcpOptionsParsed, TransportSegment,
+    UdpAppHint, VxlanInfo, WireGuardInfo, WireGuardMessageType,
 };
 
 use self::minimal::{

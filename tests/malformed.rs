@@ -185,6 +185,21 @@ fn ipv4_total_length_beyond_capture_warns_or_errors() {
 }
 
 #[test]
+fn udp_length_beyond_capture_is_rejected_only_in_strict_mode() {
+    let mut bytes = ethernet(0x0800);
+    bytes.extend_from_slice(&ipv4_header(5, 28, 17)); // 20 IP + 8 UDP header, no payload
+    let mut udp = vec![0; 8];
+    udp[4..6].copy_from_slice(&20u16.to_be_bytes()); // declares 20, only 8 present
+    bytes.extend_from_slice(&udp);
+
+    assert!(
+        BuiltinPacketParser::parse(&bytes).is_ok(),
+        "permissive mode should clamp, not error"
+    );
+    assert!(BuiltinPacketParser::parse_with_config(&bytes, strict_config()).is_err());
+}
+
+#[test]
 fn tcp_max_data_offset_with_short_header_is_rejected() {
     let mut bytes = ethernet(0x0800);
     bytes.extend_from_slice(&ipv4_header(5, 40, 6));
