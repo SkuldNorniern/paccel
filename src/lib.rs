@@ -34,5 +34,5 @@ pub use engine::{
     IpFragmentReassembler, QuicConnectionTracker, QuicStreamReassembler, SessionTracker,
     StreamEvent, StreamL7, TcpOverlapPolicy, TcpStreamReassembler,
 };
-pub use layer::{Layer, LayerError, ParseError, ParseErrorKind, ProbeResult};
+pub use layer::{Confidence, Layer, LayerError, ParseError, ParseErrorKind, ProbeResult};
 pub use packet::{Packet, PacketError, PacketMetadata, PacketView};

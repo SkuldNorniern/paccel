@@ -3,7 +3,10 @@
 use std::collections::{HashMap, VecDeque};
 use std::net::IpAddr;
 
-use crate::layer::application::quic::decode_packet_number;
+use crate::layer::Confidence;
+use crate::layer::application::quic::{
+    QuicShortHeader, decode_packet_number, parse_quic_short_header,
+};
 
 const DEFAULT_MAX_FLOWS: usize = 65_536;
 
@@ -121,6 +124,30 @@ impl QuicConnectionTracker {
         self.flows.get(&key)?.expected_dcids[direction]
             .as_ref()
             .map(Vec::len)
+    }
+
+    /// Parses a short header using the learned DCID length and rates the
+    /// result: `Stateful` if the DCID matches a tracked connection,
+    /// `Structural` otherwise. Returns `None` (not `Heuristic`) when no DCID
+    /// length has been learned yet - the caller's own port/byte-pattern
+    /// guess belongs outside this tracker.
+    #[allow(clippy::too_many_arguments)]
+    pub fn classify_short_header<'a>(
+        &self,
+        src: IpAddr,
+        src_port: u16,
+        dst: IpAddr,
+        dst_port: u16,
+        payload: &'a [u8],
+    ) -> Option<(QuicShortHeader<'a>, Confidence)> {
+        let dcid_len = self.expected_dcid_len(src, src_port, dst, dst_port)?;
+        let header = parse_quic_short_header(payload, dcid_len)?;
+        let confidence = if self.connection_for_dcid(header.dcid).is_some() {
+            Confidence::Stateful
+        } else {
+            Confidence::Structural
+        };
+        Some((header, confidence))
     }
 
     /// Reconstructs the packet number per RFC 9000 Appendix A.3 and updates
@@ -269,6 +296,52 @@ mod tests {
             Some((src, 1_000, dst, 443))
         );
         assert_eq!(tracker.connection_for_dcid(&[9, 9, 9, 9]), None);
+    }
+
+    #[test]
+    fn classify_short_header_is_stateful_when_dcid_matches_tracked_connection() {
+        let (src, dst) = endpoints();
+        let mut tracker = QuicConnectionTracker::new();
+        let cid = [1, 2, 3, 4, 5, 6, 7, 8];
+        tracker.observe_long_header(src, 1_000, dst, 443, &cid);
+
+        let mut payload = vec![0x40];
+        payload.extend_from_slice(&cid);
+        let (header, confidence) = tracker
+            .classify_short_header(dst, 443, src, 1_000, &payload)
+            .expect("short header should parse");
+
+        assert_eq!(header.dcid, cid);
+        assert_eq!(confidence, Confidence::Stateful);
+    }
+
+    #[test]
+    fn classify_short_header_is_structural_when_dcid_unrecognized() {
+        let (src, dst) = endpoints();
+        let mut tracker = QuicConnectionTracker::new();
+        // Learns an 8-byte DCID length for the opposite direction, but the
+        // packet below carries a different (never-observed) DCID value.
+        tracker.observe_long_header(src, 1_000, dst, 443, &[1, 2, 3, 4, 5, 6, 7, 8]);
+
+        let mut payload = vec![0x40];
+        payload.extend_from_slice(&[9, 9, 9, 9, 9, 9, 9, 9]);
+        let (_, confidence) = tracker
+            .classify_short_header(dst, 443, src, 1_000, &payload)
+            .expect("short header should parse");
+
+        assert_eq!(confidence, Confidence::Structural);
+    }
+
+    #[test]
+    fn classify_short_header_is_none_without_learned_dcid_length() {
+        let (src, dst) = endpoints();
+        let tracker = QuicConnectionTracker::new();
+        let payload = [0x40, 1, 2, 3, 4];
+
+        assert_eq!(
+            tracker.classify_short_header(src, 1_000, dst, 443, &payload),
+            None
+        );
     }
 
     #[test]
