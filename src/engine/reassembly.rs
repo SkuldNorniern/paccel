@@ -424,7 +424,11 @@ impl TcpStreamReassembler {
         let (key, direction) = normalized_flow(src, src_port, dst, dst_port);
 
         if rst {
-            self.flows.remove(&key);
+            if let Some(flow) = self.flows.remove(&key) {
+                self.total_buffered_bytes = self
+                    .total_buffered_bytes
+                    .saturating_sub(flow_buffered_bytes(&flow));
+            }
             self.insertion_order.retain(|queued| queued != &key);
             return Vec::new();
         }
@@ -820,6 +824,10 @@ impl Default for TcpStreamReassembler {
 struct QuicStreamKey {
     first: Endpoint,
     second: Endpoint,
+    // A bidirectional stream carries independent byte sequences each way,
+    // both under the same stream_id - without this, the two directions
+    // collide into one QuicStreamState.
+    direction: usize,
     stream_id: u64,
 }
 
@@ -1218,10 +1226,11 @@ fn normalized_quic_stream(
     dst_port: u16,
     stream_id: u64,
 ) -> QuicStreamKey {
-    let (flow, _) = normalized_flow(src, src_port, dst, dst_port);
+    let (flow, direction) = normalized_flow(src, src_port, dst, dst_port);
     QuicStreamKey {
         first: flow.first,
         second: flow.second,
+        direction,
         stream_id,
     }
 }
@@ -1686,6 +1695,31 @@ mod tests {
     }
 
     #[test]
+    fn tcp_rst_frees_the_flow_buffered_bytes_from_the_total() {
+        let (src, dst) = endpoints();
+        let mut reassembler = TcpStreamReassembler::new();
+
+        assert!(
+            reassembler
+                .offer(src, 1_000, dst, 80, 0, true, false, false, b"")
+                .is_empty()
+        );
+        assert!(
+            reassembler
+                .offer(src, 1_000, dst, 80, 20, false, false, false, b"held")
+                .is_empty()
+        );
+        assert_eq!(reassembler.buffered_bytes(), 4);
+
+        assert!(
+            reassembler
+                .offer(src, 1_000, dst, 80, 5, false, false, true, b"")
+                .is_empty()
+        );
+        assert_eq!(reassembler.buffered_bytes(), 0);
+    }
+
+    #[test]
     fn tcp_syn_on_established_direction_restarts_that_direction() {
         let (src, dst) = endpoints();
         let mut reassembler = TcpStreamReassembler::new();
@@ -1817,6 +1851,33 @@ mod tests {
             b"three"
         );
         assert!(reassembler.is_finished(src, 4_432, dst, 443, 4));
+    }
+
+    #[test]
+    fn quic_bidirectional_stream_directions_do_not_collide() {
+        let (src, dst) = endpoints();
+        let mut reassembler = QuicStreamReassembler::new();
+
+        // Same stream_id, both directions, each starting at its own offset 0 -
+        // a bidirectional QUIC stream carries independent byte sequences per
+        // direction under one stream_id.
+        assert_eq!(
+            reassembler.offer(src, 4_432, dst, 443, 0, 0, false, b"client"),
+            b"client"
+        );
+        assert_eq!(
+            reassembler.offer(dst, 443, src, 4_432, 0, 0, false, b"server"),
+            b"server"
+        );
+
+        assert!(!reassembler.is_finished(src, 4_432, dst, 443, 0));
+        assert_eq!(
+            reassembler.offer(src, 4_432, dst, 443, 0, 6, true, b""),
+            b""
+        );
+        assert!(reassembler.is_finished(src, 4_432, dst, 443, 0));
+        // The other direction's stream must be unaffected by the first's FIN.
+        assert!(!reassembler.is_finished(dst, 443, src, 4_432, 0));
     }
 
     #[test]
