@@ -853,6 +853,10 @@ struct QuicStreamState {
     buffered_bytes: usize,
     fin_offset: Option<u64>,
     closed: bool,
+    // Highest offset+len seen from any accepted frame so far, in-order or
+    // buffered - a later FIN declaring a final size below this is
+    // RFC 9000's FINAL_SIZE_ERROR.
+    highest_received_end: u64,
 }
 
 /// Reassembles QUIC STREAM-frame data with capped out-of-order storage.
@@ -1080,11 +1084,14 @@ impl QuicStreamReassembler {
             return false;
         }
         if fin {
-            if end < state.expected {
+            // RFC 9000 sec 4.5 (FINAL_SIZE_ERROR): the final size can't be
+            // smaller than data already received, in-order or buffered.
+            if end < state.expected || end < state.highest_received_end {
                 return false;
             }
             state.fin_offset = Some(end);
         }
+        state.highest_received_end = state.highest_received_end.max(end);
         true
     }
 
@@ -1958,6 +1965,41 @@ mod tests {
         assert!(reassembler.is_finished(src, 4_432, dst, 443, 0));
         // The other direction's stream must be unaffected by the first's FIN.
         assert!(!reassembler.is_finished(dst, 443, src, 4_432, 0));
+    }
+
+    #[test]
+    fn quic_fin_below_already_received_data_is_rejected() {
+        let (src, dst) = endpoints();
+        let mut reassembler = QuicStreamReassembler::new();
+
+        // Out-of-order segment covering [100, 110) is buffered, not yet
+        // contiguous - expected is still 0, so the old expected-only check
+        // would not have caught a FIN declaring a smaller final size.
+        assert!(
+            reassembler
+                .offer(src, 4_432, dst, 443, 0, 100, false, b"0123456789")
+                .is_empty()
+        );
+
+        // FINAL_SIZE_ERROR (RFC 9000 sec 4.5): declares final size 40 while
+        // data ending at 110 has already been received. Must be rejected,
+        // not silently accepted as fin_offset.
+        assert!(
+            reassembler
+                .offer(src, 4_432, dst, 443, 0, 40, true, b"")
+                .is_empty()
+        );
+
+        // If the bad FIN had been accepted, this contiguous fill to offset 40
+        // would wrongly mark the stream finished even though [100, 110) is
+        // still outstanding.
+        assert_eq!(
+            reassembler
+                .offer(src, 4_432, dst, 443, 0, 0, false, &[0u8; 40])
+                .len(),
+            40
+        );
+        assert!(!reassembler.is_finished(src, 4_432, dst, 443, 0));
     }
 
     #[test]
