@@ -321,14 +321,10 @@ pub fn parse_quic_long_header(payload: &[u8]) -> Result<QuicLongHeader, LayerErr
 }
 
 /// Splits a UDP datagram into the individual QUIC packets it contains
-/// (RFC 9000 sec 12.2 - coalesced packets). Only long-header packets with
-/// an explicit Length field (Initial/0-RTT/Handshake) can be split from
-/// what follows them; a short-header, Retry, or Version Negotiation
-/// packet - or a long-header packet this function fails to parse -
-/// consumes the remainder of `datagram` and ends the split (matches the
-/// spec: those packet types are never followed by another coalesced
-/// packet, and an unparseable-remainder is returned as-is rather than
-/// dropped, so callers never lose bytes).
+/// (RFC 9000 sec 12.2). Only long-header packets with a Length field
+/// (Initial/0-RTT/Handshake) can be split from what follows; a short-header,
+/// Retry, Version Negotiation, or unparseable packet consumes the rest of
+/// `datagram` and ends the split.
 pub fn split_coalesced_packets(datagram: &[u8]) -> Vec<&[u8]> {
     let mut packets = Vec::new();
     let mut remaining = datagram;

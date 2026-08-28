@@ -593,12 +593,10 @@ pub struct ParsedPacket {
     pub transport_segment_offset: Option<usize>,
 }
 
-/// A borrowed view of whichever application-layer protocol a [`ParsedPacket`]
-/// matched, from [`ParsedPacket::application`]. `ParsedPacket` still carries
-/// each protocol as its own named `Option<T>` field (unchanged, not
-/// deprecated) - this is an additive single-match-point alternative for code
-/// that wants "whatever application protocol this is" without checking ~40
-/// fields by hand. Variants borrow rather than clone the underlying value.
+/// Whichever application-layer protocol a [`ParsedPacket`] matched, from
+/// [`ParsedPacket::application`]. Each protocol also still has its own
+/// named `Option<T>` field on `ParsedPacket` - this is a single match point
+/// instead of checking ~40 fields by hand.
 #[derive(Debug, Clone, Copy)]
 pub enum ApplicationLayer<'a> {
     Dnp3(&'a Dnp3Message),
@@ -643,12 +641,9 @@ pub enum ApplicationLayer<'a> {
 }
 
 impl ParsedPacket {
-    /// Returns whichever application-layer protocol this packet matched, if
-    /// any, as a single borrowed enum instead of checking each of the ~40
-    /// `Option<T>` application-layer fields individually. When more than one
-    /// field is populated (uncommon - most probes are mutually exclusive per
-    /// transport segment) this returns the first match in field-declaration
-    /// order; the underlying fields themselves are unaffected either way.
+    /// Whichever application-layer field is populated, as one enum. If more
+    /// than one is set (rare - probes are usually mutually exclusive per
+    /// transport segment), returns the first match in field order.
     #[must_use]
     pub fn application(&self) -> Option<ApplicationLayer<'_>> {
         None.or_else(|| self.dnp3.as_ref().map(ApplicationLayer::Dnp3))
@@ -696,13 +691,9 @@ impl ParsedPacket {
             .or_else(|| self.hsrp.as_ref().map(ApplicationLayer::Hsrp))
     }
 
-    /// Alias for [`Self::innermost_flow_key`] - the flow key of the deepest
-    /// tunnel-decoded packet, not this `ParsedPacket`'s own network/transport
-    /// headers. For a plain (non-tunneled) packet these are the same thing.
-    /// Kept for backward compatibility; prefer [`Self::outer_flow_key`] or
-    /// [`Self::innermost_flow_key`] when the distinction matters (e.g. VXLAN/
-    /// GRE/GENEVE where the outer and inner flows are genuinely different
-    /// connections).
+    /// Alias for [`Self::innermost_flow_key`]. For a plain (non-tunneled)
+    /// packet that's the same as [`Self::outer_flow_key`]; for VXLAN/GRE/
+    /// GENEVE, prefer calling the two directly instead of this alias.
     pub fn flow_key(&self) -> Option<FlowKey> {
         self.innermost_flow_key()
     }

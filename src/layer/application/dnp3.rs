@@ -144,11 +144,9 @@ pub fn parse_dnp3_message(payload: &[u8]) -> Result<Dnp3Message, LayerError> {
     })
 }
 
-/// Same parse as [`parse_dnp3_message`], but distinguishes "not DNP3"
-/// (bad magic bytes - definitive, don't retry) from "not enough data yet"
-/// (could still turn into DNP3 with more bytes), which `parse_dnp3_message`'s
-/// `Result<T, LayerError>` collapses into the same `InvalidLength`/
-/// `InvalidHeader` shape a caller has to already know how to interpret.
+/// Same parse as [`parse_dnp3_message`], but separates "not DNP3" (bad
+/// magic bytes, don't retry) from "not enough data yet" (more bytes could
+/// still make it DNP3).
 #[must_use]
 pub fn probe_dnp3(payload: &[u8]) -> ProbeResult<Dnp3Message> {
     match parse_dnp3_message(payload) {

@@ -349,13 +349,10 @@ impl TcpStreamReassembler {
 
     /// Offers one TCP segment and returns all newly contiguous payload bytes for its direction.
     ///
-    /// `rst` tears down the entire flow (both directions) immediately, matching
-    /// TCP semantics where either side can abort the connection - no output is
-    /// returned for the segment carrying it. A `syn` on a direction that's
-    /// already established is treated as a connection restart on a reused
-    /// 4-tuple: that direction's buffered/consumed state resets before the
-    /// segment is processed, rather than being silently appended to the old
-    /// stream.
+    /// `rst` tears down the whole flow (both directions) immediately, no
+    /// output returned. A `syn` on an already-established direction resets
+    /// that direction's state instead of appending to the old stream -
+    /// treated as a connection restart on a reused 4-tuple.
     #[allow(clippy::too_many_arguments)]
     pub fn offer(
         &mut self,
