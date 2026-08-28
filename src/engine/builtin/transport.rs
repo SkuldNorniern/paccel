@@ -6,7 +6,7 @@ use crate::layer::application::bgp::{BgpMessage, parse_bgp_message};
 use crate::layer::application::coap::{CoapMessage, parse_coap_message};
 use crate::layer::application::dhcp::{DhcpMessage, parse_dhcp_message};
 use crate::layer::application::dhcp6::{Dhcp6Message, parse_dhcp6_message};
-use crate::layer::application::dnp3::{Dnp3Message, parse_dnp3_message};
+use crate::layer::application::dnp3::{Dnp3Message, probe_dnp3};
 use crate::layer::application::dns::{DnsMessage, parse_dns_message};
 use crate::layer::application::eigrp::{EigrpHeader, parse_eigrp_header};
 use crate::layer::application::ftp::{FtpMessage, parse_ftp};
@@ -282,7 +282,7 @@ pub(super) fn parse_transport(
                 let payload = &l4_bytes[header_len..];
                 parsed.dnp3 = ((source_port == DNP3_PORT || destination_port == DNP3_PORT)
                     && payload.starts_with(&[0x05, 0x64]))
-                .then(|| parse_dnp3_message(payload).ok())
+                .then(|| probe_dnp3(payload).ok())
                 .flatten();
                 if parsed.dnp3.is_none() {
                     parsed.openvpn =

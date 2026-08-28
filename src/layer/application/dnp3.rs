@@ -1,4 +1,4 @@
-use crate::layer::LayerError;
+use crate::layer::{Layer, LayerError, ParseError, ProbeResult};
 
 const DATA_LINK_HEADER_LEN: usize = 10;
 const DATA_LINK_FIELDS_LEN: usize = 5;
@@ -144,6 +144,26 @@ pub fn parse_dnp3_message(payload: &[u8]) -> Result<Dnp3Message, LayerError> {
     })
 }
 
+/// Same parse as [`parse_dnp3_message`], but distinguishes "not DNP3"
+/// (bad magic bytes - definitive, don't retry) from "not enough data yet"
+/// (could still turn into DNP3 with more bytes), which `parse_dnp3_message`'s
+/// `Result<T, LayerError>` collapses into the same `InvalidLength`/
+/// `InvalidHeader` shape a caller has to already know how to interpret.
+#[must_use]
+pub fn probe_dnp3(payload: &[u8]) -> ProbeResult<Dnp3Message> {
+    match parse_dnp3_message(payload) {
+        Ok(message) => ProbeResult::Match(message),
+        Err(LayerError::InvalidHeader) => ProbeResult::NoMatch,
+        Err(LayerError::InvalidLength) => ProbeResult::Incomplete,
+        Err(error) => ProbeResult::Malformed(ParseError::from_layer_error(
+            &error,
+            Layer::Application,
+            Some("dnp3"),
+            0,
+        )),
+    }
+}
+
 fn dechunk_user_data(payload: &[u8], expected_len: usize) -> Vec<u8> {
     let mut data = Vec::with_capacity(expected_len.min(payload.len()));
     let mut offset = 0;
@@ -197,8 +217,10 @@ fn parse_application(payload: &[u8]) -> Option<Dnp3Application> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Dnp3AppFunctionCode, Dnp3FunctionCode, dechunk_user_data, parse_dnp3_message};
-    use crate::layer::LayerError;
+    use super::{
+        Dnp3AppFunctionCode, Dnp3FunctionCode, dechunk_user_data, parse_dnp3_message, probe_dnp3,
+    };
+    use crate::layer::{LayerError, ProbeResult};
 
     const FRAME_FOUR_PAYLOAD: [u8; 18] = [
         0x05, 0x64, 0x0b, 0xc4, 0x03, 0x00, 0x04, 0x00, 0xef, 0x7a, 0xc1, 0xc1, 0x01, 0x3c, 0x02,
@@ -250,6 +272,31 @@ mod tests {
             parse_dnp3_message(&FRAME_FOUR_PAYLOAD[..9]),
             Err(LayerError::InvalidLength)
         ));
+    }
+
+    #[test]
+    fn probe_matches_a_real_frame() {
+        assert!(matches!(
+            probe_dnp3(&FRAME_FOUR_PAYLOAD),
+            ProbeResult::Match(_)
+        ));
+    }
+
+    #[test]
+    fn probe_reports_no_match_for_bad_sync_bytes() {
+        let mut payload = FRAME_FOUR_PAYLOAD;
+        payload[0] = 0xff;
+        // Definitively not DNP3 - distinct from Incomplete, which the old
+        // Option<Dnp3Message>-via-.ok() call site could never express.
+        assert_eq!(probe_dnp3(&payload), ProbeResult::NoMatch);
+    }
+
+    #[test]
+    fn probe_reports_incomplete_for_a_short_buffer() {
+        assert_eq!(
+            probe_dnp3(&FRAME_FOUR_PAYLOAD[..9]),
+            ProbeResult::Incomplete
+        );
     }
 
     #[test]

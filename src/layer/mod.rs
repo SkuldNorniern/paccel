@@ -201,6 +201,96 @@ impl fmt::Display for ParseError {
 
 impl Error for ParseError {}
 
+/// The outcome of trying to recognize/parse one protocol against a buffer
+/// that might not even be that protocol - distinguishes "not this protocol"
+/// from "truncated" from "malformed", which a bare `Option<T>` (or a
+/// `Result<T, E>` collapsed via `.ok()`) cannot: all three read as `None`.
+///
+/// A probe function returning this makes the distinction available to
+/// classification logic (e.g. keep listening on this UDP flow because the
+/// data was merely incomplete, vs stop probing this protocol because the
+/// bytes definitively don't match it) without forcing every caller to
+/// consume it - [`Self::ok`] bridges back to the familiar `Option<T>` shape.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProbeResult<T> {
+    /// The buffer matched and was fully parsed.
+    Match(T),
+    /// The buffer definitively isn't this protocol (e.g. a magic/version
+    /// field didn't match) - trying other protocols against it is sensible.
+    NoMatch,
+    /// Too little data to tell yet; more bytes might turn this into `Match`
+    /// or `NoMatch`. Distinct from `NoMatch`: retrying with more data is
+    /// worthwhile, re-probing a fixed buffer that already failed isn't.
+    Incomplete,
+    /// Recognized as this protocol (e.g. a magic/version field matched) but
+    /// the rest of the buffer fails to parse - not a "try another protocol"
+    /// case, this is malformed input for the protocol it committed to.
+    Malformed(ParseError),
+}
+
+impl<T> ProbeResult<T> {
+    /// Bridges to the coarser `Option<T>` shape existing `.ok()`-style
+    /// callers already use, discarding the `NoMatch`/`Incomplete`/
+    /// `Malformed` distinction.
+    #[must_use]
+    pub fn ok(self) -> Option<T> {
+        match self {
+            Self::Match(value) => Some(value),
+            Self::NoMatch | Self::Incomplete | Self::Malformed(_) => None,
+        }
+    }
+
+    #[must_use]
+    pub fn is_match(&self) -> bool {
+        matches!(self, Self::Match(_))
+    }
+
+    #[must_use]
+    pub fn is_incomplete(&self) -> bool {
+        matches!(self, Self::Incomplete)
+    }
+
+    #[must_use]
+    pub fn as_malformed(&self) -> Option<&ParseError> {
+        match self {
+            Self::Malformed(error) => Some(error),
+            Self::Match(_) | Self::NoMatch | Self::Incomplete => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod probe_result_tests {
+    use super::{Layer, ParseError, ParseErrorKind, ProbeResult};
+
+    #[test]
+    fn ok_bridges_only_match_to_some() {
+        assert_eq!(ProbeResult::Match(7).ok(), Some(7));
+        assert_eq!(ProbeResult::<i32>::NoMatch.ok(), None);
+        assert_eq!(ProbeResult::<i32>::Incomplete.ok(), None);
+        let malformed = ProbeResult::<i32>::Malformed(ParseError::new(
+            Layer::Application,
+            None,
+            0,
+            ParseErrorKind::Malformed,
+        ));
+        assert_eq!(malformed.ok(), None);
+    }
+
+    #[test]
+    fn predicates_match_their_variant() {
+        assert!(ProbeResult::Match(1).is_match());
+        assert!(!ProbeResult::<i32>::NoMatch.is_match());
+        assert!(ProbeResult::<i32>::Incomplete.is_incomplete());
+        assert!(!ProbeResult::Match(1).is_incomplete());
+
+        let error = ParseError::new(Layer::Transport, Some("dnp3"), 3, ParseErrorKind::Malformed);
+        let malformed = ProbeResult::<i32>::Malformed(error.clone());
+        assert_eq!(malformed.as_malformed(), Some(&error));
+        assert_eq!(ProbeResult::<i32>::NoMatch.as_malformed(), None);
+    }
+}
+
 #[cfg(test)]
 mod parse_error_tests {
     use super::{Layer, LayerError, ParseError, ParseErrorKind};
