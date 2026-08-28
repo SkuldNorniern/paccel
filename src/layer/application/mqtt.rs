@@ -1,4 +1,4 @@
-use crate::layer::LayerError;
+use crate::layer::{Layer, LayerError, ParseError, ProbeResult};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MqttPacketType {
@@ -54,6 +54,78 @@ pub fn parse_mqtt_message(payload: &[u8]) -> Result<MqttMessage, LayerError> {
     })
 }
 
+/// Probes MQTT using its packet type and remaining-length framing.
+#[must_use]
+pub fn probe_mqtt(payload: &[u8]) -> ProbeResult<MqttMessage> {
+    let Some(&first) = payload.first() else {
+        return ProbeResult::Incomplete {
+            needed: Some(1),
+            available: 0,
+        };
+    };
+    if !(1..=14).contains(&(first >> 4)) {
+        return ProbeResult::NoMatch;
+    }
+
+    let mut remaining_length = 0usize;
+    let mut multiplier = 1usize;
+    let mut encoded_len = None;
+    for (offset, &byte) in payload[1..].iter().take(4).enumerate() {
+        let Some(component) = usize::from(byte & 0x7f).checked_mul(multiplier) else {
+            return malformed_mqtt_probe(LayerError::InvalidLength);
+        };
+        let Some(value) = remaining_length.checked_add(component) else {
+            return malformed_mqtt_probe(LayerError::InvalidLength);
+        };
+        remaining_length = value;
+        if byte & 0x80 == 0 {
+            encoded_len = Some(offset + 1);
+            break;
+        }
+        let Some(next_multiplier) = multiplier.checked_mul(128) else {
+            return malformed_mqtt_probe(LayerError::InvalidLength);
+        };
+        multiplier = next_multiplier;
+    }
+
+    let Some(encoded_len) = encoded_len else {
+        return if payload.len() < 5 {
+            ProbeResult::Incomplete {
+                needed: None,
+                available: payload.len(),
+            }
+        } else {
+            malformed_mqtt_probe(LayerError::InvalidHeader)
+        };
+    };
+    let Some(needed) = 1usize
+        .checked_add(encoded_len)
+        .and_then(|header_len| header_len.checked_add(remaining_length))
+    else {
+        return malformed_mqtt_probe(LayerError::InvalidLength);
+    };
+    if needed > payload.len() {
+        return ProbeResult::Incomplete {
+            needed: Some(needed),
+            available: payload.len(),
+        };
+    }
+
+    match parse_mqtt_message(payload) {
+        Ok(message) => ProbeResult::Match(message),
+        Err(error) => malformed_mqtt_probe(error),
+    }
+}
+
+fn malformed_mqtt_probe(error: LayerError) -> ProbeResult<MqttMessage> {
+    ProbeResult::Malformed(ParseError::from_layer_error(
+        &error,
+        Layer::Application,
+        Some("mqtt"),
+        0,
+    ))
+}
+
 fn decode_remaining_length(bytes: &[u8]) -> Result<u32, LayerError> {
     let mut value: u32 = 0;
     let mut multiplier: u32 = 1;
@@ -69,8 +141,10 @@ fn decode_remaining_length(bytes: &[u8]) -> Result<u32, LayerError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{MqttPacketType, parse_mqtt_message};
-    use crate::layer::LayerError;
+    use super::{MqttPacketType, parse_mqtt_message, probe_mqtt};
+    use crate::layer::{LayerError, ProbeResult};
+
+    const PUBLISH: [u8; 4] = [0x30, 0x02, 0xab, 0xcd];
 
     #[test]
     fn parses_connect() {
@@ -118,6 +192,35 @@ mod tests {
         assert!(matches!(
             parse_mqtt_message(&[0x10, 0x80, 0x80, 0x80, 0x80]),
             Err(LayerError::InvalidHeader)
+        ));
+    }
+
+    #[test]
+    fn probe_matches_a_complete_publish() {
+        assert!(matches!(probe_mqtt(&PUBLISH), ProbeResult::Match(_)));
+    }
+
+    #[test]
+    fn probe_reports_no_match_for_a_reserved_packet_type() {
+        assert_eq!(probe_mqtt(&[0x00, 0x00]), ProbeResult::NoMatch);
+    }
+
+    #[test]
+    fn probe_reports_incomplete_for_a_truncated_packet() {
+        assert_eq!(
+            probe_mqtt(&PUBLISH[..3]),
+            ProbeResult::Incomplete {
+                needed: Some(PUBLISH.len()),
+                available: 3,
+            }
+        );
+    }
+
+    #[test]
+    fn probe_reports_malformed_for_an_overlong_remaining_length() {
+        assert!(matches!(
+            probe_mqtt(&[0x10, 0x80, 0x80, 0x80, 0x80]),
+            ProbeResult::Malformed(_)
         ));
     }
 }

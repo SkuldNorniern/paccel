@@ -6,7 +6,7 @@ use std::net::Ipv4Addr;
 
 use crate::engine::constants::ip_proto;
 use crate::layer::LayerError;
-use crate::layer::application::bgp::{BgpMessage, parse_bgp_message};
+use crate::layer::application::bgp::{BgpMessage, probe_bgp};
 use crate::layer::application::coap::{CoapMessage, parse_coap_message};
 use crate::layer::application::dhcp::{DhcpMessage, parse_dhcp_message};
 use crate::layer::application::dhcp6::{Dhcp6Message, parse_dhcp6_message};
@@ -23,7 +23,7 @@ use crate::layer::application::kerberos::{
 };
 use crate::layer::application::ldap::{LdapMessage, parse_ldap_message};
 use crate::layer::application::modbus::{ModbusMessage, parse_modbus_message};
-use crate::layer::application::mqtt::{MqttMessage, parse_mqtt_message};
+use crate::layer::application::mqtt::{MqttMessage, probe_mqtt};
 use crate::layer::application::nat_pmp::{NatPmpMessage, parse_nat_pmp};
 use crate::layer::application::nntp::{NntpMessage, parse_nntp};
 use crate::layer::application::ntp::{NtpMessage, parse_ntp_message};
@@ -37,8 +37,8 @@ use crate::layer::application::rpc::{RpcMessage, parse_rpc_message};
 use crate::layer::application::rtcp::{RtcpHeader, parse_rtcp};
 use crate::layer::application::rtp::{RtpHeader, parse_rtp};
 use crate::layer::application::sip::{SipMessage, parse_sip};
-use crate::layer::application::smb1::{Smb1Header, parse_smb1_message};
-use crate::layer::application::smb2::{Smb2Header, parse_smb2_message};
+use crate::layer::application::smb1::{Smb1Header, probe_smb1};
+use crate::layer::application::smb2::{Smb2Header, probe_smb2};
 use crate::layer::application::smtp::{SmtpMessage, parse_smtp};
 use crate::layer::application::snmp::{SnmpMessage, parse_snmp_message};
 use crate::layer::application::ssdp::{SsdpMessage, parse_ssdp};
