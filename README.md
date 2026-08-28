@@ -53,7 +53,7 @@ Still `0.x`, API can move before `1.0`.
 
 **Solid:** link/network/transport/tunnel parsing, pcap/pcapng capture iteration, IPv4/IPv6 fragment reassembly.
 
-**Heuristic only:** WireGuard, OpenVPN, L2TP, QUIC short header, LLMNR, NBNS, NAT-PMP — port number and a loose byte pattern, no structural check. QUIC short-header guessing has roughly a 1-in-4 false-positive rate on random UDP without connection state; feed it a `QuicConnectionTracker` and it becomes authoritative, though wiring that up is on you.
+**Heuristic only:** WireGuard, OpenVPN, L2TP, QUIC short header, LLMNR, NBNS, NAT-PMP — port number and a loose byte pattern, no structural check. QUIC short-header guessing has roughly a 1-in-4 false-positive rate on random UDP without connection state; `QuicConnectionTracker::classify_short_header` gives you `Confidence::Structural` or `::Stateful` instead once it has learned the DCID length.
 
 **QUIC:** long header, short header, Version Negotiation, coalesced-packet splitting, a generic frame parser (`iter_quic_frames`), and STREAM reassembly (`QuicStreamReassembler`) all exist. None of it is wired into `ParsedPacket` yet, so you call it directly. HTTP/3 isn't built — it needs QPACK on top of this. Handshake/1-RTT decrypt needs an `SSLKEYLOGFILE` secret; TLS 1.3 gives no other way to get those keys from a passive capture.
 

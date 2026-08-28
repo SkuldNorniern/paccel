@@ -241,6 +241,17 @@ impl<T> ProbeResult<T> {
     }
 }
 
+/// How sure a classification is, ordered weakest to strongest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Confidence {
+    /// Port number and/or a loose byte pattern, no structural check.
+    Heuristic,
+    /// A structural parse succeeded (magic/version/length fields checked out).
+    Structural,
+    /// Confirmed against tracked connection state, not just this one packet.
+    Stateful,
+}
+
 #[cfg(test)]
 mod probe_result_tests {
     use super::{Layer, ParseError, ParseErrorKind, ProbeResult};
