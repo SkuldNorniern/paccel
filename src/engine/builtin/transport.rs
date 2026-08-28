@@ -525,10 +525,9 @@ fn parse_udp_transport(l4_bytes: &[u8], config: ParseConfig) -> Result<Transport
     let vxlan = maybe_parse_vxlan(&udp, app);
     let geneve = maybe_parse_geneve(&udp, app);
     let l2tp = maybe_parse_l2tp(&udp, app, &mut hints);
-    // Fixed bit required here (unlike parse_quic_long_header) to avoid colliding with RTP v2's version bits.
-    // Structural, not heuristic - runs whenever transport parsing runs at all (not
-    // gated to parse_application) so a caller stopping at StopLayer::Transport can
-    // still seed a QuicConnectionTracker's CID index from the long header's SCID.
+    // Require the fixed bit here to avoid matching RTP v2 version bits. This runs
+    // at the transport layer so the SCID can seed a QuicConnectionTracker before
+    // application parsing.
     let quic = (wireguard.is_none()
         && openvpn.is_none()
         && vxlan.is_none()
@@ -750,11 +749,10 @@ fn maybe_probe_dhcp6_udp(
     }
 }
 
-/// Probes only traffic whose source or destination is the well-known TFTP port.
+/// Probes only the well-known TFTP port.
 ///
-/// TFTP switches to ephemeral ports after the initial request. This stateless
-/// parser deliberately does not classify those later transfer packets because
-/// their short opcode-and-counter shapes are too generic to sniff safely.
+/// Transfer packets use ephemeral ports and are too generic for safe stateless
+/// detection.
 fn maybe_probe_tftp_udp(
     udp: &UdpHeader,
     payload: &[u8],
@@ -1029,11 +1027,10 @@ fn maybe_classify_openvpn_tcp(
     parse_openvpn_header(&payload[2..])
 }
 
-/// Parses only the fixed OpenVPN wire header.
+/// Parses the fixed OpenVPN wire header.
 ///
-/// Control-channel bytes after the eight-byte session ID are opaque because
-/// fields such as the tls-auth HMAC have deployment-specific lengths that
-/// cannot be discovered reliably from packet bytes alone.
+/// Control data after the eight-byte session ID stays opaque because fields such
+/// as the tls-auth HMAC have deployment-specific lengths.
 fn parse_openvpn_header(payload: &[u8]) -> Option<OpenVpnInfo> {
     let opcode_and_key_id = *payload.first()?;
     let opcode = OpenVpnOpcode::from_u8(opcode_and_key_id >> 3)?;

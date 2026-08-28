@@ -42,7 +42,7 @@ fn label_for(version: u32, base: &str) -> String {
     }
 }
 
-/// RFC 8446 sec 7.1 HkdfLabel, as used by RFC 9001 sec 5 (empty Context in all QUIC uses here).
+/// RFC 8446 sec 7.1 HkdfLabel with the empty QUIC context from RFC 9001 sec 5.
 fn hkdf_expand_label(
     hk: &Hkdf<Sha256>,
     label: &str,
@@ -114,8 +114,8 @@ fn packet_protection_keys(key_vec: &[u8], iv_vec: &[u8], hp_vec: &[u8]) -> Packe
     PacketProtectionKeys { key, iv, hp }
 }
 
-/// RFC 9001 sec 5.4.1-5.4.2: AES-ECB(hp_key, sample) over one 16-byte block;
-/// only the low bits of mask[0] and mask[1..] (per actual PN length) are used.
+/// RFC 9001 sec 5.4.1-5.4.2 header-protection mask. Only the low bits of
+/// `mask[0]` and the packet-number-length bytes from `mask[1..]` are used.
 fn header_protection_mask(hp: &[u8; 16], sample: &[u8; SAMPLE_LEN]) -> [u8; SAMPLE_LEN] {
     let cipher = Aes128::new(&Array::from(*hp));
     let mut block = Array::from(*sample);
@@ -131,9 +131,8 @@ pub struct DecryptedInitial {
     pub payload: Vec<u8>,
 }
 
-/// Decrypts a client-sent Initial packet using only publicly derivable keys
-/// (RFC 9001 sec 5.2 - Initial protection is designed so the DCID alone is
-/// enough, it's not a secret). Other encryption levels need real key material.
+/// Decrypts a client Initial using keys derived from its public DCID per RFC
+/// 9001 sec 5.2. Other encryption levels require traffic secrets.
 pub fn decrypt_initial_packet(
     header: &QuicLongHeader,
     raw_packet: &[u8],
@@ -145,10 +144,8 @@ pub fn decrypt_initial_packet(
     decrypt_with_keys(&keys, header, raw_packet)
 }
 
-/// Decrypts a QUIC Handshake or 1-RTT packet using an externally supplied
-/// traffic secret (e.g. from a `QuicKeyLog`) - unlike Initial, these keys
-/// come from a live TLS 1.3 ECDHE exchange and can't be derived from a
-/// passive capture.
+/// Decrypts a Handshake or 1-RTT packet with an external traffic secret, such
+/// as one from `QuicKeyLog`. Passive captures cannot derive these TLS 1.3 keys.
 pub fn decrypt_packet_with_secret(
     header: &QuicLongHeader,
     raw_packet: &[u8],
@@ -196,10 +193,9 @@ fn decrypt_with_keys(
     for (index, byte) in protected_pn.iter().enumerate() {
         pn_bytes[4 - pn_len + index] = byte ^ mask[1 + index];
     }
-    // This single-packet helper has no connection state, so `None` reconstructs
-    // the packet number using RFC 9000 Appendix A.3 as if the largest packet
-    // number were -1. Stateful callers can use `QuicConnectionTracker` across
-    // multiple packets. `pn_bytes` already holds the decoded low-order bytes.
+    // Without connection state, RFC 9000 Appendix A.3 reconstructs the packet
+    // number from a largest value of -1. QuicConnectionTracker supplies state
+    // across packets; `pn_bytes` holds the decoded low bytes.
     let packet_number = u32::try_from(decode_packet_number(
         None,
         u32::from_be_bytes(pn_bytes),
@@ -249,11 +245,9 @@ fn decrypt_with_keys(
     })
 }
 
-/// Walks the decrypted plaintext of an Initial packet and reassembles the
-/// CRYPTO stream carried in it. RFC 9000 sec 12.4 permits only PADDING(0x00),
-/// PING(0x01), ACK(0x02/0x03), CRYPTO(0x06), and CONNECTION_CLOSE(0x1c) in
-/// Initial packets; walking stops at any other frame type (defensive, not
-/// expected in practice) and returns whatever CRYPTO data was assembled so far.
+/// Reassembles an Initial packet's CRYPTO stream. RFC 9000 sec 12.4 permits
+/// PADDING(0x00), PING(0x01), ACK(0x02/0x03), CRYPTO(0x06), and
+/// CONNECTION_CLOSE(0x1c); other frames stop the walk and return assembled data.
 pub fn extract_crypto_stream(plaintext: &[u8]) -> Vec<u8> {
     use std::collections::BTreeMap;
 
@@ -316,11 +310,9 @@ pub fn extract_crypto_stream(plaintext: &[u8]) -> Vec<u8> {
     stream
 }
 
-/// Decrypts a client Initial packet, reassembles its CRYPTO stream, and
-/// parses the ClientHello inside it. QUIC's CRYPTO stream carries raw TLS
-/// Handshake messages with no TLS record layer (RFC 9001 sec 4); a synthetic
-/// record header is prepended since `parse_tls_client_hello` expects one and
-/// does not otherwise validate `record_version`.
+/// Decrypts a client Initial and parses its ClientHello. QUIC CRYPTO streams omit
+/// the TLS record layer (RFC 9001 sec 4), so this prepends the record header
+/// expected by `parse_tls_client_hello`.
 pub fn decrypt_initial_client_hello(
     header: &QuicLongHeader,
     raw_packet: &[u8],
@@ -449,15 +441,10 @@ mod tests {
 
     #[test]
     fn decrypt_initial_client_hello_recovers_sni_from_synthetic_packet() {
-        // A fully valid, self-generated QUIC v1 Initial packet (DCID
-        // a1b2c3d4e5f60718, PN 2, padded to the real 1200-byte minimum
-        // Initial datagram size) carrying a TLS ClientHello with SNI
-        // "paccel-test.example". Built and independently encrypted via
-        // Python's `cryptography` library (a separate implementation from
-        // this crate's Rust crypto stack) using the same RFC 9001 sec 5.2
-        // Initial-secret derivation this module implements, then verified
-        // to decrypt back to the expected plaintext before being embedded
-        // here - not derived from any captured traffic.
+        // Self-generated QUIC v1 Initial: DCID a1b2c3d4e5f60718, PN 2, 1,200
+        // bytes, and SNI "paccel-test.example". Python's independent
+        // `cryptography` implementation encrypted and verified it with the RFC
+        // 9001 sec 5.2 derivation. No captured traffic is included.
         let packet = from_hex(SYNTHETIC_INITIAL_HEX);
         let header = parse_quic_long_header(&packet).expect("header should parse");
         assert_eq!(header.version, 1);

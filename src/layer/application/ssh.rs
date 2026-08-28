@@ -11,11 +11,9 @@ pub struct SshBanner {
 const SSH_MSG_KEXINIT: u8 = 20;
 const KEXINIT_COOKIE_LEN: usize = 16;
 
-/// SSH_MSG_KEXINIT (RFC 4253 sec 7.1). Sent in the clear before either side's
-/// keys take effect, so this is reachable without decryption. Only the
-/// algorithm name-lists needed for HASSH-style fingerprinting are kept;
-/// `languages_*` and `first_kex_packet_follows` are parsed-through but not
-/// stored.
+/// SSH_MSG_KEXINIT (RFC 4253 sec 7.1), sent before encryption. Stores only the
+/// algorithm lists needed for HASSH; language lists and
+/// `first_kex_packet_follows` are parsed but discarded.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SshKexInit {
     pub kex_algorithms: Vec<String>,
@@ -29,10 +27,8 @@ pub struct SshKexInit {
 }
 
 pub fn parse_ssh_kex_init(payload: &[u8]) -> Result<SshKexInit, LayerError> {
-    // Direct-TCP SSH binary packet framing (RFC 4253 sec 6): packet_length(4)
-    // + padding_length(1) + payload. No length sanity check beyond what's
-    // available - this only ever runs on payload already known to be at
-    // least this long via the slices below.
+    // RFC 4253 sec 6 framing: packet_length(4) + padding_length(1) + payload.
+    // The slices below already enforce the available length.
     let packet_length = payload
         .get(..4)
         .map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
@@ -118,8 +114,7 @@ mod tests {
     use super::parse_ssh_kex_init;
     use crate::layer::LayerError;
 
-    // Byte-exact real SSH_MSG_KEXINIT payload (OpenSSH client), verified
-    // against tshark's own field extraction before writing this test.
+    // OpenSSH SSH_MSG_KEXINIT payload verified against tshark field extraction.
     const KEXINIT: &str = "000000e40814cc19299decf0e8ff36bd64a590cd7fac0000001c637572766532353531392d7368613235362c6578742d696e666f2d63000000077373682d727361000000166165733132382d67636d406f70656e7373682e636f6d000000166165733132382d67636d406f70656e7373682e636f6d0000000d686d61632d736861322d3235360000000d686d61632d736861322d3235360000001a6e6f6e652c7a6c6962406f70656e7373682e636f6d2c7a6c69620000001a6e6f6e652c7a6c6962406f70656e7373682e636f6d2c7a6c6962000000000000000000000000000000000000000000";
 
     fn from_hex(s: &str) -> Vec<u8> {

@@ -89,10 +89,8 @@ pub enum QuicFrame<'a> {
 
 /// Iterates the frames in a decrypted QUIC packet payload (RFC 9000 sec 19).
 ///
-/// Yields `Err` and then stops (subsequent `.next()` calls return `None`) the
-/// moment it hits a frame it cannot parse. This differs from
-/// `extract_crypto_stream`, whose purpose-specific frame walk silently
-/// truncates and returns the CRYPTO bytes assembled before the malformed frame.
+/// Yields one `Err` and stops at an invalid frame. `extract_crypto_stream`
+/// instead returns CRYPTO bytes assembled before that frame.
 pub struct QuicFrameIter<'a> {
     remaining: &'a [u8],
     poisoned: bool,
@@ -241,18 +239,14 @@ fn parse_frame(payload: &[u8]) -> Result<(QuicFrame<'_>, usize), LayerError> {
         0x19 => QuicFrame::RetireConnectionId {
             sequence_number: cursor.read_varint()?,
         },
-        // PATH_CHALLENGE/PATH_RESPONSE's fixed 8-byte raw Data layout is
-        // standard/stable QUIC knowledge, not independently RFC-text-fetch-verified
-        // this session due to the same tooling truncation issue.
+        // PATH_CHALLENGE/PATH_RESPONSE use a fixed 8-byte Data field.
         0x1a => QuicFrame::PathChallenge {
             data: cursor.read_array()?,
         },
         0x1b => QuicFrame::PathResponse {
             data: cursor.read_array()?,
         },
-        // The CONNECTION_CLOSE QUIC/application-layer field layouts are
-        // standard/stable QUIC knowledge, not independently RFC-text-fetch-verified
-        // this session due to the same tooling truncation issue.
+        // CONNECTION_CLOSE has distinct transport and application layouts.
         0x1c | 0x1d => parse_connection_close(&mut cursor, frame_type == 0x1c)?,
         0x1e => QuicFrame::HandshakeDone,
         0x30 | 0x31 => parse_datagram(&mut cursor, frame_type == 0x31)?,
@@ -375,10 +369,7 @@ fn parse_max_streams(
     cursor: &mut FrameCursor<'_>,
     frame_type: u64,
 ) -> Result<QuicFrame<'static>, LayerError> {
-    // The bidi-vs-uni bit convention - 0x12/even=bidi - is standard/stable QUIC
-    // knowledge, not independently RFC-text-fetch-verified this session due to a
-    // tooling limitation truncating that specific RFC subsection across every
-    // source tried.
+    // 0x12/even streams are bidirectional; odd streams are unidirectional.
     Ok(QuicFrame::MaxStreams {
         bidirectional: frame_type == 0x12,
         maximum_streams: cursor.read_varint()?,
@@ -389,10 +380,7 @@ fn parse_streams_blocked(
     cursor: &mut FrameCursor<'_>,
     frame_type: u64,
 ) -> Result<QuicFrame<'static>, LayerError> {
-    // The bidi-vs-uni bit convention - 0x16/even=bidi - is standard/stable QUIC
-    // knowledge, not independently RFC-text-fetch-verified this session due to a
-    // tooling limitation truncating that specific RFC subsection across every
-    // source tried.
+    // 0x16/even streams are bidirectional; odd streams are unidirectional.
     Ok(QuicFrame::StreamsBlocked {
         bidirectional: frame_type == 0x16,
         maximum_streams: cursor.read_varint()?,

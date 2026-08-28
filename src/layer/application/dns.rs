@@ -4,7 +4,7 @@ use std::str;
 
 use crate::layer::LayerError;
 
-/// Represents the DNS header (first 12 bytes of a DNS message).
+/// DNS header (the first 12 message bytes).
 #[derive(Debug)]
 pub struct DnsHeader {
     pub transaction_id: u16,
@@ -19,13 +19,13 @@ pub struct DnsHeader {
 /// since DNS labels are non-contiguous in the wire format.
 #[derive(Debug)]
 pub struct DnsQuestion {
-    // TASK: TODO: change the qname to a borrowed slice rather than an owned string
+    // TODO: borrow `qname` instead of allocating a `String`.
     pub qname: String,
     pub qtype: u16,
     pub qclass: u16,
 }
 
-/// Represents a DNS resource record.
+/// DNS resource record.
 #[derive(Debug, PartialEq, Eq)]
 pub struct DnsRecord {
     pub name: String,
@@ -89,7 +89,7 @@ pub struct DnsMessage {
     pub additionals: Vec<DnsRecord>,
 }
 
-/// Parses a DNS message from a byte slice. The core parser used by the engine path.
+/// Parses a DNS message. Used by the engine path.
 pub fn parse_dns_message(packet: &[u8]) -> Result<DnsMessage, LayerError> {
     if packet.len() < 12 {
         return Err(LayerError::InvalidLength);
@@ -160,13 +160,12 @@ pub fn parse_dns_message(packet: &[u8]) -> Result<DnsMessage, LayerError> {
     })
 }
 
-/// Parses a length-prefixed, zero-terminated DNS name (RFC 1035), following
-/// compression pointers (high two bits set). Returns the decoded name and
-/// the offset right after it in the packet.
+/// Parses an RFC 1035 name, following compression pointers. Returns the name
+/// and its end offset.
 ///
 /// # Errors
-/// `InvalidLength` if the packet is too short, `MalformedPacket` if the
-/// name itself doesn't parse.
+/// Returns `InvalidLength` for truncated data or `MalformedPacket` for an
+/// invalid name.
 fn parse_domain_name(packet: &[u8], mut pos: usize) -> Result<(String, usize), LayerError> {
     let mut name = String::new();
     let mut jumped = false;
@@ -184,7 +183,7 @@ fn parse_domain_name(packet: &[u8], mut pos: usize) -> Result<(String, usize), L
         }
 
         let len = packet[pos];
-        // A zero length indicates the end of the domain name.
+        // Zero length ends the domain name.
         if len == 0 {
             encoded_len += 1;
             if encoded_len > 255 {
@@ -194,18 +193,17 @@ fn parse_domain_name(packet: &[u8], mut pos: usize) -> Result<(String, usize), L
             break;
         }
 
-        // Validate label length (RFC 1035: labels must be 63 characters or less)
+        // RFC 1035 limits labels to 63 bytes.
         if len > 63 && (len & 0xC0) != 0xC0 {
             return Err(LayerError::MalformedPacket);
         }
 
-        // Check for pointer compression:
-        // Pointers have the two high-order bits set (i.e. 0xC0).
+        // Compression pointers have the high bits 0xC0.
         if len & 0xC0 == 0xC0 {
             if pos + 1 >= packet.len() {
                 return Err(LayerError::InvalidLength);
             }
-            // Calculate the pointer offset (the pointer occupies two bytes).
+            // A compression pointer occupies two bytes.
             let b2 = packet[pos + 1];
             let pointer_offset = (((len & 0x3F) as usize) << 8) | (b2 as usize);
 
@@ -214,7 +212,7 @@ fn parse_domain_name(packet: &[u8], mut pos: usize) -> Result<(String, usize), L
                 return Err(LayerError::MalformedPacket); // Forward references are invalid
             }
 
-            // If this is the first jump, record where to resume reading.
+            // Preserve the resume offset across the first jump.
             if !jumped {
                 pointer_end = Some(pos + 2);
             }
@@ -224,7 +222,7 @@ fn parse_domain_name(packet: &[u8], mut pos: usize) -> Result<(String, usize), L
             continue;
         }
 
-        // Regular label: read the length, then the label bytes.
+        // Regular label: length followed by label bytes.
         let label_len = len as usize;
         encoded_len += label_len + 1;
         if encoded_len > 255 {
@@ -236,7 +234,7 @@ fn parse_domain_name(packet: &[u8], mut pos: usize) -> Result<(String, usize), L
         }
 
         let label_bytes = &packet[pos..pos + label_len];
-        // Convert label bytes to &str (DNS labels are ASCII).
+        // DNS labels are ASCII.
         let label = str::from_utf8(label_bytes).map_err(|_| LayerError::MalformedPacket)?;
 
         // Validate label characters (letters, digits, hyphens, and underscores only)
@@ -255,7 +253,7 @@ fn parse_domain_name(packet: &[u8], mut pos: usize) -> Result<(String, usize), L
         iterations += 1;
     }
 
-    // If we had a jump, use the recorded pointer end as the final position.
+    // After a jump, resume after the original pointer.
     let final_pos = if jumped {
         pointer_end.ok_or(LayerError::MalformedPacket)?
     } else {
@@ -265,12 +263,12 @@ fn parse_domain_name(packet: &[u8], mut pos: usize) -> Result<(String, usize), L
     Ok((name, final_pos))
 }
 
-/// Parses a DNS question section from the packet starting at `pos`.
+/// Parses a DNS question at `pos`.
 ///
-/// A question consists of the domain name followed by a 2-byte type and a 2-byte class.
+/// Questions contain a name, 2-byte type, and 2-byte class.
 ///
 /// # Errors
-/// Returns an error if the packet is too short or the question fields are malformed.
+/// Returns an error for truncated or malformed fields.
 fn parse_question(packet: &[u8], pos: usize) -> Result<(DnsQuestion, usize), LayerError> {
     let (qname, pos) = parse_domain_name(packet, pos)?;
     if pos + 4 > packet.len() {
@@ -314,7 +312,7 @@ fn parse_records(
     Ok((records, offset))
 }
 
-/// Parses a DNS resource record from the packet starting at `pos`.
+/// Parses a DNS resource record at `pos`.
 fn parse_record(packet: &[u8], pos: usize) -> Result<(DnsRecord, usize), LayerError> {
     let (name, pos) = parse_domain_name(packet, pos)?;
     let fields_end = pos.checked_add(10).ok_or(LayerError::InvalidLength)?;
@@ -524,7 +522,7 @@ mod tests {
 
     use super::*;
 
-    /// Helper function to create a valid DNS query packet
+    /// Builds a valid DNS query packet.
     fn create_test_dns_query() -> Vec<u8> {
         let packet = vec![
             0x12, 0x34, // Transaction ID
@@ -544,7 +542,7 @@ mod tests {
         packet
     }
 
-    /// Helper function to create a valid DNS response packet
+    /// Builds a valid DNS response packet.
     fn create_test_dns_response() -> Vec<u8> {
         let packet = vec![
             0x12, 0x34, // Transaction ID
@@ -824,7 +822,7 @@ mod tests {
         let packet = create_test_dns_response();
         let result = parse_dns_message(&packet);
         assert!(result.is_ok());
-        // Verify that name compression was handled correctly
+        // Compression resolves to www.example.com.
         if let Ok(dns_msg) = result {
             assert_eq!(dns_msg.questions[0].qname, "www.example.com");
         }

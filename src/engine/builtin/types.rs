@@ -582,19 +582,14 @@ pub struct ParsedPacket {
     pub udp_hints: Vec<UdpAppHint>,
     pub warnings: Vec<ParseWarning>,
     pub inner: Option<Box<ParsedPacket>>,
-    /// Byte offset where the transport-layer header (`transport`) begins in
-    /// the buffer passed to this `parse`/`parse_with_config` call. Lets a
-    /// caller who stopped before the application layer slice out the raw L4
-    /// payload themselves (offset + 8 for UDP's fixed header, say) without
-    /// redoing link/network header math. For a nested `inner` packet this is
-    /// relative to that packet's own buffer, not the outermost one.
+    /// Byte offset of `transport` in the parsed buffer. UDP payload starts at
+    /// `transport_segment_offset + 8`. Nested offsets are relative to the inner
+    /// packet's buffer.
     pub transport_segment_offset: Option<usize>,
 }
 
-/// Whichever application-layer protocol a [`ParsedPacket`] matched, from
-/// [`ParsedPacket::application`]. Each protocol also still has its own
-/// named `Option<T>` field on `ParsedPacket` - this is a single match point
-/// instead of checking ~40 fields by hand.
+/// Application protocol returned by [`ParsedPacket::application`]. Protocols
+/// also remain available through their named `Option<T>` fields.
 #[derive(Debug, Clone, Copy)]
 pub enum ApplicationLayer<'a> {
     Dnp3(&'a Dnp3Message),
@@ -639,9 +634,7 @@ pub enum ApplicationLayer<'a> {
 }
 
 impl ParsedPacket {
-    /// Whichever application-layer field is populated, as one enum. If more
-    /// than one is set (rare - probes are usually mutually exclusive per
-    /// transport segment), returns the first match in field order.
+    /// Returns the first populated application field in declaration order.
     #[must_use]
     pub fn application(&self) -> Option<ApplicationLayer<'_>> {
         None.or_else(|| self.dnp3.as_ref().map(ApplicationLayer::Dnp3))
@@ -689,16 +682,14 @@ impl ParsedPacket {
             .or_else(|| self.hsrp.as_ref().map(ApplicationLayer::Hsrp))
     }
 
-    /// Alias for [`Self::innermost_flow_key`]. For a plain (non-tunneled)
-    /// packet that's the same as [`Self::outer_flow_key`]; for VXLAN/GRE/
-    /// GENEVE, prefer calling the two directly instead of this alias.
+    /// Alias for [`Self::innermost_flow_key`]. For tunneled packets, prefer the
+    /// explicit outer or innermost methods.
     pub fn flow_key(&self) -> Option<FlowKey> {
         self.innermost_flow_key()
     }
 
-    /// This `ParsedPacket`'s own network/transport flow key, ignoring any
-    /// tunnel-decoded `inner` packet. For a VXLAN/GRE/GENEVE frame this is the
-    /// tunnel's outer flow (e.g. the two VTEPs), not the encapsulated traffic.
+    /// Returns this packet's flow key without descending into `inner`. For a
+    /// tunnel, this identifies the outer endpoints.
     #[must_use]
     pub fn outer_flow_key(&self) -> Option<FlowKey> {
         let (src_ip, dst_ip, protocol) = if let Some(ipv4) = self.ipv4.as_ref() {
@@ -732,9 +723,8 @@ impl ParsedPacket {
         })
     }
 
-    /// The flow key of the deepest tunnel-decoded packet (recurses through
-    /// `inner` to the bottom). For a VXLAN/GRE/GENEVE frame this is the
-    /// encapsulated traffic's own flow, not the tunnel's outer endpoints.
+    /// Returns the deepest decoded packet's flow key, or the packet's own key
+    /// when no tunnel is present.
     #[must_use]
     pub fn innermost_flow_key(&self) -> Option<FlowKey> {
         if let Some(inner) = self.inner.as_deref() {
@@ -743,10 +733,8 @@ impl ParsedPacket {
         self.outer_flow_key()
     }
 
-    /// Iterates every tunnel layer's own flow key, outermost first, skipping
-    /// layers that have no network/transport headers of their own (e.g. an
-    /// L2-only tunnel hop). For a plain (non-tunneled) packet this yields at
-    /// most one key, same as [`Self::outer_flow_key`].
+    /// Iterates flow keys outermost first, skipping layers without network or
+    /// transport headers. Non-tunneled packets yield at most one key.
     pub fn flow_path(&self) -> impl Iterator<Item = FlowKey> + '_ {
         let mut current = Some(self);
         from_fn(move || {
