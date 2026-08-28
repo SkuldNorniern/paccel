@@ -46,8 +46,8 @@ pub fn parse_dhcp6_message(payload: &[u8]) -> Result<Dhcp6Message, LayerError> {
         offset = option_end;
     }
 
-    // Relay messages (types 12 and 13) use different framing. This best-effort
-    // passive parser still interprets their first four bytes as client/server framing.
+    // Relay types 12 and 13 use different framing; this passive parser still
+    // reads their first four bytes as client/server framing.
     Ok(Dhcp6Message {
         msg_type: payload[0],
         transaction_id: u32::from_be_bytes([0, payload[1], payload[2], payload[3]]),

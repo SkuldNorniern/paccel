@@ -20,9 +20,8 @@ pub struct PcapFrame<'a> {
 pub enum TsResolution {
     Micro,
     Nano,
-    /// Any resolution other than exactly micro/nanosecond (e.g. millisecond,
-    /// or a non-power-of-ten/two interface resolution) - `timestamp_subsec`
-    /// is a raw count of this many ticks per second, not microseconds.
+    /// Any resolution other than microseconds or nanoseconds. `timestamp_subsec`
+    /// is a raw count at this many ticks per second.
     Other(u64),
 }
 
@@ -767,8 +766,7 @@ mod tests {
         out
     }
 
-    /// Builds a minimal pcapng (SHB + IDB with an `if_tsresol` option + EPB)
-    /// so a non-micro/non-nano interface resolution can be exercised.
+    /// Builds a minimal pcapng with a custom `if_tsresol`.
     fn build_pcapng_epb_with_tsresol(tsresol_byte: u8, frame: &[u8]) -> Vec<u8> {
         let mut out = Vec::new();
 

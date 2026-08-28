@@ -109,11 +109,10 @@ pub struct Dnp3Message {
     pub application: Option<Dnp3Application>,
 }
 
-/// Parses the DNP3 data-link and transport layers plus the fixed application header.
+/// Parses DNP3 data-link and transport layers plus the fixed application header.
 ///
-/// Application object headers and point data are intentionally not decoded because their
-/// structure varies by group, variation, and qualifier. DNP3 header and chunk CRCs are skipped
-/// positionally but are not validated.
+/// Object headers and point data depend on group, variation, and qualifier, so
+/// they remain opaque. Header and chunk CRCs are skipped but not validated.
 pub fn parse_dnp3_message(payload: &[u8]) -> Result<Dnp3Message, LayerError> {
     if payload.len() < DATA_LINK_HEADER_LEN {
         return Err(LayerError::InvalidLength);
@@ -144,9 +143,7 @@ pub fn parse_dnp3_message(payload: &[u8]) -> Result<Dnp3Message, LayerError> {
     })
 }
 
-/// Same parse as [`parse_dnp3_message`], but separates "not DNP3" (bad
-/// magic bytes, don't retry) from "not enough data yet" (more bytes could
-/// still make it DNP3).
+/// Parses DNP3 while distinguishing bad magic from incomplete data.
 #[must_use]
 pub fn probe_dnp3(payload: &[u8]) -> ProbeResult<Dnp3Message> {
     match parse_dnp3_message(payload) {
@@ -284,8 +281,7 @@ mod tests {
     fn probe_reports_no_match_for_bad_sync_bytes() {
         let mut payload = FRAME_FOUR_PAYLOAD;
         payload[0] = 0xff;
-        // Definitively not DNP3 - distinct from Incomplete, which the old
-        // Option<Dnp3Message>-via-.ok() call site could never express.
+        // Bad magic is NoMatch; short input is Incomplete.
         assert_eq!(probe_dnp3(&payload), ProbeResult::NoMatch);
     }
 

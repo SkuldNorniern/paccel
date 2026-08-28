@@ -1,7 +1,7 @@
 //! Opt-in, stateful IP fragment and TCP stream reassembly.
 //!
-//! The built-in packet parser remains stateless. All payload state maintained here is bounded by
-//! caller-configurable limits; excess IP datagrams are evicted and excess TCP data is refused.
+//! The built-in parser remains stateless. Configurable limits bound all payload
+//! state; excess IP datagrams are evicted and excess TCP data is refused.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -58,7 +58,7 @@ pub struct IpFragmentReassembler {
 }
 
 impl IpFragmentReassembler {
-    /// Creates a reassembler with limits of 1024 fragments, 65,535 bytes, and 1024 datagrams.
+    /// Uses limits of 1,024 fragments, 65,535 bytes, and 1,024 datagrams.
     #[must_use]
     pub fn new() -> Self {
         Self::with_limits(
@@ -68,7 +68,7 @@ impl IpFragmentReassembler {
         )
     }
 
-    /// Creates a reassembler with caller-supplied per-datagram and concurrency limits.
+    /// Uses caller-supplied per-datagram and concurrency limits.
     #[must_use]
     pub fn with_limits(
         max_fragments_per_datagram: usize,
@@ -84,7 +84,7 @@ impl IpFragmentReassembler {
         }
     }
 
-    /// Offers an IPv4 fragment payload and returns the complete transport payload when available.
+    /// Returns the complete transport payload after accepting an IPv4 fragment.
     pub fn offer_ipv4(&mut self, header: &Ipv4Header, l4_payload: &[u8]) -> Option<Vec<u8>> {
         let more_fragments = header.flags & 1 != 0;
         if header.fragment_offset == 0 && !more_fragments {
@@ -101,7 +101,7 @@ impl IpFragmentReassembler {
         self.offer_fragment(key, offset, more_fragments, l4_payload)
     }
 
-    /// Offers an IPv6 fragment payload and returns the complete upper-layer payload when available.
+    /// Returns the complete upper-layer payload after accepting an IPv6 fragment.
     #[allow(clippy::too_many_arguments)]
     pub fn offer_ipv6(
         &mut self,
@@ -113,8 +113,8 @@ impl IpFragmentReassembler {
         next_header: u8,
         payload: &[u8],
     ) -> Option<Vec<u8>> {
-        // The IPv6 fragment identity is source, destination, and identification. The next-header
-        // value belongs to the reconstructed packet but is not part of that identity.
+        // IPv6 fragment identity excludes next-header: only source, destination,
+        // and identification identify the datagram.
         let _ = next_header;
         let key = IpDatagramKey::V6 {
             source: src,
@@ -272,13 +272,11 @@ struct TcpFlowKey {
     second: Endpoint,
 }
 
-/// How [`TcpStreamReassembler`] resolves an out-of-order segment whose byte
-/// range overlaps one already buffered (a retransmission with different
-/// content, or adversarial overlap). Default is [`Self::Reject`].
+/// Policy for conflicting out-of-order TCP segments. Defaults to
+/// [`Self::Reject`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TcpOverlapPolicy {
-    /// Drop the incoming segment's overlapping bytes entirely; only its
-    /// genuinely non-overlapping portion (if any) is buffered.
+    /// Drop overlapping bytes and buffer any non-overlapping portion.
     #[default]
     Reject,
     /// Keep whichever bytes were buffered first for the overlapping range.
@@ -313,13 +311,13 @@ pub struct TcpStreamReassembler {
 }
 
 impl TcpStreamReassembler {
-    /// Creates a reassembler with a 1 MiB per-direction buffer and a 65,535-byte maximum gap.
+    /// Uses a 1 MiB buffer and 65,535-byte maximum gap per direction.
     #[must_use]
     pub fn new() -> Self {
         Self::with_limits(DEFAULT_MAX_BUFFERED_BYTES, DEFAULT_MAX_GAP)
     }
 
-    /// Creates a TCP reassembler with caller-supplied per-direction limits.
+    /// Uses caller-supplied per-direction limits.
     #[must_use]
     pub fn with_limits(max_buffered_bytes: usize, max_gap: usize) -> Self {
         Self {
@@ -332,27 +330,24 @@ impl TcpStreamReassembler {
         }
     }
 
-    /// Overrides the maximum number of concurrently tracked TCP flows.
+    /// Sets the concurrent TCP flow limit.
     #[must_use]
     pub fn with_max_flows(mut self, max_flows: usize) -> Self {
         self.max_flows = max_flows;
         self
     }
 
-    /// Overrides the policy applied when an out-of-order segment's byte range
-    /// overlaps one already buffered. Default is [`TcpOverlapPolicy::Reject`].
+    /// Sets the overlap policy. Defaults to [`TcpOverlapPolicy::Reject`].
     #[must_use]
     pub fn with_overlap_policy(mut self, policy: TcpOverlapPolicy) -> Self {
         self.overlap_policy = policy;
         self
     }
 
-    /// Offers one TCP segment and returns all newly contiguous payload bytes for its direction.
+    /// Returns newly contiguous payload after accepting one TCP segment.
     ///
-    /// `rst` tears down the whole flow (both directions) immediately, no
-    /// output returned. A `syn` on an already-established direction resets
-    /// that direction's state instead of appending to the old stream -
-    /// treated as a connection restart on a reused 4-tuple.
+    /// `rst` tears down both directions without output. `syn` resets an
+    /// established direction as a new connection on the same 4-tuple.
     #[allow(clippy::too_many_arguments)]
     pub fn offer(
         &mut self,
@@ -477,11 +472,9 @@ impl TcpStreamReassembler {
         }
     }
 
-    /// Buffers an out-of-order segment, resolving any overlap with already
-    /// buffered segments per `policy`. Works in byte-distance-from-`expected`
-    /// space (all buffered segments are within `max_gap` of `expected`, so
-    /// this stays a small bounded window - no TCP sequence wraparound concern
-    /// within it, unlike the wrapping-arithmetic comparisons used elsewhere).
+    /// Buffers an out-of-order segment and applies `policy` to overlaps. Byte
+    /// distances from `expected` stay within `max_gap`, avoiding sequence
+    /// wraparound inside this window.
     fn buffer_segment(
         state: &mut TcpDirectionState,
         sequence: u32,
@@ -708,13 +701,13 @@ pub struct QuicStreamReassembler {
 }
 
 impl QuicStreamReassembler {
-    /// Creates a reassembler with a 1 MiB per-stream buffer and a 65,535-byte maximum gap.
+    /// Uses a 1 MiB buffer and 65,535-byte maximum gap per stream.
     #[must_use]
     pub fn new() -> Self {
         Self::with_limits(DEFAULT_MAX_BUFFERED_BYTES, DEFAULT_MAX_GAP)
     }
 
-    /// Creates a QUIC reassembler with caller-supplied per-stream limits.
+    /// Uses caller-supplied per-stream limits.
     #[must_use]
     pub fn with_limits(max_buffered_bytes_per_stream: usize, max_gap: usize) -> Self {
         Self {
@@ -726,14 +719,14 @@ impl QuicStreamReassembler {
         }
     }
 
-    /// Overrides the maximum number of concurrently tracked QUIC streams.
+    /// Sets the concurrent QUIC stream limit.
     #[must_use]
     pub fn with_max_streams(mut self, max_streams: usize) -> Self {
         self.max_streams = max_streams;
         self
     }
 
-    /// Offers one QUIC STREAM frame and returns all newly contiguous bytes for its stream.
+    /// Returns newly contiguous bytes after accepting one QUIC STREAM frame.
     #[allow(clippy::too_many_arguments)]
     pub fn offer(
         &mut self,
@@ -779,10 +772,9 @@ impl QuicStreamReassembler {
         output
     }
 
-    /// Offers a parsed STREAM frame, or returns `None` for any other QUIC frame.
+    /// Accepts a parsed STREAM frame, returning `None` for other frame types.
     ///
-    /// The byte-oriented [`Self::offer`] remains primary so callers can use alternate QUIC
-    /// decoders without constructing this crate's frame enum.
+    /// [`Self::offer`] accepts output from alternate QUIC decoders.
     #[allow(clippy::too_many_arguments)]
     pub fn offer_frame(
         &mut self,
@@ -1352,8 +1344,7 @@ mod tests {
         );
         assert_eq!(reassembler.flows.len(), 0);
 
-        // The flow is gone, so this is treated as a fresh connection, not a
-        // continuation of the pre-RST stream.
+        // A removed flow restarts instead of continuing the pre-RST stream.
         assert_eq!(
             reassembler.offer(src, 1_000, dst, 80, 100, false, false, false, b"new"),
             b"new"
@@ -1369,8 +1360,7 @@ mod tests {
             reassembler.offer(src, 1_000, dst, 80, 0, true, false, false, b"old"),
             b"old"
         );
-        // A held out-of-order segment from the old stream should not survive
-        // a SYN restart on the same 4-tuple/direction.
+        // A SYN restart discards buffered segments from the old stream.
         assert!(
             reassembler
                 .offer(src, 1_000, dst, 80, 1_000, false, false, false, b"stale")
@@ -1381,7 +1371,7 @@ mod tests {
             reassembler.offer(src, 1_000, dst, 80, 500, true, false, false, b"new"),
             b"new"
         );
-        // The stale pre-restart segment must not resurface after the restart.
+        // The pre-restart segment stays discarded.
         assert!(
             reassembler
                 .offer(src, 1_000, dst, 80, 505, false, false, false, b"")
@@ -1405,8 +1395,7 @@ mod tests {
                 .offer(src, 1_000, dst, 80, 5, false, false, false, b"XXXXX")
                 .is_empty()
         );
-        // Overlaps [5,10) with the buffered segment above - rejected whole,
-        // including its genuinely non-overlapping [10,13) tail.
+        // Reject the full [5,13) segment, including its non-overlapping tail.
         assert!(
             reassembler
                 .offer(src, 1_000, dst, 80, 8, false, false, false, b"YYYYY")
@@ -1462,8 +1451,7 @@ mod tests {
                 .offer(src, 1_000, dst, 80, 5, false, false, false, b"XXXXX")
                 .is_empty()
         );
-        // New segment [8,13) wins its overlap with [5,10); [5,8) survives from
-        // the original.
+        // New [8,13) bytes replace the overlap; original [5,8) survives.
         assert!(
             reassembler
                 .offer(src, 1_000, dst, 80, 8, false, false, false, b"YYYYY")

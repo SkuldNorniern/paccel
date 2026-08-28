@@ -6,7 +6,7 @@ pub mod datalink;
 pub mod network;
 pub mod transport;
 
-/// Error types that can occur during packet parsing.
+/// Packet parsing errors.
 #[derive(Debug)]
 pub enum LayerError {
     MissingField,
@@ -34,7 +34,7 @@ impl fmt::Display for LayerError {
 
 impl Error for LayerError {}
 
-/// Which decoding stage a [`ParseError`] occurred in.
+/// Decoding stage where a [`ParseError`] occurred.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Layer {
     Link,
@@ -63,7 +63,7 @@ impl fmt::Display for Layer {
     }
 }
 
-/// The kind of parse failure, independent of which layer/protocol hit it.
+/// Parse failure independent of layer or protocol.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParseErrorKind {
     /// The buffer ended before a complete value could be read.
@@ -85,13 +85,11 @@ pub enum ParseErrorKind {
     Malformed,
 }
 
-/// A parse failure with layer, protocol, and offset context - unlike
-/// [`LayerError`], which carries none of that.
+/// Parse failure with layer, protocol, and offset context.
 ///
-/// Most parsers still return `LayerError`. Convert one via
-/// [`ParseError::from_layer_error`] when that's all you have; it can't
-/// recover `Incomplete`'s byte counts, since `LayerError` never had them -
-/// construct `ParseError` directly where the real counts are available.
+/// [`ParseError::from_layer_error`] adds context to a [`LayerError`] but cannot
+/// recover `Incomplete` byte counts. Construct this type directly when those
+/// counts are known.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParseError {
     pub layer: Layer,
@@ -116,8 +114,7 @@ impl ParseError {
         }
     }
 
-    /// Converts a [`LayerError`] into a [`ParseError`] with the given
-    /// layer/protocol/offset. See the type doc for what's lost.
+    /// Adds the given layer, protocol, and offset to a [`LayerError`].
     #[must_use]
     pub fn from_layer_error(
         error: &LayerError,
@@ -194,29 +191,24 @@ impl fmt::Display for ParseError {
 
 impl Error for ParseError {}
 
-/// The outcome of probing a buffer for one protocol. Separates "not this
-/// protocol" from "truncated" from "malformed" - a bare `Option<T>` (or a
-/// `Result<T, E>` collapsed via `.ok()`) reads all three as `None`.
+/// Protocol probe result that distinguishes mismatch, truncation, and malformed
+/// input.
 ///
-/// [`Self::ok`] bridges back to `Option<T>` for callers that don't need
-/// the distinction.
+/// [`Self::ok`] collapses the distinction to `Option<T>`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProbeResult<T> {
     /// Buffer matched and fully parsed.
     Match(T),
-    /// Buffer definitely isn't this protocol (bad magic/version) - trying
-    /// other protocols is reasonable.
+    /// Wrong protocol, such as bad magic or version.
     NoMatch,
-    /// Too little data to tell yet. Unlike `NoMatch`, more bytes could
-    /// still turn this into a match.
+    /// Too little data to decide; more bytes may produce a match.
     Incomplete,
     /// Matched (magic/version checked out) but the rest fails to parse.
     Malformed(ParseError),
 }
 
 impl<T> ProbeResult<T> {
-    /// Drops the `NoMatch`/`Incomplete`/`Malformed` distinction back to
-    /// `Option<T>`.
+    /// Collapses `NoMatch`, `Incomplete`, and `Malformed` to `None`.
     #[must_use]
     pub fn ok(self) -> Option<T> {
         match self {

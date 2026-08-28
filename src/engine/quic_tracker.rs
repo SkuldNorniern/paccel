@@ -35,7 +35,7 @@ pub struct QuicConnectionTracker {
 }
 
 impl QuicConnectionTracker {
-    /// Creates a tracker for up to 65,536 concurrent UDP flows.
+    /// Tracks up to 65,536 concurrent UDP flows.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -46,15 +46,14 @@ impl QuicConnectionTracker {
         }
     }
 
-    /// Overrides the maximum number of concurrently tracked UDP flows.
+    /// Sets the concurrent UDP flow limit.
     #[must_use]
     pub fn with_max_flows(mut self, max_flows: usize) -> Self {
         self.max_flows = max_flows;
         self
     }
 
-    /// Records a long-header packet's SCID as the connection ID the opposite
-    /// direction should expect as DCID in future short-header packets.
+    /// Records a long-header SCID as the opposite direction's expected DCID.
     #[allow(clippy::too_many_arguments)]
     pub fn observe_long_header(
         &mut self,
@@ -77,11 +76,8 @@ impl QuicConnectionTracker {
         }
     }
 
-    /// Looks up which tracked connection issued `dcid`, if any - lets a
-    /// short-header packet on an unfamiliar UDP 4-tuple (migration, NAT
-    /// rebind) still resolve to the connection that issued the CID. Returns
-    /// that connection's last-seen endpoints, not necessarily the tuple the
-    /// packet arrived on; the caller decides what to do with that.
+    /// Resolves `dcid` across migration or NAT rebinding. The returned endpoints
+    /// are the connection's last-seen tuple, not the packet's arrival tuple.
     #[must_use]
     pub fn connection_for_dcid(&self, dcid: &[u8]) -> Option<(IpAddr, u16, IpAddr, u16)> {
         let key = self.cid_index.get(dcid)?;
@@ -93,10 +89,7 @@ impl QuicConnectionTracker {
         ))
     }
 
-    /// Returns the connection ID length this direction's short-header packets
-    /// are expected to use as DCID, if learned from an earlier long-header
-    /// exchange. Returns `None` if it is not yet known, allowing callers to
-    /// retain their existing heuristic as a fallback.
+    /// Returns the expected short-header DCID length learned from a long header.
     #[must_use]
     pub fn expected_dcid_len(
         &self,
@@ -111,9 +104,8 @@ impl QuicConnectionTracker {
             .map(Vec::len)
     }
 
-    /// Reconstructs a full packet number for this direction using the flow's
-    /// largest packet number (RFC 9000 Appendix A.3) and updates the stored
-    /// maximum.
+    /// Reconstructs the packet number per RFC 9000 Appendix A.3 and updates the
+    /// direction's maximum.
     #[allow(clippy::too_many_arguments)]
     pub fn reconstruct_packet_number(
         &mut self,

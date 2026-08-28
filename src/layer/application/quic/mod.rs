@@ -39,9 +39,8 @@ pub struct QuicLongHeader {
     /// Declared length (bytes) of the packet-number-plus-payload region.
     /// Initial/0-RTT/Handshake only.
     pub length: Option<u64>,
-    /// Byte offset into the original `payload` slice where the
-    /// (still header-protected) packet number begins. Initial/0-RTT/Handshake
-    /// only; needed to locate the PN once header protection is removed.
+    /// Offset of the protected packet number in the original `payload`.
+    /// Initial/0-RTT/Handshake only.
     pub packet_number_offset: Option<usize>,
     pub retry_token: Option<Vec<u8>>,
     pub retry_integrity_tag: Option<[u8; 16]>,
@@ -60,11 +59,9 @@ pub struct QuicVersionNegotiation {
     pub supported_versions: Vec<u32>,
 }
 
-/// Parses the structural (still header-protected) fields of a QUIC short-header
-/// (1-RTT) packet, given the DCID length the caller already knows (e.g. from
-/// `QuicConnectionTracker`). Returns `None` if `payload` isn't a short header
-/// or is too short for `dcid_len` bytes of DCID. Fixed bit is a hint, not
-/// required - RFC 9287 lets endpoints negotiate its removal.
+/// Parses protected fields from a QUIC short-header (1-RTT) packet using the
+/// caller-supplied DCID length. Returns `None` for other or truncated headers.
+/// RFC 9287 makes the fixed bit optional.
 pub fn parse_quic_short_header(payload: &[u8], dcid_len: usize) -> Option<QuicShortHeader<'_>> {
     let first_byte = *payload.first()?;
     if first_byte & 0x80 != 0 {
@@ -81,11 +78,8 @@ pub fn parse_quic_short_header(payload: &[u8], dcid_len: usize) -> Option<QuicSh
 }
 
 /// Parses a QUIC Version Negotiation packet (RFC 9000 sec 17.2.1).
-/// `dcid`/`scid` here are the client's SCID/DCID echoed back - see the
-/// spec for why they're swapped relative to the packet that triggered
-/// this response. Returns `None` if `payload` isn't shaped like a VN
-/// packet (header form bit clear, or version field isn't exactly zero)
-/// or is too short to contain valid DCID/SCID length-prefixed fields.
+/// The response echoes the client's SCID/DCID as DCID/SCID. Returns `None` for
+/// a clear header-form bit, nonzero version, or truncated connection IDs.
 pub fn parse_quic_version_negotiation(payload: &[u8]) -> Option<QuicVersionNegotiation> {
     let first_byte = *payload.first()?;
     if first_byte & 0x80 == 0 || payload.get(1..5)? != [0, 0, 0, 0] {
@@ -117,9 +111,8 @@ pub fn parse_quic_version_negotiation(payload: &[u8]) -> Option<QuicVersionNegot
     })
 }
 
-/// RFC 9000 sec 16 variable-length integer: top 2 bits of the first byte pick
-/// the encoding length (1/2/4/8 bytes), remaining bits (of all length bytes)
-/// are the value.
+/// RFC 9000 sec 16 integer: the first byte's top two bits select a 1-, 2-, 4-,
+/// or 8-byte encoding; the remaining bits hold the value.
 pub fn decode_varint(payload: &[u8]) -> Option<(u64, usize)> {
     let first = *payload.first()?;
     let len = 1usize << (first >> 6);
@@ -317,11 +310,8 @@ pub fn parse_quic_long_header(payload: &[u8]) -> Result<QuicLongHeader, LayerErr
     })
 }
 
-/// Splits a UDP datagram into the individual QUIC packets it contains
-/// (RFC 9000 sec 12.2). Only long-header packets with a Length field
-/// (Initial/0-RTT/Handshake) can be split from what follows; a short-header,
-/// Retry, Version Negotiation, or unparseable packet consumes the rest of
-/// `datagram` and ends the split.
+/// Splits coalesced QUIC packets per RFC 9000 sec 12.2. Only long headers with
+/// a Length field can be separated; other packet types consume the remainder.
 pub fn split_coalesced_packets(datagram: &[u8]) -> Vec<&[u8]> {
     let mut packets = Vec::new();
     let mut remaining = datagram;

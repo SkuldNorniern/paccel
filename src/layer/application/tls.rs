@@ -16,18 +16,14 @@ pub struct TlsClientHello {
     pub supported_groups: Vec<u16>,
     pub ec_point_formats: Vec<u8>,
     pub signature_algorithms: Vec<u16>,
-    /// Extension type IDs in wire order, unfiltered (including any GREASE
-    /// values) - JA3/JA4-style fingerprinting needs the raw order/set, and
-    /// decides its own GREASE-filtering policy on top of this.
+    /// Unfiltered extension IDs in wire order, including GREASE values. JA3/JA4
+    /// code applies its own GREASE policy.
     pub extension_types: Vec<u16>,
 }
 
-/// ServerHello (RFC 8446 sec 4.1.3). Unlike ClientHello, `cipher_suite` is a
-/// single negotiated value, not a list, and ALPN carries at most one selected
-/// protocol. Certificate/ServerKeyExchange are NOT covered here: TLS 1.3
-/// encrypts everything after ServerHello, and even for TLS 1.2 the
-/// Certificate message routinely spans multiple TCP segments in real
-/// traffic, which a stateless per-packet parser can't reassemble.
+/// ServerHello (RFC 8446 sec 4.1.3). `cipher_suite` is the negotiated value and
+/// ALPN has at most one protocol. Certificate and ServerKeyExchange are omitted:
+/// TLS 1.3 encrypts them, while TLS 1.2 certificates often span TCP segments.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TlsServerHello {
     pub record_version: u16,

@@ -11,7 +11,7 @@ use crate::layer::transport::tcp::TcpHeader;
 const DEFAULT_MAX_PROBE_BYTES: usize = 65_536;
 const DEFAULT_MAX_PROBE_FLOWS: usize = 65_536;
 
-/// An application-layer message recognized in a reassembled TCP stream.
+/// Application message recognized in a reassembled TCP stream.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum StreamL7 {
     /// An HTTP/1.x request or response.
@@ -20,7 +20,7 @@ pub enum StreamL7 {
     Tls(TlsClientHello),
 }
 
-/// A message recognized in one direction of a TCP flow.
+/// Message recognized in one TCP flow direction.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StreamEvent {
     pub src: IpAddr,
@@ -65,13 +65,13 @@ pub struct SessionTracker {
 }
 
 impl SessionTracker {
-    /// Creates a tracker with a 65,536-byte application probe cap per direction.
+    /// Uses a 65,536-byte application probe cap per direction.
     #[must_use]
     pub fn new() -> Self {
         Self::with_limits(DEFAULT_MAX_PROBE_BYTES)
     }
 
-    /// Creates a tracker with a caller-supplied application probe cap per direction.
+    /// Uses the given application probe cap per direction.
     #[must_use]
     pub fn with_limits(max_probe_bytes: usize) -> Self {
         Self {
@@ -83,14 +83,14 @@ impl SessionTracker {
         }
     }
 
-    /// Overrides the maximum number of concurrently tracked probe directions.
+    /// Sets the concurrent probe-direction limit.
     #[must_use]
     pub fn with_max_probe_flows(mut self, max_probe_flows: usize) -> Self {
         self.max_probe_flows = max_probe_flows;
         self
     }
 
-    /// Offers an Ethernet frame and returns the first HTTP or TLS message found in its direction.
+    /// Returns the first HTTP or TLS message found in the frame's direction.
     pub fn offer_frame(&mut self, raw: &[u8]) -> Option<StreamEvent> {
         let parsed = BuiltinPacketParser::parse(raw).ok()?;
         let (src, dst) = ip_endpoints(&parsed)?;
@@ -170,7 +170,7 @@ impl SessionTracker {
             };
             self.probes.remove(&oldest);
 
-            // both probe dirs gone -> tcp seq state stale too, clear it
+            // Clear stale TCP sequence state after both probe directions are gone.
             let flow = &oldest.flow;
             let other_direction = DirectionKey {
                 flow: flow.clone(),
@@ -548,20 +548,20 @@ mod tests {
     fn probe_eviction_also_clears_stale_tcp_sequence_state() {
         let mut tracker = SessionTracker::new().with_max_probe_flows(1);
 
-        // flow A: SYN only, no data yet, probe stays open
+        // Flow A: SYN only; its probe stays open.
         assert!(
             tracker
                 .offer_frame(&tcp_frame(3_000, 500, true, &[]))
                 .is_none()
         );
-        // flow B: evicts A's probe (max_probe_flows=1)
+        // Flow B evicts A with max_probe_flows=1.
         assert!(
             tracker
                 .offer_frame(&tcp_frame(3_001, 1, true, &[]))
                 .is_none()
         );
 
-        // reused 4-tuple, unrelated new connection, far-away seq
+        // Reuse the 4-tuple with an unrelated, distant sequence number.
         assert!(
             tracker
                 .offer_frame(&tcp_frame(3_000, 50_000, true, &[]))

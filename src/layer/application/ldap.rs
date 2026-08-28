@@ -92,8 +92,8 @@ pub fn parse_ldap_message(payload: &[u8]) -> Result<LdapMessage, LayerError> {
     })
 }
 
-/// Decodes a BER/DER length field at `offset`. Returns `(length, offset_after_length_field)`.
-/// Indefinite-length encoding (0x80) is rejected — not used by LDAP's DER encoding.
+/// Decodes a BER/DER length as `(length, offset_after_length_field)`.
+/// Rejects indefinite length (0x80), which LDAP DER does not use.
 fn read_ber_length(bytes: &[u8], offset: usize) -> Result<(usize, usize), LayerError> {
     let first = *bytes.get(offset).ok_or(LayerError::InvalidLength)?;
     if first & 0x80 == 0 {
