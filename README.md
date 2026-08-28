@@ -21,15 +21,13 @@ paccel = { version = "0.1", features = ["fingerprint"] }
 paccel = { version = "0.1", features = ["quic-decrypt"] }
 ```
 
-`0.x` releases are explicitly unstable — the public API can change between minor versions before `1.0`. See [Status](#status) below before depending on any specific piece.
+`0.x` can break the public API between minor versions before `1.0`. Check [Status](#status) before depending on any one piece.
 
 ## Current status
 
-- parser engine scaffolding is in place (`engine/*`)
-- packet model is split into owned + view modules (`packet/*`)
-- built-in parsing, capture iteration, opt-in reassembly, and stream tracking are available
-- low-level borrowed packet wrappers exist for manual parsing flows:
-  - `packet::EthernetPacket`, `packet::SllPacket`, `packet::Sll2Packet`, `packet::Ipv4Packet`, `packet::Ipv6Packet`, `packet::TcpPacket`, `packet::UdpPacket`, `packet::ArpPacket`, `packet::DnsPacket`, `packet::IcmpPacket`, `packet::Icmpv6Packet`, `packet::DhcpPacket`, `packet::GrePacket`, `packet::VxlanPacket`, `packet::VlanTagView`
+The engine (`engine/*`) does built-in parsing, capture iteration, opt-in reassembly, and stream tracking. The packet model (`packet/*`) splits into owned types and borrowed views for manual parsing:
+
+`packet::EthernetPacket`, `packet::SllPacket`, `packet::Sll2Packet`, `packet::Ipv4Packet`, `packet::Ipv6Packet`, `packet::TcpPacket`, `packet::UdpPacket`, `packet::ArpPacket`, `packet::DnsPacket`, `packet::IcmpPacket`, `packet::Icmpv6Packet`, `packet::DhcpPacket`, `packet::GrePacket`, `packet::VxlanPacket`, `packet::VlanTagView`.
 
 ## Supported protocols
 
@@ -51,20 +49,19 @@ The parser is designed to handle malformed input without panicking; it is fuzz-,
 
 ## Status
 
-`0.x` — API can still change before `1.0`.
+Still `0.x`, API can move before `1.0`.
 
-- Link/network/transport/tunnel parsing, pcap/pcapng capture iteration, IPv4/IPv6 fragment reassembly: stable.
-- Port/heuristic-only protocols (WireGuard, OpenVPN, L2TP, QUIC short header, LLMNR, NBNS, NAT-PMP): no structural confirmation, port number and/or a suggestive byte pattern only. QUIC short-header classification has a roughly 1-in-4 false-positive rate on arbitrary UDP payloads without connection state; `QuicConnectionTracker` state makes it authoritative, plumbing is on the caller.
-- `quic-decrypt` and `fingerprint` features: off by default, RFC/reference-vector verified, not yet seen real-world traffic diversity.
-- HTTP/2: frame-header only (type/length/flags/stream ID), no HPACK, no `ParsedPacket` wiring.
-- QUIC: STREAM frames parseable (`iter_quic_frames`) and reassemblable (`QuicStreamReassembler`), standalone, not wired into `ParsedPacket`. HTTP/3 not built (needs QPACK on top of this). Handshake/1-RTT decrypt needs an externally-supplied `SSLKEYLOGFILE` secret — not derivable from a passive capture, by design of TLS 1.3.
-- TCP stream reassembly / `SessionTracker`: opt-in, bounded FIFO eviction, explicit overlap policy (`TcpOverlapPolicy::Reject`/`FirstWins`/`LastWins`, default `Reject`), `RST` tears down the flow, a `SYN` on an already-established direction resets it (tuple-reuse safe).
-- `ParseError`/`ParseErrorKind`/`Layer`: the emerging richer error model (layer/protocol/offset/kind), additive alongside `LayerError` - most parsers still return `LayerError`, convertible via `ParseError::from_layer_error`.
-- `ProbeResult<T>`: distinguishes not-this-protocol/incomplete/malformed, which `Option<T>`/`.ok()` collapse into the same `None`. One real caller so far (`dnp3::probe_dnp3`, wired into `BuiltinPacketParser`'s DNP3 classification) - most protocol probes still return `Option<T>` directly.
-- `ParsedPacket::application()`: a single `ApplicationLayer` accessor covering all ~40 application-layer `Option<T>` fields, additive - the named fields (`parsed.dns`, `parsed.tls`, etc.) are unchanged, not deprecated.
-- Not supported: HTTP/3, GTP, Diameter, JA4S/JA4X/JA4H/JA4SSH.
-- tshark differential and pcap-vs-scapy parity coverage still small/expanding.
-- Hot path still uses some intermediate allocations.
+**Solid:** link/network/transport/tunnel parsing, pcap/pcapng capture iteration, IPv4/IPv6 fragment reassembly.
+
+**Heuristic only:** WireGuard, OpenVPN, L2TP, QUIC short header, LLMNR, NBNS, NAT-PMP — port number and a loose byte pattern, no structural check. QUIC short-header guessing has roughly a 1-in-4 false-positive rate on random UDP without connection state; feed it a `QuicConnectionTracker` and it becomes authoritative, though wiring that up is on you.
+
+**QUIC:** long header, short header, Version Negotiation, coalesced-packet splitting, a generic frame parser (`iter_quic_frames`), and STREAM reassembly (`QuicStreamReassembler`) all exist. None of it is wired into `ParsedPacket` yet, so you call it directly. HTTP/3 isn't built — it needs QPACK on top of this. Handshake/1-RTT decrypt needs an `SSLKEYLOGFILE` secret; TLS 1.3 gives no other way to get those keys from a passive capture.
+
+**TCP reassembly / `SessionTracker`:** opt-in, bounded FIFO eviction, real overlap handling (`TcpOverlapPolicy::Reject`/`FirstWins`/`LastWins`, default `Reject`). `RST` tears the flow down; a `SYN` on an already-open direction restarts it instead of getting silently appended to the old stream.
+
+**New, not fully wired in yet:** `ParseError`/`ParseErrorKind`/`Layer` add offset/protocol context that `LayerError` doesn't carry, but most parsers still return plain `LayerError`. `ProbeResult<T>` separates "not this protocol" from "truncated" from "malformed" (DNP3's probe uses it; the rest still return `Option<T>`). `ParsedPacket::application()` is one accessor over the ~40 `Option<T>` application fields — the fields themselves aren't going anywhere.
+
+**Not there yet:** HTTP/2 has no HPACK. No HTTP/3, GTP, or Diameter. Fingerprinting stops at JA3/JA4/JA3S/HASSH — no JA4S/JA4X/JA4H/JA4SSH. tshark differential and pcap-vs-scapy coverage is still growing. The hot path still allocates more than it needs to.
 
 ## Quick usage
 
@@ -111,10 +108,10 @@ Flow/state tracking should be composed on the integration side (for example insi
 
 ## Cargo features
 
-The crate is zero-dependency by default. Two optional features pull in [RustCrypto](https://github.com/RustCrypto) crates (all Apache-2.0/MIT):
+Zero-dependency by default. Two optional features pull in [RustCrypto](https://github.com/RustCrypto) crates (Apache-2.0/MIT):
 
-- **`quic-decrypt`** (`aes-gcm`, `aes`, `hkdf`, `sha2`): `paccel::layer::application::quic::decrypt_initial_client_hello`/`decrypt_initial_packet` recover a QUIC Initial packet's plaintext, including the ClientHello, using only keys derivable from the packet's own Destination Connection ID (RFC 9001 sec 5.2 - this is the same on-path visibility any DPI tool or Wireshark itself has, not a break of QUIC's security model). For Handshake/1-RTT, `decrypt_packet_with_secret` takes a secret from `paccel::layer::application::quic::QuicKeyLog`, which parses the standard `SSLKEYLOGFILE` text format (`<Label> <ClientHelloRandomHex> <SecretHex>` per line, `CLIENT_HANDSHAKE_TRAFFIC_SECRET`/`SERVER_HANDSHAKE_TRAFFIC_SECRET`/`CLIENT_TRAFFIC_SECRET_0`/`SERVER_TRAFFIC_SECRET_0`) - the same file curl, browsers, and Wireshark itself already know how to produce via the `SSLKEYLOGFILE` environment variable. There is no way around needing this file for Handshake/1-RTT: those levels are protected by a live ECDHE exchange, not something derivable from a capture alone.
-- **`fingerprint`** (`md-5`, `sha2`): `paccel::fingerprint` provides `ja3_string`/`ja3_hash`/`ja4_string` (from a `TlsClientHello`), `ja3s_string`/`ja3s_hash` (from a `TlsServerHello`), and `hassh`/`hassh_server` (from an `SshKexInit`). All verified against official reference vectors or tshark's own native field computation, not hand-derived.
+- **`quic-decrypt`** (`aes-gcm`, `aes`, `hkdf`, `sha2`) — `decrypt_initial_client_hello`/`decrypt_initial_packet` in `paccel::layer::application::quic` recover a QUIC Initial packet's plaintext (including the ClientHello) from keys derived off the packet's own Destination Connection ID, per RFC 9001 sec 5.2. Any on-path observer can do this; it's not a break of QUIC. Handshake/1-RTT is different — `decrypt_packet_with_secret` needs a secret from `QuicKeyLog`, which reads the standard `SSLKEYLOGFILE` format (the same file curl/browsers/Wireshark already write via that env var). No way around that: those keys come from a live ECDHE exchange, not from the capture itself.
+- **`fingerprint`** (`md-5`, `sha2`) — `paccel::fingerprint` gives you `ja3_string`/`ja3_hash`/`ja4_string` off a `TlsClientHello`, `ja3s_string`/`ja3s_hash` off a `TlsServerHello`, and `hassh`/`hassh_server` off an `SshKexInit`. Checked against official reference vectors and tshark's own field output.
 
 ## libpnet compatibility snapshot
 
@@ -130,7 +127,7 @@ The crate is zero-dependency by default. Two optional features pull in [RustCryp
 | Built-in raw send/receive transport stack | yes | no (out of scope) |
 | Core mutable packet-builder API | yes | no (deferred/non-goal in core) |
 
-## Explicit core non-goals (current scope)
+## Core non-goals (current scope)
 
 - No built-in flow table in the stateless core parser; reassembly and stream tracking are opt-in components.
 - No raw datalink/transport send/receive runtime in core parser.
@@ -138,9 +135,9 @@ The crate is zero-dependency by default. Two optional features pull in [RustCryp
 
 ## Test fixture provenance
 
-**None of this affects the published crate.** `tests/pcaps/` and `fuzz/` are excluded from the packaged crate (see `exclude` in `Cargo.toml`) — `cargo package --list` confirms zero binary fixtures ship. Everything under `src/` is original, written from RFCs/specs and verified against `tshark`'s output, not derived from Wireshark's own (GPLv2) source code.
+None of this ships in the crate — `tests/pcaps/` and `fuzz/` are excluded (`exclude` in `Cargo.toml`; `cargo package --list` confirms it). `src/` itself is original, written from RFCs and checked against `tshark`'s output, not derived from Wireshark's GPLv2 source.
 
-`tests/pcaps/happy-path/*` are small hand-built captures (tens to hundreds of bytes each); no external source. Most protocol test data lives inline in `tests/pcap_integration.rs` as paccel-authored synthetic frames, each built and verified directly against that protocol's own parser source (`tshark` is used only as an independent oracle to cross-check output, never as a source of committed binary data).
+`tests/pcaps/happy-path/*` are small hand-built captures, tens to hundreds of bytes, no external source. Most protocol test data lives inline in `tests/pcap_integration.rs` as synthetic frames built directly against each protocol's spec — tshark is only used to cross-check output, never as a source of committed bytes.
 
 `tests/pcaps/protocol-gaps/*` holds one self-generated capture:
 
