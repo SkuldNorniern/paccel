@@ -115,6 +115,14 @@ impl SessionTracker {
             payload,
         );
 
+        if tcp.flags.rst {
+            // TCP state for this flow is already gone; drop application probe
+            // state for both directions too, or a stale ProbeState (done or
+            // partial bytes) survives into the next connection on this tuple.
+            self.remove_flow(src, src_port, dst, dst_port);
+            return None;
+        }
+
         if !self.probes.contains_key(&key) {
             if self.max_probe_flows == 0 {
                 return None;
@@ -327,6 +335,13 @@ mod tests {
         frame
     }
 
+    fn tcp_rst_frame(src_port: u16, sequence: u32) -> Vec<u8> {
+        let mut frame = tcp_frame(src_port, sequence, false, &[]);
+        let flags_offset = 14 + 20 + 13; // Ethernet + IPv4 header + TCP flags byte
+        frame[flags_offset] = 0x04;
+        frame
+    }
+
     fn ipv6_hop_by_hop_tcp_frame(payload: &[u8]) -> Vec<u8> {
         // Hop-by-Hop (next_header=0) wrapping TCP: next_header=6, hdr_ext_len=0
         // (8-byte ext header), then a minimal TCP header, then payload.
@@ -444,6 +459,40 @@ mod tests {
             StreamL7::Http(HttpMessage::Request { target, host, .. }) => {
                 assert_eq!(target, "/index.html");
                 assert_eq!(host.as_deref(), Some("example.com"));
+            }
+            _ => panic!("expected HTTP request"),
+        }
+    }
+
+    #[test]
+    fn rst_clears_probe_state_so_next_connection_starts_fresh() {
+        let mut tracker = SessionTracker::new();
+
+        // First connection: probe completes (state.done = true).
+        let first_payload = b"GET /index.html HTTP/1.1\r\nHost: example.com\r\n\r\n";
+        let event = tracker
+            .offer_frame(&tcp_frame(SRC_PORT, 1_000, false, first_payload))
+            .expect("HTTP stream event");
+        assert!(matches!(
+            event.l7,
+            StreamL7::Http(HttpMessage::Request { .. })
+        ));
+
+        assert!(
+            tracker
+                .offer_frame(&tcp_rst_frame(SRC_PORT, 2_000))
+                .is_none()
+        );
+
+        // A fresh connection on the same 4-tuple must be probed again, not
+        // silently dropped by a stale `done` flag from before the RST.
+        let second_payload = b"GET /other.html HTTP/1.1\r\nHost: example.com\r\n\r\n";
+        let event = tracker
+            .offer_frame(&tcp_frame(SRC_PORT, 3_000, false, second_payload))
+            .expect("HTTP stream event after RST should be probed fresh");
+        match event.l7 {
+            StreamL7::Http(HttpMessage::Request { target, .. }) => {
+                assert_eq!(target, "/other.html");
             }
             _ => panic!("expected HTTP request"),
         }

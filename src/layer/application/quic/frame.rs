@@ -106,6 +106,15 @@ impl<'a> Iterator for QuicFrameIter<'a> {
 
         match parse_frame(self.remaining) {
             Ok((frame, consumed)) => {
+                if matches!(frame, QuicFrame::Unknown { .. }) {
+                    // An unknown frame type has an unknown length - RFC 9000
+                    // sec 19 says an unrecognized type is a
+                    // FRAME_ENCODING_ERROR. Yield it once so the caller
+                    // learns about it, then stop: reading past it would
+                    // misinterpret its body as the next frame.
+                    self.remaining = &[];
+                    return Some(Ok(frame));
+                }
                 let Some(remaining) = self.remaining.get(consumed..) else {
                     self.poisoned = true;
                     return Some(Err(LayerError::InvalidLength));
@@ -391,6 +400,9 @@ fn parse_new_connection_id<'a>(cursor: &mut FrameCursor<'a>) -> Result<QuicFrame
     let sequence_number = cursor.read_varint()?;
     let retire_prior_to = cursor.read_varint()?;
     let connection_id_length = u64::from(cursor.read_u8()?);
+    if !(1..=20).contains(&connection_id_length) {
+        return Err(LayerError::InvalidLength);
+    }
     let connection_id = cursor.read_bytes(connection_id_length)?;
     let stateless_reset_token = cursor.read_array_ref()?;
     Ok(QuicFrame::NewConnectionId {
@@ -456,6 +468,22 @@ mod tests {
                 QuicFrame::HandshakeDone,
                 QuicFrame::Unknown { frame_type: 0x1f },
             ]
+        );
+    }
+
+    #[test]
+    fn unknown_frame_type_stops_iteration_instead_of_misreading_its_body() {
+        // PING, then an unknown frame type (0x20), then a byte (0x01, PING)
+        // that would misparse as another frame if iteration continued past
+        // the unknown frame's unknowable length.
+        let payload = [0x01, 0x20, 0x01];
+        let frames: Vec<_> = iter_quic_frames(&payload)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("PING and Unknown should parse");
+
+        assert_eq!(
+            frames,
+            vec![QuicFrame::Ping, QuicFrame::Unknown { frame_type: 0x20 }]
         );
     }
 
@@ -618,6 +646,24 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn rejects_new_connection_id_length_outside_rfc_range() {
+        // RFC 9000 sec 19.15: connection ID length must be 1-20.
+        let zero_length = [0x18, 2, 1, 0];
+        assert!(matches!(
+            iter_quic_frames(&zero_length).next(),
+            Some(Err(LayerError::InvalidLength))
+        ));
+
+        let mut too_long = vec![0x18, 2, 1, 21];
+        too_long.extend(0u8..21);
+        too_long.extend(0u8..16);
+        assert!(matches!(
+            iter_quic_frames(&too_long).next(),
+            Some(Err(LayerError::InvalidLength))
+        ));
     }
 
     #[test]
