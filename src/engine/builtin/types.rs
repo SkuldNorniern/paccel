@@ -593,7 +593,109 @@ pub struct ParsedPacket {
     pub transport_segment_offset: Option<usize>,
 }
 
+/// A borrowed view of whichever application-layer protocol a [`ParsedPacket`]
+/// matched, from [`ParsedPacket::application`]. `ParsedPacket` still carries
+/// each protocol as its own named `Option<T>` field (unchanged, not
+/// deprecated) - this is an additive single-match-point alternative for code
+/// that wants "whatever application protocol this is" without checking ~40
+/// fields by hand. Variants borrow rather than clone the underlying value.
+#[derive(Debug, Clone, Copy)]
+pub enum ApplicationLayer<'a> {
+    Dnp3(&'a Dnp3Message),
+    Dns(&'a DnsMessage),
+    Dhcp(&'a DhcpMessage),
+    Dhcp6(&'a Dhcp6Message),
+    Tftp(&'a TftpMessage),
+    Radius(&'a RadiusMessage),
+    Snmp(&'a SnmpMessage),
+    Ntp(&'a NtpMessage),
+    TlsClientHello(&'a TlsClientHello),
+    TlsServerHello(&'a TlsServerHello),
+    Http(&'a HttpMessage),
+    Ssdp(&'a SsdpMessage),
+    NatPmp(&'a NatPmpMessage),
+    Pcp(&'a PcpHeader),
+    Sip(&'a SipMessage),
+    Rtcp(&'a RtcpHeader),
+    Rtp(&'a RtpHeader),
+    Quic(&'a QuicLongHeader),
+    Bgp(&'a BgpMessage),
+    Ldap(&'a LdapMessage),
+    Nntp(&'a NntpMessage),
+    Imap(&'a ImapMessage),
+    Ftp(&'a FtpMessage),
+    Smb1(&'a Smb1Header),
+    Smb2(&'a Smb2Header),
+    Smtp(&'a SmtpMessage),
+    Telnet(&'a TelnetCommand),
+    Mqtt(&'a MqttMessage),
+    Modbus(&'a ModbusMessage),
+    Ssh(&'a SshBanner),
+    SshKexInit(&'a SshKexInit),
+    Coap(&'a CoapMessage),
+    Kerberos(&'a KerberosMessage),
+    Stun(&'a StunMessage),
+    Rip(&'a RipHeader),
+    Isakmp(&'a IsakmpHeader),
+    Rpc(&'a RpcMessage),
+    Syslog(&'a SyslogMessage),
+    Hsrp(&'a HsrpHeader),
+}
+
 impl ParsedPacket {
+    /// Returns whichever application-layer protocol this packet matched, if
+    /// any, as a single borrowed enum instead of checking each of the ~40
+    /// `Option<T>` application-layer fields individually. When more than one
+    /// field is populated (uncommon - most probes are mutually exclusive per
+    /// transport segment) this returns the first match in field-declaration
+    /// order; the underlying fields themselves are unaffected either way.
+    #[must_use]
+    pub fn application(&self) -> Option<ApplicationLayer<'_>> {
+        None.or_else(|| self.dnp3.as_ref().map(ApplicationLayer::Dnp3))
+            .or_else(|| self.dns.as_ref().map(ApplicationLayer::Dns))
+            .or_else(|| self.dhcp.as_ref().map(ApplicationLayer::Dhcp))
+            .or_else(|| self.dhcp6.as_ref().map(ApplicationLayer::Dhcp6))
+            .or_else(|| self.tftp.as_ref().map(ApplicationLayer::Tftp))
+            .or_else(|| self.radius.as_ref().map(ApplicationLayer::Radius))
+            .or_else(|| self.snmp.as_ref().map(ApplicationLayer::Snmp))
+            .or_else(|| self.ntp.as_ref().map(ApplicationLayer::Ntp))
+            .or_else(|| self.tls.as_ref().map(ApplicationLayer::TlsClientHello))
+            .or_else(|| {
+                self.tls_server_hello
+                    .as_ref()
+                    .map(ApplicationLayer::TlsServerHello)
+            })
+            .or_else(|| self.http.as_ref().map(ApplicationLayer::Http))
+            .or_else(|| self.ssdp.as_ref().map(ApplicationLayer::Ssdp))
+            .or_else(|| self.nat_pmp.as_ref().map(ApplicationLayer::NatPmp))
+            .or_else(|| self.pcp.as_ref().map(ApplicationLayer::Pcp))
+            .or_else(|| self.sip.as_ref().map(ApplicationLayer::Sip))
+            .or_else(|| self.rtcp.as_ref().map(ApplicationLayer::Rtcp))
+            .or_else(|| self.rtp.as_ref().map(ApplicationLayer::Rtp))
+            .or_else(|| self.quic.as_ref().map(ApplicationLayer::Quic))
+            .or_else(|| self.bgp.as_ref().map(ApplicationLayer::Bgp))
+            .or_else(|| self.ldap.as_ref().map(ApplicationLayer::Ldap))
+            .or_else(|| self.nntp.as_ref().map(ApplicationLayer::Nntp))
+            .or_else(|| self.imap.as_ref().map(ApplicationLayer::Imap))
+            .or_else(|| self.ftp.as_ref().map(ApplicationLayer::Ftp))
+            .or_else(|| self.smb1.as_ref().map(ApplicationLayer::Smb1))
+            .or_else(|| self.smb2.as_ref().map(ApplicationLayer::Smb2))
+            .or_else(|| self.smtp.as_ref().map(ApplicationLayer::Smtp))
+            .or_else(|| self.telnet.as_ref().map(ApplicationLayer::Telnet))
+            .or_else(|| self.mqtt.as_ref().map(ApplicationLayer::Mqtt))
+            .or_else(|| self.modbus.as_ref().map(ApplicationLayer::Modbus))
+            .or_else(|| self.ssh.as_ref().map(ApplicationLayer::Ssh))
+            .or_else(|| self.ssh_kex_init.as_ref().map(ApplicationLayer::SshKexInit))
+            .or_else(|| self.coap.as_ref().map(ApplicationLayer::Coap))
+            .or_else(|| self.kerberos.as_ref().map(ApplicationLayer::Kerberos))
+            .or_else(|| self.stun.as_ref().map(ApplicationLayer::Stun))
+            .or_else(|| self.rip.as_ref().map(ApplicationLayer::Rip))
+            .or_else(|| self.isakmp.as_ref().map(ApplicationLayer::Isakmp))
+            .or_else(|| self.rpc.as_ref().map(ApplicationLayer::Rpc))
+            .or_else(|| self.syslog.as_ref().map(ApplicationLayer::Syslog))
+            .or_else(|| self.hsrp.as_ref().map(ApplicationLayer::Hsrp))
+    }
+
     /// Alias for [`Self::innermost_flow_key`] - the flow key of the deepest
     /// tunnel-decoded packet, not this `ParsedPacket`'s own network/transport
     /// headers. For a plain (non-tunneled) packet these are the same thing.
