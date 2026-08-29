@@ -16,12 +16,12 @@ use crate::layer::application::eigrp::{EigrpHeader, parse_eigrp_header};
 use crate::layer::application::ftp::{FtpMessage, probe_ftp};
 use crate::layer::application::hsrp::{HsrpHeader, parse_hsrp_header};
 use crate::layer::application::http::{HttpMessage, probe_http};
-use crate::layer::application::imap::{ImapMessage, parse_imap_message};
+use crate::layer::application::imap::{ImapMessage, probe_imap};
 use crate::layer::application::isakmp::{IsakmpHeader, parse_isakmp_header};
 use crate::layer::application::kerberos::{
     KerberosMessage, parse_kerberos_tcp, parse_kerberos_udp,
 };
-use crate::layer::application::ldap::{LdapMessage, parse_ldap_message};
+use crate::layer::application::ldap::{LdapMessage, probe_ldap};
 use crate::layer::application::modbus::{ModbusMessage, parse_modbus_message};
 use crate::layer::application::mqtt::{MqttMessage, probe_mqtt};
 use crate::layer::application::nat_pmp::{NatPmpMessage, parse_nat_pmp};

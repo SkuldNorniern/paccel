@@ -1,6 +1,6 @@
 use std::str::from_utf8;
 
-use crate::layer::LayerError;
+use crate::layer::{Layer, LayerError, ParseError, ProbeResult};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ImapMessage {
@@ -37,6 +37,34 @@ pub fn parse_imap_message(payload: &[u8]) -> Result<ImapMessage, LayerError> {
     })
 }
 
+/// Probes an IMAP line. No magic bytes exist for IMAP - lines are ASCII
+/// text, so binary bytes are a real NoMatch signal. `parse_imap_message`
+/// treats a buffer with no line terminator as a complete line (same
+/// fallback as FTP/NNTP's sibling probes), so this doesn't invent an
+/// Incomplete case beyond an empty buffer.
+#[must_use]
+pub fn probe_imap(payload: &[u8]) -> ProbeResult<ImapMessage> {
+    if payload.is_empty() {
+        return ProbeResult::Incomplete {
+            needed: None,
+            available: 0,
+        };
+    }
+    let line_end = find_line_end(payload).unwrap_or(payload.len());
+    if line_end > 0 && from_utf8(&payload[..line_end]).is_err() {
+        return ProbeResult::NoMatch;
+    }
+    match parse_imap_message(payload) {
+        Ok(message) => ProbeResult::Match(message),
+        Err(error) => ProbeResult::Malformed(ParseError::from_layer_error(
+            &error,
+            Layer::Application,
+            Some("imap"),
+            0,
+        )),
+    }
+}
+
 fn find_line_end(payload: &[u8]) -> Option<usize> {
     payload.iter().position(|byte| *byte == b'\n').map(|pos| {
         if pos > 0 && payload[pos - 1] == b'\r' {
@@ -49,8 +77,8 @@ fn find_line_end(payload: &[u8]) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ImapMessage, parse_imap_message};
-    use crate::layer::LayerError;
+    use super::{ImapMessage, parse_imap_message, probe_imap};
+    use crate::layer::{LayerError, ProbeResult};
 
     #[test]
     fn parses_untagged_greeting() {
@@ -79,5 +107,37 @@ mod tests {
             parse_imap_message(b"\r\n"),
             Err(LayerError::InvalidLength)
         ));
+    }
+
+    #[test]
+    fn probe_matches_an_untagged_greeting() {
+        assert!(matches!(
+            probe_imap(b"* OK IMAP4rev1 ready\r\n"),
+            ProbeResult::Match(_)
+        ));
+    }
+
+    #[test]
+    fn probe_reports_incomplete_for_an_empty_buffer() {
+        assert_eq!(
+            probe_imap(b""),
+            ProbeResult::Incomplete {
+                needed: None,
+                available: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn probe_reports_no_match_for_binary_data() {
+        assert_eq!(
+            probe_imap(&[0xff, 0x00, 0x01, 0x02, b'\n']),
+            ProbeResult::NoMatch
+        );
+    }
+
+    #[test]
+    fn probe_reports_malformed_for_a_tag_with_no_text() {
+        assert!(matches!(probe_imap(b"A001\r\n"), ProbeResult::Malformed(_)));
     }
 }
