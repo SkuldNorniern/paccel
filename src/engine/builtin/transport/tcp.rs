@@ -69,7 +69,7 @@ fn classify_tcp_app_by_port(
         || source_port == TCP_PORT_SUBMISSION
         || destination_port == TCP_PORT_SUBMISSION
     {
-        parsed.smtp = parse_smtp(payload).ok();
+        parsed.smtp = probe_smtp(payload).ok();
         return;
     }
     if source_port == TCP_PORT_TELNET || destination_port == TCP_PORT_TELNET {
@@ -113,7 +113,7 @@ fn classify_tcp_app_by_port(
         && parsed.mqtt.is_none()
         && (source_port == TCP_PORT_MODBUS || destination_port == TCP_PORT_MODBUS)
     {
-        parsed.modbus = parse_modbus_message(payload).ok();
+        parsed.modbus = probe_modbus(payload).ok();
     }
     if parsed.bgp.is_none()
         && parsed.ldap.is_none()

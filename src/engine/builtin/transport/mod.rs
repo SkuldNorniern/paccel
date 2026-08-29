@@ -22,7 +22,7 @@ use crate::layer::application::kerberos::{
     KerberosMessage, parse_kerberos_tcp, parse_kerberos_udp,
 };
 use crate::layer::application::ldap::{LdapMessage, probe_ldap};
-use crate::layer::application::modbus::{ModbusMessage, parse_modbus_message};
+use crate::layer::application::modbus::{ModbusMessage, probe_modbus};
 use crate::layer::application::mqtt::{MqttMessage, probe_mqtt};
 use crate::layer::application::nat_pmp::{NatPmpMessage, parse_nat_pmp};
 use crate::layer::application::nntp::{NntpMessage, probe_nntp};
@@ -39,7 +39,7 @@ use crate::layer::application::rtp::{RtpHeader, parse_rtp};
 use crate::layer::application::sip::{SipMessage, parse_sip};
 use crate::layer::application::smb1::{Smb1Header, probe_smb1};
 use crate::layer::application::smb2::{Smb2Header, probe_smb2};
-use crate::layer::application::smtp::{SmtpMessage, parse_smtp};
+use crate::layer::application::smtp::{SmtpMessage, probe_smtp};
 use crate::layer::application::snmp::{SnmpMessage, parse_snmp_message};
 use crate::layer::application::ssdp::{SsdpMessage, parse_ssdp};
 use crate::layer::application::ssh::{SshBanner, SshKexInit, parse_ssh_kex_init, probe_ssh_banner};
