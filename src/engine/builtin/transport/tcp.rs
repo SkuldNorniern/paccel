@@ -77,7 +77,7 @@ fn classify_tcp_app_by_port(
         return;
     }
     if source_port == TCP_PORT_IMAP || destination_port == TCP_PORT_IMAP {
-        parsed.imap = parse_imap_message(payload).ok();
+        parsed.imap = probe_imap(payload).ok();
         return;
     }
     if source_port == TCP_PORT_BGP || destination_port == TCP_PORT_BGP {
@@ -89,7 +89,7 @@ fn classify_tcp_app_by_port(
             || source_port == TCP_PORT_LDAPS
             || destination_port == TCP_PORT_LDAPS)
     {
-        parsed.ldap = parse_ldap_message(payload).ok();
+        parsed.ldap = probe_ldap(payload).ok();
     }
     if parsed.bgp.is_none()
         && parsed.ldap.is_none()
