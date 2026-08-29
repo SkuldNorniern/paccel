@@ -1,6 +1,6 @@
 use std::str::from_utf8;
 
-use crate::layer::LayerError;
+use crate::layer::{Layer, LayerError, ParseError, ProbeResult};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NntpMessage {
@@ -33,6 +33,34 @@ pub fn parse_nntp(payload: &[u8]) -> Result<NntpMessage, LayerError> {
     })
 }
 
+/// Probes an NNTP line. No magic bytes exist for NNTP - command/response
+/// lines are ASCII text, so binary bytes are a real NoMatch signal.
+/// `parse_nntp` treats a buffer with no line terminator as a complete line
+/// (tested, intentional - see `parses_command_without_trailing_crlf`), so
+/// this doesn't invent an Incomplete case beyond an empty buffer.
+#[must_use]
+pub fn probe_nntp(payload: &[u8]) -> ProbeResult<NntpMessage> {
+    if payload.is_empty() {
+        return ProbeResult::Incomplete {
+            needed: None,
+            available: 0,
+        };
+    }
+    let line_end = find_line_end(payload).unwrap_or(payload.len());
+    if line_end > 0 && from_utf8(&payload[..line_end]).is_err() {
+        return ProbeResult::NoMatch;
+    }
+    match parse_nntp(payload) {
+        Ok(message) => ProbeResult::Match(message),
+        Err(error) => ProbeResult::Malformed(ParseError::from_layer_error(
+            &error,
+            Layer::Application,
+            Some("nntp"),
+            0,
+        )),
+    }
+}
+
 fn parse_response_code(line: &str) -> Option<u16> {
     let code_str = line.get(..3)?;
     if !code_str.bytes().all(|byte| byte.is_ascii_digit()) {
@@ -56,8 +84,8 @@ fn find_line_end(payload: &[u8]) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::{NntpMessage, parse_nntp};
-    use crate::layer::LayerError;
+    use super::{NntpMessage, parse_nntp, probe_nntp};
+    use crate::layer::{LayerError, ProbeResult};
 
     #[test]
     fn parses_greeting_response() {
@@ -111,6 +139,41 @@ mod tests {
         assert!(matches!(
             parse_nntp(b"\r\n"),
             Err(LayerError::InvalidLength)
+        ));
+    }
+
+    #[test]
+    fn probe_matches_a_response() {
+        assert!(matches!(
+            probe_nntp(b"200 Leafnode NNTP Daemon\r\n"),
+            ProbeResult::Match(_)
+        ));
+    }
+
+    #[test]
+    fn probe_reports_incomplete_for_an_empty_buffer() {
+        assert_eq!(
+            probe_nntp(b""),
+            ProbeResult::Incomplete {
+                needed: None,
+                available: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn probe_reports_no_match_for_binary_data() {
+        assert_eq!(
+            probe_nntp(&[0xff, 0x00, 0x01, 0x02, b'\n']),
+            ProbeResult::NoMatch
+        );
+    }
+
+    #[test]
+    fn probe_reports_malformed_for_a_bad_verb() {
+        assert!(matches!(
+            probe_nntp(b"1x2 nope\r\n"),
+            ProbeResult::Malformed(_)
         ));
     }
 }

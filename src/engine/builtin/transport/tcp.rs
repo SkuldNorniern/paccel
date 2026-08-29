@@ -57,7 +57,7 @@ fn classify_tcp_app_by_port(
     parsed: &mut TransportParse,
 ) {
     if source_port == TCP_PORT_FTP || destination_port == TCP_PORT_FTP {
-        parsed.ftp = parse_ftp(payload).ok();
+        parsed.ftp = probe_ftp(payload).ok();
         return;
     }
     if source_port == TCP_PORT_SMB2 || destination_port == TCP_PORT_SMB2 {
@@ -98,7 +98,7 @@ fn classify_tcp_app_by_port(
             || source_port == TCP_PORT_NNTPS
             || destination_port == TCP_PORT_NNTPS)
     {
-        parsed.nntp = parse_nntp(payload).ok();
+        parsed.nntp = probe_nntp(payload).ok();
     }
     if parsed.bgp.is_none()
         && parsed.ldap.is_none()
