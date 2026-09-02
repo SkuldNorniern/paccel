@@ -92,6 +92,24 @@ impl BuiltinPacketParser {
         Ok(parsed)
     }
 
+    /// Parse into a packet the caller owns, moving nothing.
+    ///
+    /// The other entry points return a `ParsedPacket` by value, which is a
+    /// large struct to move for every packet. A caller in a loop can keep one
+    /// of these and hand it back each time instead.
+    ///
+    /// `out` is reset first, so a reused buffer never carries a field over
+    /// from the packet before it.
+    pub fn parse_into(
+        raw: &[u8],
+        config: ParseConfig,
+        linktype: Option<u16>,
+        out: &mut ParsedPacket,
+    ) -> Result<(), LayerError> {
+        out.reset();
+        Self::parse_l2_with_linktype(raw, config, 0, linktype, out)
+    }
+
     fn parse_l2(
         raw: &[u8],
         config: ParseConfig,
@@ -867,6 +885,85 @@ fn parse_stp(data: &[u8]) -> Result<StpBpdu, LayerError> {
         bridge_id: u64::from_be_bytes(data[17..25].try_into().expect("fixed-length slice")),
         port_id: u16::from_be_bytes([data[25], data[26]]),
     })
+}
+
+#[cfg(test)]
+mod parse_into_tests {
+    use super::*;
+
+    fn ethernet_ipv4(protocol: u8, l4: &[u8]) -> Vec<u8> {
+        let mut frame = vec![0u8; 14];
+        frame[12..14].copy_from_slice(&0x0800u16.to_be_bytes());
+        let total = u16::try_from(20 + l4.len()).expect("test frame fits");
+        let mut ip = vec![0x45, 0, 0, 0, 0, 0, 0x40, 0, 64, protocol, 0, 0];
+        ip[2..4].copy_from_slice(&total.to_be_bytes());
+        ip.extend_from_slice(&[192, 0, 2, 10]);
+        ip.extend_from_slice(&[198, 51, 100, 20]);
+        frame.extend_from_slice(&ip);
+        frame.extend_from_slice(l4);
+        frame
+    }
+
+    #[test]
+    fn parse_into_matches_parsing_by_value() {
+        let mut tcp = vec![0u8; 20];
+        tcp[12] = 5 << 4;
+        let frame = ethernet_ipv4(6, &tcp);
+        let config = ParseConfig::default();
+
+        let owned = BuiltinPacketParser::parse_with_config_and_linktype(&frame, config, Some(1))
+            .expect("parses");
+        let mut into = ParsedPacket::default();
+        BuiltinPacketParser::parse_into(&frame, config, Some(1), &mut into).expect("parses");
+
+        assert_eq!(format!("{owned:?}"), format!("{into:?}"));
+    }
+
+    /// The whole point of the API is reusing one buffer, so a field set by one
+    /// packet must not still be there for the next.
+    #[test]
+    fn a_reused_buffer_carries_nothing_over() {
+        let config = ParseConfig::default();
+        let mut buffer = ParsedPacket::default();
+
+        let mut tcp = vec![0u8; 20];
+        tcp[12] = 5 << 4;
+        BuiltinPacketParser::parse_into(&ethernet_ipv4(6, &tcp), config, Some(1), &mut buffer)
+            .expect("parses");
+        assert!(buffer.transport.is_some(), "the TCP packet set a transport");
+
+        // ICMP next: it has no transport segment, so the previous one must go.
+        BuiltinPacketParser::parse_into(
+            &ethernet_ipv4(1, &[8, 0, 0, 0, 0, 0, 0, 0]),
+            config,
+            Some(1),
+            &mut buffer,
+        )
+        .expect("parses");
+
+        assert!(buffer.icmp.is_some(), "the ICMP header was read");
+        assert!(
+            buffer.transport.is_none(),
+            "the previous packet's transport segment is still there"
+        );
+    }
+
+    #[test]
+    fn reset_keeps_the_capacity_it_has_grown() {
+        let mut packet = ParsedPacket::default();
+        packet.warnings.push(ParseWarning {
+            code: ParseWarningCode::Ipv4Truncated,
+            protocol: ParseWarningProtocol::Network,
+            offset: 0,
+            message: "test",
+        });
+        let capacity = packet.warnings.capacity();
+
+        packet.reset();
+
+        assert!(packet.warnings.is_empty());
+        assert_eq!(packet.warnings.capacity(), capacity, "allocation is reused");
+    }
 }
 
 #[cfg(test)]
