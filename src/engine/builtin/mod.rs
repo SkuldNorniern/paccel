@@ -52,7 +52,7 @@ use self::link::{
     parse_arp_packet, parse_link_with_linktype, parse_mpls_stack, parse_pppoe_minimal,
 };
 use self::network::{parse_ipv4_header, parse_ipv6_header, resolve_ipv6_transport};
-use self::transport::parse_transport;
+use self::transport::{TransportParse, parse_transport};
 
 pub use self::network::Ipv6FragmentHeader;
 
@@ -89,6 +89,38 @@ impl BuiltinPacketParser {
 
     fn parse_l2(raw: &[u8], config: ParseConfig, depth: usize) -> Result<ParsedPacket, LayerError> {
         Self::parse_l2_with_linktype(raw, config, depth, None)
+    }
+
+    /// Parse the transport header, or in permissive mode say why there is none.
+    ///
+    /// A capture taken with a short snaplen keeps the addresses and drops the
+    /// ports, and headers-only captures are a deliberate practice rather than
+    /// corruption. `Permissive` promises to return what was parsed, so a
+    /// transport header that did not survive leaves `transport` as `None` with
+    /// a warning, exactly as a truncated network header already does. `Strict`
+    /// keeps failing.
+    fn transport_or_warn(
+        parsed: &mut ParsedPacket,
+        protocol: u8,
+        l4_bytes: &[u8],
+        config: ParseConfig,
+        offset: usize,
+    ) -> Result<Option<TransportParse>, LayerError> {
+        match parse_transport(protocol, l4_bytes, config) {
+            Ok(transport) => Ok(Some(transport)),
+            Err(error) if config.mode == ParseMode::Permissive => {
+                parsed.warnings.push(ParseWarning {
+                    code: ParseWarningCode::TransportTruncated,
+                    protocol: ParseWarningProtocol::Transport,
+                    offset,
+                    message: "transport header did not survive the capture; \
+                              addresses are still valid",
+                });
+                let _ = error;
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     fn parse_l2_with_linktype(
@@ -268,7 +300,17 @@ impl BuiltinPacketParser {
                 if ipv4.fragment_offset == 0 {
                     let l4_end = total_len.min(l3_bytes.len());
                     let l4_bytes = &l3_bytes[ip_header_len..l4_end];
-                    let transport_parse = parse_transport(ipv4.protocol, l4_bytes, config)?;
+                    let Some(transport_parse) = Self::transport_or_warn(
+                        &mut parsed,
+                        ipv4.protocol,
+                        l4_bytes,
+                        config,
+                        l3_offset + ip_header_len,
+                    )?
+                    else {
+                        parsed.ipv4 = Some(ipv4);
+                        return Ok(parsed);
+                    };
                     apply_transport_parse(&mut parsed, transport_parse);
                     parsed.transport_segment_offset = Some(l3_offset + ip_header_len);
                     recurse_transport_tunnel(
@@ -342,7 +384,17 @@ impl BuiltinPacketParser {
 
                 if !state.non_initial_fragment && !state.depth_limit_hit {
                     let l4_bytes = &ipv6_payload[state.l4_offset..];
-                    let transport_parse = parse_transport(state.next_header, l4_bytes, config)?;
+                    let Some(transport_parse) = Self::transport_or_warn(
+                        &mut parsed,
+                        state.next_header,
+                        l4_bytes,
+                        config,
+                        l3_offset + state.l4_offset,
+                    )?
+                    else {
+                        parsed.ipv6 = Some(ipv6);
+                        return Ok(parsed);
+                    };
                     apply_transport_parse(&mut parsed, transport_parse);
                     parsed.transport_segment_offset = Some(l3_offset + state.l4_offset);
                     recurse_transport_tunnel(
