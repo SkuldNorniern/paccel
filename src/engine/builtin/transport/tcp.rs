@@ -17,34 +17,32 @@ const TCP_PORT_SUBMISSION: u16 = 587;
 const TCP_PORT_SMB2: u16 = 445;
 
 pub(super) fn classify_tcp_application(
-    parsed: &mut ParsedPacket,
+    app: &mut ApplicationLayers,
     source_port: u16,
     destination_port: u16,
     payload: &[u8],
 ) {
     let is_tls_handshake_record = payload.len() >= 5 && payload[0] == 22;
-    parsed.tls = is_tls_handshake_record
+    app.tls = is_tls_handshake_record
         .then(|| probe_tls_client_hello(payload).ok())
         .flatten();
-    if parsed.tls.is_none() && is_tls_handshake_record {
-        parsed.tls_server_hello = parse_tls_server_hello(payload).ok();
+    if app.tls.is_none() && is_tls_handshake_record {
+        app.tls_server_hello = parse_tls_server_hello(payload).ok();
     }
-    if parsed.tls.is_none() && parsed.tls_server_hello.is_none() {
-        parsed.http = probe_http(payload).ok();
-        if parsed.http.is_none()
-            && (source_port == UDP_PORT_SIP || destination_port == UDP_PORT_SIP)
-        {
-            parsed.sip = parse_sip(payload).ok();
+    if app.tls.is_none() && app.tls_server_hello.is_none() {
+        app.http = probe_http(payload).ok();
+        if app.http.is_none() && (source_port == UDP_PORT_SIP || destination_port == UDP_PORT_SIP) {
+            app.sip = parse_sip(payload).ok();
         }
-        if parsed.http.is_none() && parsed.sip.is_none() {
+        if app.http.is_none() && app.sip.is_none() {
             if !payload.is_empty() {
-                parsed.ssh = probe_ssh_banner(payload).ok();
+                app.ssh = probe_ssh_banner(payload).ok();
             }
-            if parsed.ssh.is_none() {
-                parsed.ssh_kex_init = parse_ssh_kex_init(payload).ok();
+            if app.ssh.is_none() {
+                app.ssh_kex_init = parse_ssh_kex_init(payload).ok();
             }
-            if parsed.ssh.is_none() && parsed.ssh_kex_init.is_none() {
-                classify_tcp_app_by_port(source_port, destination_port, payload, parsed);
+            if app.ssh.is_none() && app.ssh_kex_init.is_none() {
+                classify_tcp_app_by_port(source_port, destination_port, payload, app);
             }
         }
     }
@@ -54,14 +52,14 @@ fn classify_tcp_app_by_port(
     source_port: u16,
     destination_port: u16,
     payload: &[u8],
-    parsed: &mut ParsedPacket,
+    app: &mut ApplicationLayers,
 ) {
     if source_port == TCP_PORT_FTP || destination_port == TCP_PORT_FTP {
-        parsed.ftp = probe_ftp(payload).ok();
+        app.ftp = probe_ftp(payload).ok();
         return;
     }
     if source_port == TCP_PORT_SMB2 || destination_port == TCP_PORT_SMB2 {
-        classify_smb(payload, parsed);
+        classify_smb(payload, app);
         return;
     }
     if source_port == TCP_PORT_SMTP
@@ -69,67 +67,67 @@ fn classify_tcp_app_by_port(
         || source_port == TCP_PORT_SUBMISSION
         || destination_port == TCP_PORT_SUBMISSION
     {
-        parsed.smtp = probe_smtp(payload).ok();
+        app.smtp = probe_smtp(payload).ok();
         return;
     }
     if source_port == TCP_PORT_TELNET || destination_port == TCP_PORT_TELNET {
-        parsed.telnet = parse_telnet_command(payload).ok();
+        app.telnet = parse_telnet_command(payload).ok();
         return;
     }
     if source_port == TCP_PORT_IMAP || destination_port == TCP_PORT_IMAP {
-        parsed.imap = probe_imap(payload).ok();
+        app.imap = probe_imap(payload).ok();
         return;
     }
     if source_port == TCP_PORT_BGP || destination_port == TCP_PORT_BGP {
-        parsed.bgp = probe_bgp(payload).ok();
+        app.bgp = probe_bgp(payload).ok();
     }
-    if parsed.bgp.is_none()
+    if app.bgp.is_none()
         && (source_port == TCP_PORT_LDAP
             || destination_port == TCP_PORT_LDAP
             || source_port == TCP_PORT_LDAPS
             || destination_port == TCP_PORT_LDAPS)
     {
-        parsed.ldap = probe_ldap(payload).ok();
+        app.ldap = probe_ldap(payload).ok();
     }
-    if parsed.bgp.is_none()
-        && parsed.ldap.is_none()
+    if app.bgp.is_none()
+        && app.ldap.is_none()
         && (source_port == TCP_PORT_NNTP
             || destination_port == TCP_PORT_NNTP
             || source_port == TCP_PORT_NNTPS
             || destination_port == TCP_PORT_NNTPS)
     {
-        parsed.nntp = probe_nntp(payload).ok();
+        app.nntp = probe_nntp(payload).ok();
     }
-    if parsed.bgp.is_none()
-        && parsed.ldap.is_none()
-        && parsed.nntp.is_none()
+    if app.bgp.is_none()
+        && app.ldap.is_none()
+        && app.nntp.is_none()
         && (source_port == TCP_PORT_MQTT || destination_port == TCP_PORT_MQTT)
     {
-        parsed.mqtt = probe_mqtt(payload).ok();
+        app.mqtt = probe_mqtt(payload).ok();
     }
-    if parsed.bgp.is_none()
-        && parsed.ldap.is_none()
-        && parsed.nntp.is_none()
-        && parsed.mqtt.is_none()
+    if app.bgp.is_none()
+        && app.ldap.is_none()
+        && app.nntp.is_none()
+        && app.mqtt.is_none()
         && (source_port == TCP_PORT_MODBUS || destination_port == TCP_PORT_MODBUS)
     {
-        parsed.modbus = probe_modbus(payload).ok();
+        app.modbus = probe_modbus(payload).ok();
     }
-    if parsed.bgp.is_none()
-        && parsed.ldap.is_none()
-        && parsed.nntp.is_none()
-        && parsed.mqtt.is_none()
-        && parsed.modbus.is_none()
+    if app.bgp.is_none()
+        && app.ldap.is_none()
+        && app.nntp.is_none()
+        && app.mqtt.is_none()
+        && app.modbus.is_none()
         && (source_port == PORT_KERBEROS || destination_port == PORT_KERBEROS)
     {
-        parsed.kerberos = parse_kerberos_tcp(payload).ok();
+        app.kerberos = parse_kerberos_tcp(payload).ok();
     }
 }
 
-fn classify_smb(payload: &[u8], parsed: &mut ParsedPacket) {
-    parsed.smb2 = probe_smb2(payload).ok();
-    if parsed.smb2.is_none() {
-        parsed.smb1 = probe_smb1(payload).ok();
+fn classify_smb(payload: &[u8], app: &mut ApplicationLayers) {
+    app.smb2 = probe_smb2(payload).ok();
+    if app.smb2.is_none() {
+        app.smb1 = probe_smb1(payload).ok();
     }
 }
 

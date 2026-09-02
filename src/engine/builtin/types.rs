@@ -495,41 +495,16 @@ pub struct FlowKey {
     pub protocol: u8,
 }
 
+/// The application-layer results of a parse.
+///
+/// Held behind a pointer on [`ParsedPacket`] rather than inline. These are 39
+/// of the packet's 75 fields and two thirds of its bytes, and they are only
+/// ever filled when the caller asks for [`StopLayer::Application`]. Inline,
+/// every caller paid to clear and move them: a parse that stops at the
+/// transport layer spent a third of its time on fields it never touched.
 #[derive(Debug, Default)]
-pub struct ParsedPacket {
-    pub ethernet: Option<EthernetFrame>,
-    pub radiotap: Option<RadiotapHeader>,
-    pub dot11: Option<Dot11Frame>,
-    pub arp: Option<ArpPacket>,
-    pub ipv4: Option<Ipv4Header>,
-    pub ipv6: Option<Ipv6Header>,
-    pub ipv6_fragment: Option<Ipv6FragmentHeader>,
-    pub transport: Option<TransportSegment>,
-    pub icmp: Option<IcmpHeader>,
-    pub icmpv6: Option<Icmpv6Header>,
-    pub ndp: Option<NdpMessage>,
-    pub igmp: Option<IgmpInfo>,
-    pub ospf: Option<OspfHeader>,
-    pub eigrp: Option<EigrpHeader>,
-    pub pim: Option<PimHeader>,
-    pub vrrp: Option<VrrpHeader>,
-    pub sctp: Option<SctpInfo>,
-    pub tcp_options: Option<TcpOptionsParsed>,
-    pub gre: Option<GreInfo>,
-    pub pppoe: Option<PppoeInfo>,
-    pub vxlan: Option<VxlanInfo>,
-    pub geneve: Option<GeneveInfo>,
-    pub l2tp: Option<L2tpInfo>,
-    pub ah: Option<AhInfo>,
-    pub esp: Option<EspInfo>,
-    pub wireguard: Option<WireGuardInfo>,
-    pub openvpn: Option<OpenVpnInfo>,
+pub struct ApplicationLayers {
     pub dnp3: Option<Dnp3Message>,
-    pub mpls: Option<MplsInfo>,
-    pub lldp: Option<LldpInfo>,
-    pub lacp: Option<LacpHeader>,
-    pub stp: Option<StpBpdu>,
-    pub cdp: Option<CdpHeader>,
     pub dns: Option<DnsMessage>,
     pub dhcp: Option<DhcpMessage>,
     pub dhcp6: Option<Dhcp6Message>,
@@ -568,6 +543,42 @@ pub struct ParsedPacket {
     pub rpc: Option<RpcMessage>,
     pub syslog: Option<SyslogMessage>,
     pub hsrp: Option<HsrpHeader>,
+}
+
+#[derive(Debug, Default)]
+pub struct ParsedPacket {
+    pub ethernet: Option<EthernetFrame>,
+    pub radiotap: Option<RadiotapHeader>,
+    pub dot11: Option<Dot11Frame>,
+    pub arp: Option<ArpPacket>,
+    pub ipv4: Option<Ipv4Header>,
+    pub ipv6: Option<Ipv6Header>,
+    pub ipv6_fragment: Option<Ipv6FragmentHeader>,
+    pub transport: Option<TransportSegment>,
+    pub icmp: Option<IcmpHeader>,
+    pub icmpv6: Option<Icmpv6Header>,
+    pub ndp: Option<NdpMessage>,
+    pub igmp: Option<IgmpInfo>,
+    pub ospf: Option<OspfHeader>,
+    pub eigrp: Option<EigrpHeader>,
+    pub pim: Option<PimHeader>,
+    pub vrrp: Option<VrrpHeader>,
+    pub sctp: Option<SctpInfo>,
+    pub tcp_options: Option<TcpOptionsParsed>,
+    pub gre: Option<GreInfo>,
+    pub pppoe: Option<PppoeInfo>,
+    pub vxlan: Option<VxlanInfo>,
+    pub geneve: Option<GeneveInfo>,
+    pub l2tp: Option<L2tpInfo>,
+    pub ah: Option<AhInfo>,
+    pub esp: Option<EspInfo>,
+    pub wireguard: Option<WireGuardInfo>,
+    pub openvpn: Option<OpenVpnInfo>,
+    pub mpls: Option<MplsInfo>,
+    pub lldp: Option<LldpInfo>,
+    pub lacp: Option<LacpHeader>,
+    pub stp: Option<StpBpdu>,
+    pub cdp: Option<CdpHeader>,
     pub udp_hints: Vec<UdpAppHint>,
     pub warnings: Vec<ParseWarning>,
     pub inner: Option<Box<ParsedPacket>>,
@@ -575,6 +586,12 @@ pub struct ParsedPacket {
     /// `transport_segment_offset + 8`. Nested offsets are relative to the inner
     /// packet's buffer.
     pub transport_segment_offset: Option<usize>,
+    /// What the parse found above the transport layer, if it looked and found
+    /// anything. Allocated on first use, so a parse that stops below the
+    /// application layer never allocates at all.
+    ///
+    /// The per-protocol accessors, such as [`Self::dns`], read through this.
+    pub application: Option<Box<ApplicationLayers>>,
 }
 
 /// Application protocol returned by [`ParsedPacket::application`]. Protocols
@@ -644,52 +661,295 @@ impl ParsedPacket {
         self.warnings.clear();
     }
 
+    /// The application layer, creating it if this is the first field to be
+    /// filled. Only the parser needs this; readers use the per-protocol
+    /// accessors.
+    pub fn application_mut(&mut self) -> &mut ApplicationLayers {
+        self.application.get_or_insert_with(Box::default)
+    }
+
+    /// The parsed `dnp3` layer, if the packet carried one.
+    #[must_use]
+    pub fn dnp3(&self) -> Option<&Dnp3Message> {
+        self.application.as_ref()?.dnp3.as_ref()
+    }
+
+    /// The parsed `dns` layer, if the packet carried one.
+    #[must_use]
+    pub fn dns(&self) -> Option<&DnsMessage> {
+        self.application.as_ref()?.dns.as_ref()
+    }
+
+    /// The parsed `dhcp` layer, if the packet carried one.
+    #[must_use]
+    pub fn dhcp(&self) -> Option<&DhcpMessage> {
+        self.application.as_ref()?.dhcp.as_ref()
+    }
+
+    /// The parsed `dhcp6` layer, if the packet carried one.
+    #[must_use]
+    pub fn dhcp6(&self) -> Option<&Dhcp6Message> {
+        self.application.as_ref()?.dhcp6.as_ref()
+    }
+
+    /// The parsed `tftp` layer, if the packet carried one.
+    #[must_use]
+    pub fn tftp(&self) -> Option<&TftpMessage> {
+        self.application.as_ref()?.tftp.as_ref()
+    }
+
+    /// The parsed `radius` layer, if the packet carried one.
+    #[must_use]
+    pub fn radius(&self) -> Option<&RadiusMessage> {
+        self.application.as_ref()?.radius.as_ref()
+    }
+
+    /// The parsed `snmp` layer, if the packet carried one.
+    #[must_use]
+    pub fn snmp(&self) -> Option<&SnmpMessage> {
+        self.application.as_ref()?.snmp.as_ref()
+    }
+
+    /// The parsed `ntp` layer, if the packet carried one.
+    #[must_use]
+    pub fn ntp(&self) -> Option<&NtpMessage> {
+        self.application.as_ref()?.ntp.as_ref()
+    }
+
+    /// The parsed `tls` layer, if the packet carried one.
+    #[must_use]
+    pub fn tls(&self) -> Option<&TlsClientHello> {
+        self.application.as_ref()?.tls.as_ref()
+    }
+
+    /// The parsed `tls_server_hello` layer, if the packet carried one.
+    #[must_use]
+    pub fn tls_server_hello(&self) -> Option<&TlsServerHello> {
+        self.application.as_ref()?.tls_server_hello.as_ref()
+    }
+
+    /// The parsed `http` layer, if the packet carried one.
+    #[must_use]
+    pub fn http(&self) -> Option<&HttpMessage> {
+        self.application.as_ref()?.http.as_ref()
+    }
+
+    /// The parsed `ssdp` layer, if the packet carried one.
+    #[must_use]
+    pub fn ssdp(&self) -> Option<&SsdpMessage> {
+        self.application.as_ref()?.ssdp.as_ref()
+    }
+
+    /// The parsed `nat_pmp` layer, if the packet carried one.
+    #[must_use]
+    pub fn nat_pmp(&self) -> Option<&NatPmpMessage> {
+        self.application.as_ref()?.nat_pmp.as_ref()
+    }
+
+    /// The parsed `pcp` layer, if the packet carried one.
+    #[must_use]
+    pub fn pcp(&self) -> Option<&PcpHeader> {
+        self.application.as_ref()?.pcp.as_ref()
+    }
+
+    /// The parsed `sip` layer, if the packet carried one.
+    #[must_use]
+    pub fn sip(&self) -> Option<&SipMessage> {
+        self.application.as_ref()?.sip.as_ref()
+    }
+
+    /// The parsed `rtcp` layer, if the packet carried one.
+    #[must_use]
+    pub fn rtcp(&self) -> Option<&RtcpHeader> {
+        self.application.as_ref()?.rtcp.as_ref()
+    }
+
+    /// The parsed `rtp` layer, if the packet carried one.
+    #[must_use]
+    pub fn rtp(&self) -> Option<&RtpHeader> {
+        self.application.as_ref()?.rtp.as_ref()
+    }
+
+    /// The parsed `quic` layer, if the packet carried one.
+    #[must_use]
+    pub fn quic(&self) -> Option<&QuicLongHeader> {
+        self.application.as_ref()?.quic.as_ref()
+    }
+
+    /// The parsed `bgp` layer, if the packet carried one.
+    #[must_use]
+    pub fn bgp(&self) -> Option<&BgpMessage> {
+        self.application.as_ref()?.bgp.as_ref()
+    }
+
+    /// The parsed `ldap` layer, if the packet carried one.
+    #[must_use]
+    pub fn ldap(&self) -> Option<&LdapMessage> {
+        self.application.as_ref()?.ldap.as_ref()
+    }
+
+    /// The parsed `nntp` layer, if the packet carried one.
+    #[must_use]
+    pub fn nntp(&self) -> Option<&NntpMessage> {
+        self.application.as_ref()?.nntp.as_ref()
+    }
+
+    /// The parsed `imap` layer, if the packet carried one.
+    #[must_use]
+    pub fn imap(&self) -> Option<&ImapMessage> {
+        self.application.as_ref()?.imap.as_ref()
+    }
+
+    /// The parsed `ftp` layer, if the packet carried one.
+    #[must_use]
+    pub fn ftp(&self) -> Option<&FtpMessage> {
+        self.application.as_ref()?.ftp.as_ref()
+    }
+
+    /// The parsed `smb1` layer, if the packet carried one.
+    #[must_use]
+    pub fn smb1(&self) -> Option<&Smb1Header> {
+        self.application.as_ref()?.smb1.as_ref()
+    }
+
+    /// The parsed `smb2` layer, if the packet carried one.
+    #[must_use]
+    pub fn smb2(&self) -> Option<&Smb2Header> {
+        self.application.as_ref()?.smb2.as_ref()
+    }
+
+    /// The parsed `smtp` layer, if the packet carried one.
+    #[must_use]
+    pub fn smtp(&self) -> Option<&SmtpMessage> {
+        self.application.as_ref()?.smtp.as_ref()
+    }
+
+    /// The parsed `telnet` layer, if the packet carried one.
+    #[must_use]
+    pub fn telnet(&self) -> Option<&TelnetCommand> {
+        self.application.as_ref()?.telnet.as_ref()
+    }
+
+    /// The parsed `mqtt` layer, if the packet carried one.
+    #[must_use]
+    pub fn mqtt(&self) -> Option<&MqttMessage> {
+        self.application.as_ref()?.mqtt.as_ref()
+    }
+
+    /// The parsed `modbus` layer, if the packet carried one.
+    #[must_use]
+    pub fn modbus(&self) -> Option<&ModbusMessage> {
+        self.application.as_ref()?.modbus.as_ref()
+    }
+
+    /// The parsed `ssh` layer, if the packet carried one.
+    #[must_use]
+    pub fn ssh(&self) -> Option<&SshBanner> {
+        self.application.as_ref()?.ssh.as_ref()
+    }
+
+    /// The parsed `ssh_kex_init` layer, if the packet carried one.
+    #[must_use]
+    pub fn ssh_kex_init(&self) -> Option<&SshKexInit> {
+        self.application.as_ref()?.ssh_kex_init.as_ref()
+    }
+
+    /// The parsed `coap` layer, if the packet carried one.
+    #[must_use]
+    pub fn coap(&self) -> Option<&CoapMessage> {
+        self.application.as_ref()?.coap.as_ref()
+    }
+
+    /// The parsed `kerberos` layer, if the packet carried one.
+    #[must_use]
+    pub fn kerberos(&self) -> Option<&KerberosMessage> {
+        self.application.as_ref()?.kerberos.as_ref()
+    }
+
+    /// The parsed `stun` layer, if the packet carried one.
+    #[must_use]
+    pub fn stun(&self) -> Option<&StunMessage> {
+        self.application.as_ref()?.stun.as_ref()
+    }
+
+    /// The parsed `rip` layer, if the packet carried one.
+    #[must_use]
+    pub fn rip(&self) -> Option<&RipHeader> {
+        self.application.as_ref()?.rip.as_ref()
+    }
+
+    /// The parsed `isakmp` layer, if the packet carried one.
+    #[must_use]
+    pub fn isakmp(&self) -> Option<&IsakmpHeader> {
+        self.application.as_ref()?.isakmp.as_ref()
+    }
+
+    /// The parsed `rpc` layer, if the packet carried one.
+    #[must_use]
+    pub fn rpc(&self) -> Option<&RpcMessage> {
+        self.application.as_ref()?.rpc.as_ref()
+    }
+
+    /// The parsed `syslog` layer, if the packet carried one.
+    #[must_use]
+    pub fn syslog(&self) -> Option<&SyslogMessage> {
+        self.application.as_ref()?.syslog.as_ref()
+    }
+
+    /// The parsed `hsrp` layer, if the packet carried one.
+    #[must_use]
+    pub fn hsrp(&self) -> Option<&HsrpHeader> {
+        self.application.as_ref()?.hsrp.as_ref()
+    }
+
     /// Returns the first populated application field in declaration order.
     #[must_use]
-    pub fn application(&self) -> Option<ApplicationLayer<'_>> {
-        None.or_else(|| self.dnp3.as_ref().map(ApplicationLayer::Dnp3))
-            .or_else(|| self.dns.as_ref().map(ApplicationLayer::Dns))
-            .or_else(|| self.dhcp.as_ref().map(ApplicationLayer::Dhcp))
-            .or_else(|| self.dhcp6.as_ref().map(ApplicationLayer::Dhcp6))
-            .or_else(|| self.tftp.as_ref().map(ApplicationLayer::Tftp))
-            .or_else(|| self.radius.as_ref().map(ApplicationLayer::Radius))
-            .or_else(|| self.snmp.as_ref().map(ApplicationLayer::Snmp))
-            .or_else(|| self.ntp.as_ref().map(ApplicationLayer::Ntp))
-            .or_else(|| self.tls.as_ref().map(ApplicationLayer::TlsClientHello))
+    pub fn application_layer(&self) -> Option<ApplicationLayer<'_>> {
+        let app = self.application.as_ref()?;
+
+        None.or_else(|| app.dnp3.as_ref().map(ApplicationLayer::Dnp3))
+            .or_else(|| app.dns.as_ref().map(ApplicationLayer::Dns))
+            .or_else(|| app.dhcp.as_ref().map(ApplicationLayer::Dhcp))
+            .or_else(|| app.dhcp6.as_ref().map(ApplicationLayer::Dhcp6))
+            .or_else(|| app.tftp.as_ref().map(ApplicationLayer::Tftp))
+            .or_else(|| app.radius.as_ref().map(ApplicationLayer::Radius))
+            .or_else(|| app.snmp.as_ref().map(ApplicationLayer::Snmp))
+            .or_else(|| app.ntp.as_ref().map(ApplicationLayer::Ntp))
+            .or_else(|| app.tls.as_ref().map(ApplicationLayer::TlsClientHello))
             .or_else(|| {
-                self.tls_server_hello
+                app.tls_server_hello
                     .as_ref()
                     .map(ApplicationLayer::TlsServerHello)
             })
-            .or_else(|| self.http.as_ref().map(ApplicationLayer::Http))
-            .or_else(|| self.ssdp.as_ref().map(ApplicationLayer::Ssdp))
-            .or_else(|| self.nat_pmp.as_ref().map(ApplicationLayer::NatPmp))
-            .or_else(|| self.pcp.as_ref().map(ApplicationLayer::Pcp))
-            .or_else(|| self.sip.as_ref().map(ApplicationLayer::Sip))
-            .or_else(|| self.rtcp.as_ref().map(ApplicationLayer::Rtcp))
-            .or_else(|| self.rtp.as_ref().map(ApplicationLayer::Rtp))
-            .or_else(|| self.quic.as_ref().map(ApplicationLayer::Quic))
-            .or_else(|| self.bgp.as_ref().map(ApplicationLayer::Bgp))
-            .or_else(|| self.ldap.as_ref().map(ApplicationLayer::Ldap))
-            .or_else(|| self.nntp.as_ref().map(ApplicationLayer::Nntp))
-            .or_else(|| self.imap.as_ref().map(ApplicationLayer::Imap))
-            .or_else(|| self.ftp.as_ref().map(ApplicationLayer::Ftp))
-            .or_else(|| self.smb1.as_ref().map(ApplicationLayer::Smb1))
-            .or_else(|| self.smb2.as_ref().map(ApplicationLayer::Smb2))
-            .or_else(|| self.smtp.as_ref().map(ApplicationLayer::Smtp))
-            .or_else(|| self.telnet.as_ref().map(ApplicationLayer::Telnet))
-            .or_else(|| self.mqtt.as_ref().map(ApplicationLayer::Mqtt))
-            .or_else(|| self.modbus.as_ref().map(ApplicationLayer::Modbus))
-            .or_else(|| self.ssh.as_ref().map(ApplicationLayer::Ssh))
-            .or_else(|| self.ssh_kex_init.as_ref().map(ApplicationLayer::SshKexInit))
-            .or_else(|| self.coap.as_ref().map(ApplicationLayer::Coap))
-            .or_else(|| self.kerberos.as_ref().map(ApplicationLayer::Kerberos))
-            .or_else(|| self.stun.as_ref().map(ApplicationLayer::Stun))
-            .or_else(|| self.rip.as_ref().map(ApplicationLayer::Rip))
-            .or_else(|| self.isakmp.as_ref().map(ApplicationLayer::Isakmp))
-            .or_else(|| self.rpc.as_ref().map(ApplicationLayer::Rpc))
-            .or_else(|| self.syslog.as_ref().map(ApplicationLayer::Syslog))
-            .or_else(|| self.hsrp.as_ref().map(ApplicationLayer::Hsrp))
+            .or_else(|| app.http.as_ref().map(ApplicationLayer::Http))
+            .or_else(|| app.ssdp.as_ref().map(ApplicationLayer::Ssdp))
+            .or_else(|| app.nat_pmp.as_ref().map(ApplicationLayer::NatPmp))
+            .or_else(|| app.pcp.as_ref().map(ApplicationLayer::Pcp))
+            .or_else(|| app.sip.as_ref().map(ApplicationLayer::Sip))
+            .or_else(|| app.rtcp.as_ref().map(ApplicationLayer::Rtcp))
+            .or_else(|| app.rtp.as_ref().map(ApplicationLayer::Rtp))
+            .or_else(|| app.quic.as_ref().map(ApplicationLayer::Quic))
+            .or_else(|| app.bgp.as_ref().map(ApplicationLayer::Bgp))
+            .or_else(|| app.ldap.as_ref().map(ApplicationLayer::Ldap))
+            .or_else(|| app.nntp.as_ref().map(ApplicationLayer::Nntp))
+            .or_else(|| app.imap.as_ref().map(ApplicationLayer::Imap))
+            .or_else(|| app.ftp.as_ref().map(ApplicationLayer::Ftp))
+            .or_else(|| app.smb1.as_ref().map(ApplicationLayer::Smb1))
+            .or_else(|| app.smb2.as_ref().map(ApplicationLayer::Smb2))
+            .or_else(|| app.smtp.as_ref().map(ApplicationLayer::Smtp))
+            .or_else(|| app.telnet.as_ref().map(ApplicationLayer::Telnet))
+            .or_else(|| app.mqtt.as_ref().map(ApplicationLayer::Mqtt))
+            .or_else(|| app.modbus.as_ref().map(ApplicationLayer::Modbus))
+            .or_else(|| app.ssh.as_ref().map(ApplicationLayer::Ssh))
+            .or_else(|| app.ssh_kex_init.as_ref().map(ApplicationLayer::SshKexInit))
+            .or_else(|| app.coap.as_ref().map(ApplicationLayer::Coap))
+            .or_else(|| app.kerberos.as_ref().map(ApplicationLayer::Kerberos))
+            .or_else(|| app.stun.as_ref().map(ApplicationLayer::Stun))
+            .or_else(|| app.rip.as_ref().map(ApplicationLayer::Rip))
+            .or_else(|| app.isakmp.as_ref().map(ApplicationLayer::Isakmp))
+            .or_else(|| app.rpc.as_ref().map(ApplicationLayer::Rpc))
+            .or_else(|| app.syslog.as_ref().map(ApplicationLayer::Syslog))
+            .or_else(|| app.hsrp.as_ref().map(ApplicationLayer::Hsrp))
     }
 
     /// Alias for [`Self::innermost_flow_key`]. For tunneled packets, prefer the

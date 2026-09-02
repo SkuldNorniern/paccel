@@ -197,8 +197,7 @@ fn paccel_agrees_with_tshark_on_fixtures() {
             }
 
             let qname = parsed
-                .dns
-                .as_ref()
+                .dns()
                 .and_then(|d| d.questions.first())
                 .map(|q| q.qname.clone());
             compare("dns.qry.name", name, idx, qname, &row.dns_qname);

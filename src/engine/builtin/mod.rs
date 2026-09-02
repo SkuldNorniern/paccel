@@ -57,11 +57,11 @@ use self::transport::parse_transport;
 pub use self::network::Ipv6FragmentHeader;
 
 pub use self::types::{
-    AhInfo, ApplicationLayer, EspInfo, EthernetFrame, FlowKey, GeneveInfo, GreInfo, IgmpInfo,
-    L2tpInfo, LldpInfo, LldpTlv, MplsInfo, MplsLabel, OpenVpnInfo, OpenVpnOpcode, ParseConfig,
-    ParseMode, ParseWarning, ParseWarningCode, ParseWarningProtocol, ParsedPacket, PppoeInfo,
-    SctpChunk, SctpInfo, StopLayer, StpBpdu, TcpOptionsParsed, TransportSegment, UdpAppHint,
-    VxlanInfo, WireGuardInfo, WireGuardMessageType,
+    AhInfo, ApplicationLayer, ApplicationLayers, EspInfo, EthernetFrame, FlowKey, GeneveInfo,
+    GreInfo, IgmpInfo, L2tpInfo, LldpInfo, LldpTlv, MplsInfo, MplsLabel, OpenVpnInfo,
+    OpenVpnOpcode, ParseConfig, ParseMode, ParseWarning, ParseWarningCode, ParseWarningProtocol,
+    ParsedPacket, PppoeInfo, SctpChunk, SctpInfo, StopLayer, StpBpdu, TcpOptionsParsed,
+    TransportSegment, UdpAppHint, VxlanInfo, WireGuardInfo, WireGuardMessageType,
 };
 
 pub struct BuiltinPacketParser;
