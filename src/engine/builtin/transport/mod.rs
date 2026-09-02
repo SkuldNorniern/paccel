@@ -1584,10 +1584,35 @@ mod tests {
         assert_eq!(gre.header_len, 12);
     }
 
+    /// A truncated GRE header is a transport header that did not survive the
+    /// capture. Strict still refuses it; permissive keeps the addresses it did
+    /// read and says why there is no transport, which is what permissive means
+    /// everywhere else.
     #[test]
-    fn gre_truncated_checksum_header_errors() {
+    fn gre_truncated_checksum_header_is_strict_only() {
+        use crate::engine::builtin::types::{ParseConfig, ParseMode, ParseWarningCode};
+
         let frame = build_ethernet_ipv4_l4_frame(47, &[0x80, 0x00, 0x08, 0x00]);
-        assert!(BuiltinPacketParser::parse(&frame).is_err());
+
+        let strict = ParseConfig {
+            mode: ParseMode::Strict,
+            ..ParseConfig::default()
+        };
+        assert!(BuiltinPacketParser::parse_with_config(&frame, strict).is_err());
+
+        let parsed = BuiltinPacketParser::parse(&frame).expect("permissive keeps what it read");
+        assert!(parsed.ipv4.is_some(), "the addresses are still valid");
+        assert!(
+            parsed.gre.is_none(),
+            "the header that did not survive is absent"
+        );
+        assert!(
+            parsed
+                .warnings
+                .iter()
+                .any(|w| w.code == ParseWarningCode::TransportTruncated),
+            "and the reason is recorded"
+        );
     }
 
     #[test]

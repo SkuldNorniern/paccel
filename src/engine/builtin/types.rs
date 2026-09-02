@@ -74,11 +74,13 @@ pub enum ParseWarningCode {
     MplsInner,
     MplsLabelDepthLimit,
     TunnelDepthLimit,
+    TransportTruncated,
 }
 
 impl ParseWarningCode {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::TransportTruncated => "transport-truncated",
             Self::Ipv6NonInitialFragment => "ipv6-non-initial-fragment",
             Self::Ipv6ExtensionDepthLimit => "ipv6-ext-depth-limit",
             Self::Ipv6Truncated => "ipv6-truncated",

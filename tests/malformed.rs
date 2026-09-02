@@ -200,13 +200,20 @@ fn udp_length_beyond_capture_is_rejected_only_in_strict_mode() {
 }
 
 #[test]
-fn tcp_max_data_offset_with_short_header_is_rejected() {
+fn tcp_max_data_offset_with_short_header_is_rejected_only_in_strict_mode() {
     let mut bytes = ethernet(0x0800);
     bytes.extend_from_slice(&ipv4_header(5, 40, 6));
     let mut tcp = vec![0; 20];
     tcp[12] = 0xf0;
     bytes.extend_from_slice(&tcp);
-    assert_packet_error(&bytes);
+
+    let parsed = BuiltinPacketParser::parse(&bytes).expect("permissive keeps what it read");
+    assert!(parsed.ipv4.is_some(), "the addresses are still valid");
+    assert!(
+        parsed.transport.is_none(),
+        "the header that did not survive is absent"
+    );
+    assert!(BuiltinPacketParser::parse_with_config(&bytes, strict_config()).is_err());
 }
 
 #[test]
