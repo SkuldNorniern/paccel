@@ -76,7 +76,7 @@ fn parse_frame(frame: &[u8]) {
             if let Some(ipv4) = parsed.ipv4 {
                 println!("ipv4 {} -> {}", ipv4.source, ipv4.destination);
             }
-            if let Some(dns) = parsed.dns {
+            if let Some(dns) = parsed.dns() {
                 println!("dns txid={}", dns.header.transaction_id);
             }
             if !parsed.udp_hints.is_empty() {

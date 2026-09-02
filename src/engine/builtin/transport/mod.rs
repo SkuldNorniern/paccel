@@ -4,7 +4,7 @@ mod udp;
 
 use std::net::Ipv4Addr;
 
-use crate::engine::builtin::types::ParsedPacket;
+use crate::engine::builtin::types::{ApplicationLayers, ParsedPacket};
 use crate::engine::constants::ip_proto;
 use crate::layer::LayerError;
 use crate::layer::application::bgp::probe_bgp;
@@ -93,15 +93,22 @@ pub(super) fn parse_transport(
             parsed.tcp_options = tcp_options;
             if parse_application {
                 let payload = &l4_bytes[header_len..];
-                parsed.dnp3 = ((source_port == DNP3_PORT || destination_port == DNP3_PORT)
+                let dnp3 = ((source_port == DNP3_PORT || destination_port == DNP3_PORT)
                     && payload.starts_with(&[0x05, 0x64]))
                 .then(|| probe_dnp3(payload).ok())
                 .flatten();
-                if parsed.dnp3.is_none() {
+                if dnp3.is_some() {
+                    parsed.application_mut().dnp3 = dnp3;
+                } else {
                     parsed.openvpn =
                         maybe_classify_openvpn_tcp(source_port, destination_port, payload);
                     if parsed.openvpn.is_none() {
-                        classify_tcp_application(parsed, source_port, destination_port, payload);
+                        classify_tcp_application(
+                            parsed.application_mut(),
+                            source_port,
+                            destination_port,
+                            payload,
+                        );
                     }
                 }
             }
@@ -442,7 +449,7 @@ mod tests {
     fn parses_tls_client_hello_from_tcp_payload() {
         let frame = build_ethernet_ipv4_tcp_frame(49152, 8443, &tls_client_hello());
         let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
-        let tls = parsed.tls.as_ref().expect("TLS ClientHello");
+        let tls = parsed.tls().expect("TLS ClientHello");
 
         assert_eq!(tls.server_name.as_deref(), Some("example.com"));
         assert!(tls.alpn.iter().any(|protocol| protocol == "h2"));
@@ -458,7 +465,7 @@ mod tests {
         ];
         let frame = build_ethernet_ipv4_tcp_frame(49_152, 20_000, &payload);
         let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
-        let dnp3 = parsed.dnp3.as_ref().expect("DNP3 should be present");
+        let dnp3 = parsed.dnp3().expect("DNP3 should be present");
 
         assert!(matches!(parsed.transport, Some(TransportSegment::Tcp(_))));
         assert_eq!(dnp3.link_function, Dnp3FunctionCode::UnconfirmedUserData);
@@ -479,7 +486,7 @@ mod tests {
         let frame = build_ethernet_ipv4_tcp_frame(49_152, 20_001, &payload);
         let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
 
-        assert!(parsed.dnp3.is_none());
+        assert!(parsed.dnp3().is_none());
     }
 
     #[test]
@@ -489,8 +496,7 @@ mod tests {
         let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
 
         let (method, target, host) = parsed
-            .http
-            .as_ref()
+            .http()
             .and_then(|message| match message {
                 HttpMessage::Request {
                     method,
@@ -513,8 +519,7 @@ mod tests {
         let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
 
         let status = parsed
-            .http
-            .as_ref()
+            .http()
             .and_then(|message| match message {
                 HttpMessage::Response { status, .. } => Some(*status),
                 HttpMessage::Request { .. } => None,
@@ -527,7 +532,7 @@ mod tests {
     fn rejects_non_http_tcp_payload() {
         let frame = build_ethernet_ipv4_tcp_frame(49152, 80, &[0xde, 0xad, 0xbe, 0xef]);
         let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
-        assert!(parsed.http.is_none());
+        assert!(parsed.http().is_none());
     }
 
     #[test]
@@ -591,7 +596,7 @@ mod tests {
         payload[6] = 10;
         let frame = build_ethernet_ipv4_udp_frame(49_152, 1985, &payload);
         let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
-        let hsrp = parsed.hsrp.as_ref().expect("HSRP header");
+        let hsrp = parsed.hsrp().expect("HSRP header");
 
         assert_eq!(hsrp.version, 0);
         assert_eq!(hsrp.opcode, 0);
@@ -611,8 +616,8 @@ mod tests {
         let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
 
         assert_eq!(
-            parsed.rpc,
-            Some(RpcMessage::Call {
+            parsed.rpc(),
+            Some(&RpcMessage::Call {
                 xid: 0x7b55_8aeb,
                 rpc_version: 2,
                 program: 100_003,
@@ -627,7 +632,7 @@ mod tests {
     fn parses_rip_from_udp_payload() {
         let frame = build_ethernet_ipv4_udp_frame(520, 520, &[1, 1, 0, 0]);
         let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
-        let rip = parsed.rip.as_ref().expect("RIP header");
+        let rip = parsed.rip().expect("RIP header");
 
         assert_eq!(rip.command, 1);
         assert_eq!(rip.version, 1);
@@ -642,7 +647,7 @@ mod tests {
         ];
         let frame = build_ethernet_ipv4_udp_frame(500, 500, &payload);
         let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
-        let isakmp = parsed.isakmp.as_ref().expect("ISAKMP header");
+        let isakmp = parsed.isakmp().expect("ISAKMP header");
 
         assert_eq!(isakmp.initiator_spi, 0x5d48_bfee_b7d5_74da);
         assert_eq!(isakmp.major_version, 2);
@@ -657,8 +662,8 @@ mod tests {
         let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
 
         assert!(matches!(
-            parsed.sip,
-            Some(SipMessage::Request { ref method, .. }) if method == "INVITE"
+            parsed.sip(),
+            Some(SipMessage::Request { method, .. }) if method == "INVITE"
         ));
         assert!(parsed.udp_hints.contains(&UdpAppHint::Sip));
     }
@@ -670,10 +675,10 @@ mod tests {
         let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
 
         assert!(matches!(
-            parsed.sip,
+            parsed.sip(),
             Some(SipMessage::Response { status: 100, .. })
         ));
-        assert!(parsed.http.is_none());
+        assert!(parsed.http().is_none());
     }
 
     #[test]
@@ -683,7 +688,7 @@ mod tests {
         ];
         let frame = build_ethernet_ipv4_udp_frame(27_942, 6000, &payload);
         let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
-        let rtp = parsed.rtp.as_ref().expect("RTP header");
+        let rtp = parsed.rtp().expect("RTP header");
 
         assert_eq!(rtp.sequence_number, 37_595);
         assert_eq!(rtp.timestamp, 160);
@@ -696,7 +701,7 @@ mod tests {
         let payload = [0x81, 0xc8, 0x00, 0x0c, 0x5d, 0x93, 0x15, 0x34];
         let frame = build_ethernet_ipv4_udp_frame(27_943, 6001, &payload);
         let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
-        let rtcp = parsed.rtcp.as_ref().expect("RTCP header");
+        let rtcp = parsed.rtcp().expect("RTCP header");
 
         assert!(parsed.udp_hints.contains(&UdpAppHint::Rtcp));
         assert_eq!(rtcp.packet_type, 200);
@@ -709,7 +714,7 @@ mod tests {
         let payload = b"SSH-2.0-OpenSSH_7.6p1 Ubuntu-4ubuntu0.5\r\n";
         let frame = build_ethernet_ipv4_tcp_frame(49_152, 29_418, payload);
         let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
-        let ssh = parsed.ssh.as_ref().expect("SSH banner");
+        let ssh = parsed.ssh().expect("SSH banner");
 
         assert_eq!(ssh.protocol_version, "2.0");
         assert_eq!(ssh.software_version, "OpenSSH_7.6p1");
@@ -722,8 +727,8 @@ mod tests {
         let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
 
         assert_eq!(
-            parsed.ftp,
-            Some(FtpMessage::Response {
+            parsed.ftp(),
+            Some(&FtpMessage::Response {
                 code: 220,
                 text: "FTP server ready.".to_string(),
             })
@@ -737,8 +742,8 @@ mod tests {
         let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
 
         assert_eq!(
-            parsed.ftp,
-            Some(FtpMessage::Command {
+            parsed.ftp(),
+            Some(&FtpMessage::Command {
                 verb: "USER".to_string(),
                 args: "anonymous".to_string(),
             })
@@ -752,8 +757,8 @@ mod tests {
         let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
 
         assert_eq!(
-            parsed.imap,
-            Some(ImapMessage::Untagged {
+            parsed.imap(),
+            Some(&ImapMessage::Untagged {
                 text: "OK IMAP4rev1 ready".to_string(),
             })
         );
@@ -766,8 +771,8 @@ mod tests {
         let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
 
         assert_eq!(
-            parsed.syslog,
-            Some(SyslogMessage {
+            parsed.syslog(),
+            Some(&SyslogMessage {
                 facility: 23,
                 severity: 5,
             })
@@ -785,7 +790,7 @@ mod tests {
         payload[28..36].copy_from_slice(&1u64.to_le_bytes());
         let frame = build_ethernet_ipv4_tcp_frame(445, 49_152, &payload);
         let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
-        let smb2 = parsed.smb2.as_ref().expect("SMB2 header");
+        let smb2 = parsed.smb2().expect("SMB2 header");
 
         assert_eq!(smb2.command, 0);
         assert!(smb2.is_response);
@@ -803,7 +808,7 @@ mod tests {
         payload[34..36].copy_from_slice(&1u16.to_le_bytes());
         let frame = build_ethernet_ipv4_tcp_frame(49_152, 445, &payload);
         let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
-        let smb1 = parsed.smb1.as_ref().expect("SMB1 header");
+        let smb1 = parsed.smb1().expect("SMB1 header");
 
         assert_eq!(smb1.command, 0x72);
         assert!(!smb1.is_response);
@@ -811,7 +816,7 @@ mod tests {
         assert_eq!(smb1.pid, 0);
         assert_eq!(smb1.uid, 0);
         assert_eq!(smb1.mid, 1);
-        assert!(parsed.smb2.is_none());
+        assert!(parsed.smb2().is_none());
     }
 
     #[test]
@@ -821,8 +826,8 @@ mod tests {
         let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
 
         assert_eq!(
-            parsed.smtp,
-            Some(SmtpMessage::Response {
+            parsed.smtp(),
+            Some(&SmtpMessage::Response {
                 code: 220,
                 text: "mail.example ESMTP ready".to_string(),
             })
@@ -836,8 +841,8 @@ mod tests {
         let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
 
         assert_eq!(
-            parsed.smtp,
-            Some(SmtpMessage::Command {
+            parsed.smtp(),
+            Some(&SmtpMessage::Command {
                 verb: "EHLO".to_string(),
                 args: "client.example".to_string(),
             })
@@ -851,8 +856,8 @@ mod tests {
         let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
 
         assert_eq!(
-            parsed.telnet,
-            Some(TelnetCommand {
+            parsed.telnet(),
+            Some(&TelnetCommand {
                 command: 0xfd,
                 option: 0x03,
             })
@@ -866,7 +871,7 @@ mod tests {
         ];
         let frame = build_ethernet_ipv4_udp_frame(49152, 443, &payload);
         let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
-        let quic = parsed.quic.as_ref().expect("QUIC long header");
+        let quic = parsed.quic().expect("QUIC long header");
 
         assert!(quic.is_initial);
         assert_eq!(quic.version, 1);
@@ -880,7 +885,7 @@ mod tests {
         let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
 
         assert!(parsed.udp_hints.contains(&UdpAppHint::QuicShort));
-        assert!(parsed.quic.is_none());
+        assert!(parsed.quic().is_none());
     }
 
     #[test]
@@ -1012,7 +1017,7 @@ mod tests {
         assert!(parsed.ethernet.is_some());
         assert!(parsed.ipv4.is_some());
         assert!(matches!(parsed.transport, Some(TransportSegment::Udp(_))));
-        assert!(parsed.dns.is_some());
+        assert!(parsed.dns().is_some());
         assert!(parsed.udp_hints.contains(&UdpAppHint::Dns));
     }
 
@@ -1033,7 +1038,7 @@ mod tests {
         )
         .expect("parse should succeed");
 
-        assert!(parsed.dns.is_none());
+        assert!(parsed.dns().is_none());
         assert!(parsed.udp_hints.is_empty());
         assert!(matches!(parsed.transport, Some(TransportSegment::Udp(_))));
         assert_eq!(
@@ -1064,8 +1069,7 @@ mod tests {
         .expect("parse should succeed");
 
         let quic = parsed
-            .quic
-            .as_ref()
+            .quic()
             .expect("QUIC long header should still be structurally parsed at Transport stop");
         assert_eq!(quic.version, 1);
     }
@@ -1100,7 +1104,7 @@ mod tests {
         let frame = build_ethernet_ipv4_udp_frame(12345, 53, &dns_query);
         let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
 
-        assert!(parsed.dns.is_some());
+        assert!(parsed.dns().is_some());
     }
 
     #[test]
@@ -1139,7 +1143,7 @@ mod tests {
         let frame = build_ethernet_ipv4_udp_frame(68, 67, &payload);
         let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
         assert!(parsed.udp_hints.contains(&UdpAppHint::Dhcp));
-        assert_eq!(parsed.dhcp.as_ref().expect("dhcp").message_type, Some(1));
+        assert_eq!(parsed.dhcp().expect("dhcp").message_type, Some(1));
     }
 
     #[test]
@@ -1151,7 +1155,7 @@ mod tests {
         let frame = build_ethernet_ipv6_udp_frame(546, 547, &payload);
         let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
         assert!(parsed.udp_hints.contains(&UdpAppHint::Dhcpv6));
-        let dhcp6 = parsed.dhcp6.as_ref().expect("dhcpv6");
+        let dhcp6 = parsed.dhcp6().expect("dhcpv6");
         assert_eq!(dhcp6.msg_type, 1);
         assert_eq!(dhcp6.transaction_id, 0x10_0874);
     }
@@ -1165,11 +1169,11 @@ mod tests {
 
         assert!(parsed.udp_hints.contains(&UdpAppHint::Ssdp));
         assert!(matches!(
-            parsed.ssdp,
+            parsed.ssdp(),
             Some(SsdpMessage::Request {
-                ref method,
-                ref target,
-                ref version,
+                method,
+                target,
+                version,
                 ..
             }) if method == "M-SEARCH" && target == "*" && version == "HTTP/1.1"
         ));
@@ -1178,10 +1182,10 @@ mod tests {
             build_ethernet_ipv4_udp_frame(1900, 49_152, b"HTTP/1.1 200 OK\r\nST: ssdp:all\r\n\r\n");
         let parsed = BuiltinPacketParser::parse(&response).expect("parse should succeed");
         assert!(matches!(
-            parsed.ssdp,
+            parsed.ssdp(),
             Some(SsdpMessage::Response {
                 status: 200,
-                ref reason,
+                reason,
                 ..
             }) if reason == "OK"
         ));
@@ -1193,21 +1197,21 @@ mod tests {
         let external_address = build_ethernet_ipv4_udp_frame(49_152, 5351, &[0, 0]);
         let parsed = BuiltinPacketParser::parse(&external_address).expect("parse should succeed");
         assert_eq!(
-            parsed.nat_pmp,
-            Some(NatPmpMessage {
+            parsed.nat_pmp(),
+            Some(&NatPmpMessage {
                 version: 0,
                 opcode: 0,
             })
         );
-        assert!(parsed.pcp.is_none());
+        assert!(parsed.pcp().is_none());
         assert!(parsed.udp_hints.contains(&UdpAppHint::NatPmp));
 
         let map_udp = [0, 1, 0, 0, 0xa2, 0xa9, 0, 0, 0, 0, 0x1c, 0x20];
         let frame = build_ethernet_ipv4_udp_frame(49_152, 5351, &map_udp);
         let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
         assert_eq!(
-            parsed.nat_pmp,
-            Some(NatPmpMessage {
+            parsed.nat_pmp(),
+            Some(&NatPmpMessage {
                 version: 0,
                 opcode: 1,
             })
@@ -1225,15 +1229,15 @@ mod tests {
         let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
 
         assert_eq!(
-            parsed.pcp,
-            Some(PcpHeader {
+            parsed.pcp(),
+            Some(&PcpHeader {
                 version: 2,
                 is_response: false,
                 opcode: 0,
                 lifetime: 0,
             })
         );
-        assert!(parsed.nat_pmp.is_none());
+        assert!(parsed.nat_pmp().is_none());
         assert!(parsed.udp_hints.contains(&UdpAppHint::Pcp));
     }
 
@@ -1251,7 +1255,7 @@ mod tests {
 
         let frame = build_ethernet_ipv4_udp_frame(49_152, 1812, &payload);
         let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
-        let radius = parsed.radius.as_ref().expect("RADIUS should be present");
+        let radius = parsed.radius().expect("RADIUS should be present");
         assert_eq!(radius.code, 1);
         assert_eq!(radius.identifier, 103);
         assert!(parsed.udp_hints.contains(&UdpAppHint::Radius));
@@ -1271,7 +1275,7 @@ mod tests {
         let frame = build_ethernet_ipv4_udp_frame(49_152, 161, &payload);
         let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
         assert!(matches!(
-            parsed.snmp,
+            parsed.snmp(),
             Some(SnmpMessage::V3 {
                 msg_id: 821_490_644,
                 msg_max_size: 65_507,
@@ -1291,8 +1295,8 @@ mod tests {
         let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
 
         assert_eq!(
-            parsed.tftp,
-            Some(TftpMessage::ReadRequest {
+            parsed.tftp(),
+            Some(&TftpMessage::ReadRequest {
                 filename: "rfc1350.txt".to_owned(),
                 mode: "octet".to_owned(),
             })
@@ -1301,7 +1305,7 @@ mod tests {
 
         let non_tftp_frame = build_ethernet_ipv4_udp_frame(49152, 1069, payload);
         let non_tftp = BuiltinPacketParser::parse(&non_tftp_frame).expect("parse should succeed");
-        assert!(non_tftp.tftp.is_none());
+        assert!(non_tftp.tftp().is_none());
         assert!(!non_tftp.udp_hints.contains(&UdpAppHint::Tftp));
     }
 
@@ -1316,7 +1320,7 @@ mod tests {
         let frame = build_ethernet_ipv4_udp_frame(123, 123, &payload);
         let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
         assert!(parsed.udp_hints.contains(&UdpAppHint::Ntp));
-        let ntp = parsed.ntp.as_ref().expect("ntp");
+        let ntp = parsed.ntp().expect("ntp");
         assert_eq!(ntp.version, 4);
         assert_eq!(ntp.mode, 3);
         assert_eq!(ntp.reference_ts, 0x0102_0304_0506_0708);
@@ -1350,7 +1354,7 @@ mod tests {
         let frame = build_ethernet_ipv4_udp_frame(5353, 5353, &payload);
         let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
         assert!(parsed.udp_hints.contains(&UdpAppHint::Mdns));
-        assert!(parsed.dns.is_some());
+        assert!(parsed.dns().is_some());
     }
 
     #[test]
@@ -1363,7 +1367,7 @@ mod tests {
         let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
 
         assert!(parsed.udp_hints.contains(&UdpAppHint::Stun));
-        assert!(parsed.stun.is_some());
+        assert!(parsed.stun().is_some());
     }
 
     #[test]
@@ -1375,7 +1379,7 @@ mod tests {
         let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
 
         assert!(parsed.udp_hints.contains(&UdpAppHint::Llmnr));
-        assert!(parsed.dns.is_none());
+        assert!(parsed.dns().is_none());
     }
 
     #[test]
@@ -1387,7 +1391,7 @@ mod tests {
         let parsed = BuiltinPacketParser::parse(&frame).expect("parse should succeed");
 
         assert!(parsed.udp_hints.contains(&UdpAppHint::Nbns));
-        assert!(parsed.dns.is_none());
+        assert!(parsed.dns().is_none());
     }
 
     #[test]

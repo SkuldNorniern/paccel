@@ -169,29 +169,43 @@ pub(super) fn parse_udp_transport(
     parsed.l2tp = l2tp;
     parsed.wireguard = wireguard;
     parsed.openvpn = openvpn;
-    parsed.dns = dns;
-    parsed.dhcp = dhcp;
-    parsed.dhcp6 = dhcp6;
-    parsed.tftp = tftp;
-    parsed.radius = radius;
-    parsed.snmp = snmp;
-    parsed.ntp = ntp;
-    parsed.sip = sip;
-    parsed.rtcp = rtcp;
-    parsed.rtp = rtp;
-    parsed.quic = quic;
-    parsed.coap = coap;
-    parsed.ssdp = ssdp;
-    parsed.nat_pmp = nat_pmp;
-    parsed.pcp = pcp;
-    parsed.kerberos = kerberos;
-    parsed.stun = stun;
-    parsed.rip = rip;
-    parsed.isakmp = isakmp;
-    parsed.rpc = rpc;
-    parsed.syslog = syslog;
-    parsed.hsrp = hsrp;
     parsed.udp_hints = hints;
+
+    // Every probe above sits behind `parse_application`, so each of these is
+    // `None` when the caller stopped lower down. Reaching for the application
+    // layer only here keeps such a parse from allocating one at all.
+    // Parsed even when the caller stopped at the transport layer, because a
+    // QUIC long header carries the connection identity a flow is keyed on. It
+    // is the one application field that survives a transport-only parse, so it
+    // is stored outside the check below.
+    if quic.is_some() {
+        parsed.application_mut().quic = quic;
+    }
+
+    if parse_application {
+        let layers = parsed.application_mut();
+        layers.dns = dns;
+        layers.dhcp = dhcp;
+        layers.dhcp6 = dhcp6;
+        layers.tftp = tftp;
+        layers.radius = radius;
+        layers.snmp = snmp;
+        layers.ntp = ntp;
+        layers.sip = sip;
+        layers.rtcp = rtcp;
+        layers.rtp = rtp;
+        layers.coap = coap;
+        layers.ssdp = ssdp;
+        layers.nat_pmp = nat_pmp;
+        layers.pcp = pcp;
+        layers.kerberos = kerberos;
+        layers.stun = stun;
+        layers.rip = rip;
+        layers.isakmp = isakmp;
+        layers.rpc = rpc;
+        layers.syslog = syslog;
+        layers.hsrp = hsrp;
+    }
     Ok(())
 }
 
