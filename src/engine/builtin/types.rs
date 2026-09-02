@@ -1,4 +1,5 @@
 use std::iter::from_fn;
+use std::mem;
 use std::net::{IpAddr, Ipv4Addr};
 
 use crate::engine::constants::ethertype_name;
@@ -613,6 +614,22 @@ pub enum ApplicationLayer<'a> {
 }
 
 impl ParsedPacket {
+    /// Clear every field, ready for the next packet.
+    ///
+    /// Written as a whole-struct assignment rather than field by field so that
+    /// adding a protocol cannot leave a stale value behind from the packet
+    /// before. The two vectors keep the capacity they have already grown to,
+    /// which is the point of reusing the buffer at all.
+    pub fn reset(&mut self) {
+        let udp_hints = mem::take(&mut self.udp_hints);
+        let warnings = mem::take(&mut self.warnings);
+        *self = ParsedPacket::default();
+        self.udp_hints = udp_hints;
+        self.warnings = warnings;
+        self.udp_hints.clear();
+        self.warnings.clear();
+    }
+
     /// Returns the first populated application field in declaration order.
     #[must_use]
     pub fn application(&self) -> Option<ApplicationLayer<'_>> {
