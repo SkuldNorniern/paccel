@@ -57,7 +57,13 @@ use crate::layer::transport::udp::UdpHeader;
 
 use super::network::Ipv6FragmentHeader;
 
+/// Why a parse could not go further, or went further with a caveat.
+///
+/// Marked non-exhaustive: this enumerates diagnostics, and new ones will be
+/// added as more can go wrong. Match with a wildcard arm so that adding one is
+/// not a breaking change for you.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ParseWarningCode {
     Ipv6NonInitialFragment,
     Ipv6ExtensionDepthLimit,
@@ -102,7 +108,10 @@ impl ParseWarningCode {
     }
 }
 
+/// Which layer a warning came from. Non-exhaustive on the same reasoning as
+/// [`ParseWarningCode`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ParseWarningProtocol {
     Link,
     Network,
