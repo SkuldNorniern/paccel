@@ -113,11 +113,8 @@ impl BuiltinPacketParser {
         config: ParseConfig,
         offset: usize,
     ) -> Result<bool, LayerError> {
-        match parse_transport(protocol, l4_bytes, config) {
-            Ok(transport) => {
-                apply_transport_parse(parsed, transport);
-                Ok(true)
-            }
+        match parse_transport(parsed, protocol, l4_bytes, config) {
+            Ok(()) => Ok(true),
             // Kept out of line: a truncated transport header is the rare case,
             // and leaving the warning construction inline slows every
             // well-formed packet down.
@@ -777,68 +774,6 @@ fn push_inner_warning(
         offset,
         message,
     });
-}
-
-fn apply_transport_parse(parsed: &mut ParsedPacket, transport_parse: transport::TransportParse) {
-    parsed.transport = transport_parse.transport;
-    parsed.icmp = transport_parse.icmp;
-    parsed.icmpv6 = transport_parse.icmpv6;
-    parsed.ndp = transport_parse.ndp;
-    parsed.igmp = transport_parse.igmp;
-    parsed.ospf = transport_parse.ospf;
-    parsed.eigrp = transport_parse.eigrp;
-    parsed.pim = transport_parse.pim;
-    parsed.vrrp = transport_parse.vrrp;
-    parsed.sctp = transport_parse.sctp;
-    parsed.tcp_options = transport_parse.tcp_options;
-    parsed.gre = transport_parse.gre;
-    parsed.vxlan = transport_parse.vxlan;
-    parsed.geneve = transport_parse.geneve;
-    parsed.l2tp = transport_parse.l2tp;
-    parsed.ah = transport_parse.ah;
-    parsed.esp = transport_parse.esp;
-    parsed.wireguard = transport_parse.wireguard;
-    parsed.openvpn = transport_parse.openvpn;
-    parsed.dnp3 = transport_parse.dnp3;
-    parsed.dns = transport_parse.dns;
-    parsed.dhcp = transport_parse.dhcp;
-    parsed.dhcp6 = transport_parse.dhcp6;
-    parsed.tftp = transport_parse.tftp;
-    parsed.radius = transport_parse.radius;
-    parsed.snmp = transport_parse.snmp;
-    parsed.ntp = transport_parse.ntp;
-    parsed.tls = transport_parse.tls;
-    parsed.tls_server_hello = transport_parse.tls_server_hello;
-    parsed.http = transport_parse.http;
-    parsed.ssdp = transport_parse.ssdp;
-    parsed.nat_pmp = transport_parse.nat_pmp;
-    parsed.pcp = transport_parse.pcp;
-    parsed.sip = transport_parse.sip;
-    parsed.rtcp = transport_parse.rtcp;
-    parsed.rtp = transport_parse.rtp;
-    parsed.quic = transport_parse.quic;
-    parsed.bgp = transport_parse.bgp;
-    parsed.ldap = transport_parse.ldap;
-    parsed.nntp = transport_parse.nntp;
-    parsed.imap = transport_parse.imap;
-    parsed.ftp = transport_parse.ftp;
-    parsed.smb1 = transport_parse.smb1;
-    parsed.smb2 = transport_parse.smb2;
-    parsed.smtp = transport_parse.smtp;
-    parsed.telnet = transport_parse.telnet;
-    parsed.mqtt = transport_parse.mqtt;
-    parsed.modbus = transport_parse.modbus;
-    parsed.ssh = transport_parse.ssh;
-    parsed.ssh_kex_init = transport_parse.ssh_kex_init;
-    parsed.coap = transport_parse.coap;
-    parsed.kerberos = transport_parse.kerberos;
-    parsed.stun = transport_parse.stun;
-    parsed.rip = transport_parse.rip;
-    parsed.isakmp = transport_parse.isakmp;
-    parsed.rpc = transport_parse.rpc;
-    parsed.syslog = transport_parse.syslog;
-    parsed.hsrp = transport_parse.hsrp;
-    parsed.udp_hints = transport_parse.hints;
 }
 
 fn parse_fddi_snap(raw: &[u8]) -> Result<(EthernetFrame, usize), LayerError> {

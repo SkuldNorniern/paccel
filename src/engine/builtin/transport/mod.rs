@@ -4,53 +4,52 @@ mod udp;
 
 use std::net::Ipv4Addr;
 
+use crate::engine::builtin::types::ParsedPacket;
 use crate::engine::constants::ip_proto;
 use crate::layer::LayerError;
-use crate::layer::application::bgp::{BgpMessage, probe_bgp};
+use crate::layer::application::bgp::probe_bgp;
 use crate::layer::application::coap::{CoapMessage, parse_coap_message};
 use crate::layer::application::dhcp::{DhcpMessage, parse_dhcp_message};
 use crate::layer::application::dhcp6::{Dhcp6Message, parse_dhcp6_message};
-use crate::layer::application::dnp3::{Dnp3Message, probe_dnp3};
+use crate::layer::application::dnp3::probe_dnp3;
 use crate::layer::application::dns::{DnsMessage, probe_dns};
-use crate::layer::application::eigrp::{EigrpHeader, parse_eigrp_header};
-use crate::layer::application::ftp::{FtpMessage, probe_ftp};
+use crate::layer::application::eigrp::parse_eigrp_header;
+use crate::layer::application::ftp::probe_ftp;
 use crate::layer::application::hsrp::{HsrpHeader, parse_hsrp_header};
-use crate::layer::application::http::{HttpMessage, probe_http};
-use crate::layer::application::imap::{ImapMessage, probe_imap};
+use crate::layer::application::http::probe_http;
+use crate::layer::application::imap::probe_imap;
 use crate::layer::application::isakmp::{IsakmpHeader, parse_isakmp_header};
 use crate::layer::application::kerberos::{
     KerberosMessage, parse_kerberos_tcp, parse_kerberos_udp,
 };
-use crate::layer::application::ldap::{LdapMessage, probe_ldap};
-use crate::layer::application::modbus::{ModbusMessage, probe_modbus};
-use crate::layer::application::mqtt::{MqttMessage, probe_mqtt};
+use crate::layer::application::ldap::probe_ldap;
+use crate::layer::application::modbus::probe_modbus;
+use crate::layer::application::mqtt::probe_mqtt;
 use crate::layer::application::nat_pmp::{NatPmpMessage, parse_nat_pmp};
-use crate::layer::application::nntp::{NntpMessage, probe_nntp};
+use crate::layer::application::nntp::probe_nntp;
 use crate::layer::application::ntp::{NtpMessage, parse_ntp_message};
-use crate::layer::application::ospf::{OspfHeader, parse_ospf_header};
+use crate::layer::application::ospf::parse_ospf_header;
 use crate::layer::application::pcp::{PcpHeader, parse_pcp_header};
-use crate::layer::application::pim::{PimHeader, parse_pim_header};
-use crate::layer::application::quic::{QuicLongHeader, parse_quic_long_header};
+use crate::layer::application::pim::parse_pim_header;
+use crate::layer::application::quic::parse_quic_long_header;
 use crate::layer::application::radius::{RadiusMessage, parse_radius_message};
 use crate::layer::application::rip::{RipHeader, parse_rip_header};
 use crate::layer::application::rpc::{RpcMessage, parse_rpc_message};
 use crate::layer::application::rtcp::{RtcpHeader, parse_rtcp};
 use crate::layer::application::rtp::{RtpHeader, parse_rtp};
 use crate::layer::application::sip::{SipMessage, parse_sip};
-use crate::layer::application::smb1::{Smb1Header, probe_smb1};
-use crate::layer::application::smb2::{Smb2Header, probe_smb2};
-use crate::layer::application::smtp::{SmtpMessage, probe_smtp};
+use crate::layer::application::smb1::probe_smb1;
+use crate::layer::application::smb2::probe_smb2;
+use crate::layer::application::smtp::probe_smtp;
 use crate::layer::application::snmp::{SnmpMessage, parse_snmp_message};
 use crate::layer::application::ssdp::{SsdpMessage, parse_ssdp};
-use crate::layer::application::ssh::{SshBanner, SshKexInit, parse_ssh_kex_init, probe_ssh_banner};
+use crate::layer::application::ssh::{parse_ssh_kex_init, probe_ssh_banner};
 use crate::layer::application::stun::{StunMessage, parse_stun_message};
 use crate::layer::application::syslog::{SyslogMessage, parse_syslog_message};
-use crate::layer::application::telnet::{TelnetCommand, parse_telnet_command};
+use crate::layer::application::telnet::parse_telnet_command;
 use crate::layer::application::tftp::{TftpMessage, parse_tftp_message};
-use crate::layer::application::tls::{
-    TlsClientHello, TlsServerHello, parse_tls_server_hello, probe_tls_client_hello,
-};
-use crate::layer::application::vrrp::{VrrpHeader, parse_vrrp_header};
+use crate::layer::application::tls::{parse_tls_server_hello, probe_tls_client_hello};
+use crate::layer::application::vrrp::parse_vrrp_header;
 use crate::layer::network::icmp::IcmpHeader;
 use crate::layer::network::icmpv6::{Icmpv6Header, NdpMessage, parse_ndp};
 use crate::layer::transport::tcp::{TcpFlags, TcpHeader};
@@ -71,163 +70,12 @@ use self::udp::{maybe_classify_openvpn_tcp, parse_udp_transport};
 
 const PORT_KERBEROS: u16 = 88;
 
-#[derive(Debug, Default)]
-pub(super) struct TransportParse {
-    pub transport: Option<TransportSegment>,
-    pub icmp: Option<IcmpHeader>,
-    pub icmpv6: Option<Icmpv6Header>,
-    pub ndp: Option<NdpMessage>,
-    pub igmp: Option<IgmpInfo>,
-    pub ospf: Option<OspfHeader>,
-    pub eigrp: Option<EigrpHeader>,
-    pub pim: Option<PimHeader>,
-    pub vrrp: Option<VrrpHeader>,
-    pub sctp: Option<SctpInfo>,
-    pub tcp_options: Option<TcpOptionsParsed>,
-    pub gre: Option<GreInfo>,
-    pub vxlan: Option<VxlanInfo>,
-    pub geneve: Option<GeneveInfo>,
-    pub l2tp: Option<L2tpInfo>,
-    pub ah: Option<AhInfo>,
-    pub esp: Option<EspInfo>,
-    pub wireguard: Option<WireGuardInfo>,
-    pub openvpn: Option<OpenVpnInfo>,
-    pub dnp3: Option<Dnp3Message>,
-    pub dns: Option<DnsMessage>,
-    pub dhcp: Option<DhcpMessage>,
-    pub dhcp6: Option<Dhcp6Message>,
-    pub tftp: Option<TftpMessage>,
-    pub radius: Option<RadiusMessage>,
-    pub snmp: Option<SnmpMessage>,
-    pub ntp: Option<NtpMessage>,
-    pub tls: Option<TlsClientHello>,
-    pub tls_server_hello: Option<TlsServerHello>,
-    pub http: Option<HttpMessage>,
-    pub ssdp: Option<SsdpMessage>,
-    pub nat_pmp: Option<NatPmpMessage>,
-    pub pcp: Option<PcpHeader>,
-    pub sip: Option<SipMessage>,
-    pub rtcp: Option<RtcpHeader>,
-    pub rtp: Option<RtpHeader>,
-    pub quic: Option<QuicLongHeader>,
-    pub bgp: Option<BgpMessage>,
-    pub ldap: Option<LdapMessage>,
-    pub nntp: Option<NntpMessage>,
-    pub imap: Option<ImapMessage>,
-    pub ftp: Option<FtpMessage>,
-    pub smb1: Option<Smb1Header>,
-    pub smb2: Option<Smb2Header>,
-    pub smtp: Option<SmtpMessage>,
-    pub telnet: Option<TelnetCommand>,
-    pub mqtt: Option<MqttMessage>,
-    pub modbus: Option<ModbusMessage>,
-    pub ssh: Option<SshBanner>,
-    pub ssh_kex_init: Option<SshKexInit>,
-    pub coap: Option<CoapMessage>,
-    pub kerberos: Option<KerberosMessage>,
-    pub stun: Option<StunMessage>,
-    pub rip: Option<RipHeader>,
-    pub isakmp: Option<IsakmpHeader>,
-    pub rpc: Option<RpcMessage>,
-    pub syslog: Option<SyslogMessage>,
-    pub hsrp: Option<HsrpHeader>,
-    pub hints: Vec<UdpAppHint>,
-}
-
-impl TransportParse {
-    fn with_tcp(tcp: TcpHeader, tcp_options: Option<TcpOptionsParsed>) -> Self {
-        Self {
-            transport: Some(TransportSegment::Tcp(tcp)),
-            tcp_options,
-            ..Self::default()
-        }
-    }
-
-    fn with_icmp(icmp: IcmpHeader) -> Self {
-        Self {
-            icmp: Some(icmp),
-            ..Self::default()
-        }
-    }
-
-    fn with_icmpv6(icmpv6: Icmpv6Header, ndp: Option<NdpMessage>) -> Self {
-        Self {
-            icmpv6: Some(icmpv6),
-            ndp,
-            ..Self::default()
-        }
-    }
-
-    fn with_igmp(igmp: IgmpInfo) -> Self {
-        Self {
-            igmp: Some(igmp),
-            ..Self::default()
-        }
-    }
-
-    fn with_ospf(ospf: OspfHeader) -> Self {
-        Self {
-            ospf: Some(ospf),
-            ..Self::default()
-        }
-    }
-
-    fn with_pim(pim: PimHeader) -> Self {
-        Self {
-            pim: Some(pim),
-            ..Self::default()
-        }
-    }
-
-    fn with_eigrp(eigrp: EigrpHeader) -> Self {
-        Self {
-            eigrp: Some(eigrp),
-            ..Self::default()
-        }
-    }
-
-    fn with_vrrp(vrrp: VrrpHeader) -> Self {
-        Self {
-            vrrp: Some(vrrp),
-            ..Self::default()
-        }
-    }
-
-    fn with_sctp(sctp: SctpInfo) -> Self {
-        Self {
-            transport: Some(TransportSegment::Sctp(sctp.clone())),
-            sctp: Some(sctp),
-            ..Self::default()
-        }
-    }
-
-    fn with_gre(gre: GreInfo) -> Self {
-        Self {
-            gre: Some(gre),
-            ..Self::default()
-        }
-    }
-
-    fn with_ah(ah: AhInfo) -> Self {
-        Self {
-            ah: Some(ah),
-            ..Self::default()
-        }
-    }
-
-    fn with_esp(esp: EspInfo) -> Self {
-        Self {
-            esp: Some(esp),
-            ..Self::default()
-        }
-    }
-}
-
 pub(super) fn parse_transport(
+    parsed: &mut ParsedPacket,
     protocol: u8,
     l4_bytes: &[u8],
     config: ParseConfig,
-) -> Result<TransportParse, LayerError> {
+) -> Result<(), LayerError> {
     match protocol {
         ip_proto::TCP => {
             let parse_application = config.stop_after == StopLayer::Application;
@@ -241,7 +89,8 @@ pub(super) fn parse_transport(
             });
             let source_port = tcp.source_port;
             let destination_port = tcp.destination_port;
-            let mut parsed = TransportParse::with_tcp(tcp, tcp_options);
+            parsed.transport = Some(TransportSegment::Tcp(tcp));
+            parsed.tcp_options = tcp_options;
             if parse_application {
                 let payload = &l4_bytes[header_len..];
                 parsed.dnp3 = ((source_port == DNP3_PORT || destination_port == DNP3_PORT)
@@ -252,64 +101,94 @@ pub(super) fn parse_transport(
                     parsed.openvpn =
                         maybe_classify_openvpn_tcp(source_port, destination_port, payload);
                     if parsed.openvpn.is_none() {
-                        classify_tcp_application(
-                            &mut parsed,
-                            source_port,
-                            destination_port,
-                            payload,
-                        );
+                        classify_tcp_application(parsed, source_port, destination_port, payload);
                     }
                 }
             }
-            Ok(parsed)
+            Ok(())
         }
-        ip_proto::UDP => parse_udp_transport(l4_bytes, config),
+        ip_proto::UDP => parse_udp_transport(parsed, l4_bytes, config),
         ip_proto::ICMP => {
             let icmp = parse_icmp_minimal(l4_bytes)?;
-            Ok(TransportParse::with_icmp(icmp))
+            {
+                parsed.icmp = Some(icmp);
+                Ok(())
+            }
         }
         ip_proto::ICMPV6 => {
             let (icmpv6, ndp) =
                 parse_icmpv6_minimal(l4_bytes, config.stop_after == StopLayer::Application)?;
-            Ok(TransportParse::with_icmpv6(icmpv6, ndp))
+            {
+                parsed.icmpv6 = Some(icmpv6);
+                parsed.ndp = ndp;
+                Ok(())
+            }
         }
         ip_proto::IGMP => {
             let igmp = parse_igmp_minimal(l4_bytes)?;
-            Ok(TransportParse::with_igmp(igmp))
+            {
+                parsed.igmp = Some(igmp);
+                Ok(())
+            }
         }
         ip_proto::OSPF => {
             let ospf = parse_ospf_header(l4_bytes)?;
-            Ok(TransportParse::with_ospf(ospf))
+            {
+                parsed.ospf = Some(ospf);
+                Ok(())
+            }
         }
         ip_proto::EIGRP => {
             let eigrp = parse_eigrp_header(l4_bytes)?;
-            Ok(TransportParse::with_eigrp(eigrp))
+            {
+                parsed.eigrp = Some(eigrp);
+                Ok(())
+            }
         }
         ip_proto::PIM => {
             let pim = parse_pim_header(l4_bytes)?;
-            Ok(TransportParse::with_pim(pim))
+            {
+                parsed.pim = Some(pim);
+                Ok(())
+            }
         }
         ip_proto::VRRP => {
             let vrrp = parse_vrrp_header(l4_bytes)?;
-            Ok(TransportParse::with_vrrp(vrrp))
+            {
+                parsed.vrrp = Some(vrrp);
+                Ok(())
+            }
         }
         ip_proto::SCTP => {
             let sctp = parse_sctp_minimal(l4_bytes)?;
-            Ok(TransportParse::with_sctp(sctp))
+            {
+                parsed.transport = Some(TransportSegment::Sctp(sctp.clone()));
+                parsed.sctp = Some(sctp);
+                Ok(())
+            }
         }
         ip_proto::GRE => {
             let gre = parse_gre_minimal(l4_bytes)?;
-            Ok(TransportParse::with_gre(gre))
+            {
+                parsed.gre = Some(gre);
+                Ok(())
+            }
         }
         ip_proto::AH => {
             let ah = parse_ah_minimal(l4_bytes)?;
-            Ok(TransportParse::with_ah(ah))
+            {
+                parsed.ah = Some(ah);
+                Ok(())
+            }
         }
         ip_proto::ESP => {
             let esp = parse_esp_minimal(l4_bytes)?;
-            Ok(TransportParse::with_esp(esp))
+            {
+                parsed.esp = Some(esp);
+                Ok(())
+            }
         }
-        _ => Ok(TransportParse::default()),
+        _ => Ok(()),
     }
 }
 

@@ -17,7 +17,7 @@ const TCP_PORT_SUBMISSION: u16 = 587;
 const TCP_PORT_SMB2: u16 = 445;
 
 pub(super) fn classify_tcp_application(
-    parsed: &mut TransportParse,
+    parsed: &mut ParsedPacket,
     source_port: u16,
     destination_port: u16,
     payload: &[u8],
@@ -54,7 +54,7 @@ fn classify_tcp_app_by_port(
     source_port: u16,
     destination_port: u16,
     payload: &[u8],
-    parsed: &mut TransportParse,
+    parsed: &mut ParsedPacket,
 ) {
     if source_port == TCP_PORT_FTP || destination_port == TCP_PORT_FTP {
         parsed.ftp = probe_ftp(payload).ok();
@@ -126,7 +126,7 @@ fn classify_tcp_app_by_port(
     }
 }
 
-fn classify_smb(payload: &[u8], parsed: &mut TransportParse) {
+fn classify_smb(payload: &[u8], parsed: &mut ParsedPacket) {
     parsed.smb2 = probe_smb2(payload).ok();
     if parsed.smb2.is_none() {
         parsed.smb1 = probe_smb1(payload).ok();
