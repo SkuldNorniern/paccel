@@ -52,7 +52,7 @@ use self::link::{
     parse_arp_packet, parse_link_with_linktype, parse_mpls_stack, parse_pppoe_minimal,
 };
 use self::network::{parse_ipv4_header, parse_ipv6_header, resolve_ipv6_transport};
-use self::transport::{TransportParse, parse_transport};
+use self::transport::parse_transport;
 
 pub use self::network::Ipv6FragmentHeader;
 
@@ -99,28 +99,52 @@ impl BuiltinPacketParser {
     /// transport header that did not survive leaves `transport` as `None` with
     /// a warning, exactly as a truncated network header already does. `Strict`
     /// keeps failing.
-    fn transport_or_warn(
+    /// Returns whether a transport header was parsed and applied.
+    ///
+    /// The parse is applied here rather than handed back, so `TransportParse`
+    /// never crosses a second call boundary. It is a large struct, and
+    /// returning it wrapped in an `Option` cost a measurable copy on every
+    /// well-formed packet.
+    #[inline]
+    fn apply_transport_or_warn(
         parsed: &mut ParsedPacket,
         protocol: u8,
         l4_bytes: &[u8],
         config: ParseConfig,
         offset: usize,
-    ) -> Result<Option<TransportParse>, LayerError> {
+    ) -> Result<bool, LayerError> {
         match parse_transport(protocol, l4_bytes, config) {
-            Ok(transport) => Ok(Some(transport)),
-            Err(error) if config.mode == ParseMode::Permissive => {
-                parsed.warnings.push(ParseWarning {
-                    code: ParseWarningCode::TransportTruncated,
-                    protocol: ParseWarningProtocol::Transport,
-                    offset,
-                    message: "transport header did not survive the capture; \
-                              addresses are still valid",
-                });
-                let _ = error;
-                Ok(None)
+            Ok(transport) => {
+                apply_transport_parse(parsed, transport);
+                Ok(true)
             }
-            Err(error) => Err(error),
+            // Kept out of line: a truncated transport header is the rare case,
+            // and leaving the warning construction inline slows every
+            // well-formed packet down.
+            Err(error) => Self::transport_did_not_survive(parsed, config, offset, error),
         }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn transport_did_not_survive(
+        parsed: &mut ParsedPacket,
+        config: ParseConfig,
+        offset: usize,
+        error: LayerError,
+    ) -> Result<bool, LayerError> {
+        if config.mode != ParseMode::Permissive {
+            return Err(error);
+        }
+
+        parsed.warnings.push(ParseWarning {
+            code: ParseWarningCode::TransportTruncated,
+            protocol: ParseWarningProtocol::Transport,
+            offset,
+            message: "transport header did not survive the capture; \
+                      addresses are still valid",
+        });
+        Ok(false)
     }
 
     fn parse_l2_with_linktype(
@@ -173,14 +197,16 @@ impl BuiltinPacketParser {
             return Ok(parsed);
         }
 
+        let mut parsed = parsed;
         Self::parse_ethertype(
             &raw[l3_offset..],
             eth.ethertype,
             config,
             depth,
             l3_offset,
-            parsed,
-        )
+            &mut parsed,
+        )?;
+        Ok(parsed)
     }
 
     fn parse_dot11_l2(
@@ -218,7 +244,7 @@ impl BuiltinPacketParser {
             return Ok(parsed);
         };
         let l3_offset = frame_offset.saturating_add(l3_frame_offset);
-        match Self::parse_ethertype(l3_bytes, ethertype, config, depth, l3_offset, parsed) {
+        match Self::parse_ethertype(l3_bytes, ethertype, config, depth, l3_offset, &mut parsed) {
             Err(LayerError::InvalidLength) if config.mode == ParseMode::Permissive => {
                 parsed = ParsedPacket {
                     dot11: Some(dot11),
@@ -226,7 +252,8 @@ impl BuiltinPacketParser {
                 };
                 Ok(parsed)
             }
-            result => result,
+            Err(error) => Err(error),
+            Ok(()) => Ok(parsed),
         }
     }
 
@@ -236,14 +263,9 @@ impl BuiltinPacketParser {
         config: ParseConfig,
         depth: usize,
     ) -> Result<ParsedPacket, LayerError> {
-        Self::parse_ethertype(
-            l3_bytes,
-            ethertype,
-            config,
-            depth,
-            0,
-            ParsedPacket::default(),
-        )
+        let mut parsed = ParsedPacket::default();
+        Self::parse_ethertype(l3_bytes, ethertype, config, depth, 0, &mut parsed)?;
+        Ok(parsed)
     }
 
     #[allow(clippy::cognitive_complexity)]
@@ -253,13 +275,13 @@ impl BuiltinPacketParser {
         config: ParseConfig,
         depth: usize,
         l3_offset: usize,
-        mut parsed: ParsedPacket,
-    ) -> Result<ParsedPacket, LayerError> {
+        parsed: &mut ParsedPacket,
+    ) -> Result<(), LayerError> {
         match ethertype {
             ethertype::ARP => {
                 let arp = parse_arp_packet(l3_bytes)?;
                 parsed.arp = Some(arp);
-                Ok(parsed)
+                Ok(())
             }
             ethertype::IPV4 => {
                 let ipv4 = parse_ipv4_header(l3_bytes)?;
@@ -294,36 +316,34 @@ impl BuiltinPacketParser {
 
                 if config.stop_after == StopLayer::Network {
                     parsed.ipv4 = Some(ipv4);
-                    return Ok(parsed);
+                    return Ok(());
                 }
 
                 if ipv4.fragment_offset == 0 {
                     let l4_end = total_len.min(l3_bytes.len());
                     let l4_bytes = &l3_bytes[ip_header_len..l4_end];
-                    let Some(transport_parse) = Self::transport_or_warn(
-                        &mut parsed,
+                    // One exit, so a transport header that did not survive
+                    // takes the same path out as one that did.
+                    if Self::apply_transport_or_warn(
+                        parsed,
                         ipv4.protocol,
                         l4_bytes,
                         config,
                         l3_offset + ip_header_len,
-                    )?
-                    else {
-                        parsed.ipv4 = Some(ipv4);
-                        return Ok(parsed);
-                    };
-                    apply_transport_parse(&mut parsed, transport_parse);
-                    parsed.transport_segment_offset = Some(l3_offset + ip_header_len);
-                    recurse_transport_tunnel(
-                        &mut parsed,
-                        ipv4.protocol,
-                        l4_bytes,
-                        config,
-                        depth,
-                        l3_offset + ip_header_len,
-                    );
+                    )? {
+                        parsed.transport_segment_offset = Some(l3_offset + ip_header_len);
+                        recurse_transport_tunnel(
+                            parsed,
+                            ipv4.protocol,
+                            l4_bytes,
+                            config,
+                            depth,
+                            l3_offset + ip_header_len,
+                        );
+                    }
                 }
                 parsed.ipv4 = Some(ipv4);
-                Ok(parsed)
+                Ok(())
             }
             ethertype::IPV6 => {
                 let mut ipv6 = parse_ipv6_header(l3_bytes)?;
@@ -345,7 +365,7 @@ impl BuiltinPacketParser {
                 let l4_end = declared_l4_end.min(l3_bytes.len());
                 if config.stop_after == StopLayer::Network {
                     parsed.ipv6 = Some(ipv6);
-                    return Ok(parsed);
+                    return Ok(());
                 }
 
                 let ipv6_payload = &l3_bytes[..l4_end];
@@ -384,31 +404,27 @@ impl BuiltinPacketParser {
 
                 if !state.non_initial_fragment && !state.depth_limit_hit {
                     let l4_bytes = &ipv6_payload[state.l4_offset..];
-                    let Some(transport_parse) = Self::transport_or_warn(
-                        &mut parsed,
+                    if Self::apply_transport_or_warn(
+                        parsed,
                         state.next_header,
                         l4_bytes,
                         config,
                         l3_offset + state.l4_offset,
-                    )?
-                    else {
-                        parsed.ipv6 = Some(ipv6);
-                        return Ok(parsed);
-                    };
-                    apply_transport_parse(&mut parsed, transport_parse);
-                    parsed.transport_segment_offset = Some(l3_offset + state.l4_offset);
-                    recurse_transport_tunnel(
-                        &mut parsed,
-                        state.next_header,
-                        l4_bytes,
-                        config,
-                        depth,
-                        l3_offset + state.l4_offset,
-                    );
+                    )? {
+                        parsed.transport_segment_offset = Some(l3_offset + state.l4_offset);
+                        recurse_transport_tunnel(
+                            parsed,
+                            state.next_header,
+                            l4_bytes,
+                            config,
+                            depth,
+                            l3_offset + state.l4_offset,
+                        );
+                    }
                 }
 
                 parsed.ipv6 = Some(ipv6);
-                Ok(parsed)
+                Ok(())
             }
             ethertype::PPPOE_DISCOVERY => {
                 let pppoe = parse_pppoe_minimal(l3_bytes)?;
@@ -419,13 +435,13 @@ impl BuiltinPacketParser {
                     offset: l3_offset,
                     message: "PPPoE header only; payload not decoded",
                 });
-                Ok(parsed)
+                Ok(())
             }
             ethertype::PPPOE_SESSION => {
                 let pppoe = parse_pppoe_minimal(l3_bytes)?;
                 parsed.pppoe = Some(pppoe);
-                decode_pppoe_session(&mut parsed, l3_bytes, config, depth, l3_offset)?;
-                Ok(parsed)
+                decode_pppoe_session(parsed, l3_bytes, config, depth, l3_offset)?;
+                Ok(())
             }
             ethertype::MPLS_UNICAST | ethertype::MPLS_MULTICAST => {
                 let (mpls, mpls_payload_offset, depth_limit_hit) =
@@ -462,7 +478,7 @@ impl BuiltinPacketParser {
                             }
                         });
                         recurse_or_warn(
-                            &mut parsed,
+                            parsed,
                             result,
                             tunnel_depth_limited,
                             ParseWarningCode::MplsInner,
@@ -471,22 +487,22 @@ impl BuiltinPacketParser {
                         );
                     } else {
                         push_inner_warning(
-                            &mut parsed,
+                            parsed,
                             ParseWarningCode::MplsInner,
                             l3_offset + mpls_payload_offset,
                             "MPLS inner payload; nested decode skipped",
                         );
                     }
                 }
-                Ok(parsed)
+                Ok(())
             }
             ethertype::LLDP => {
                 parsed.lldp = Some(parse_lldp(l3_bytes));
-                Ok(parsed)
+                Ok(())
             }
             ethertype::SLOW_PROTOCOLS => {
                 parsed.lacp = parse_lacp_header(l3_bytes).ok();
-                Ok(parsed)
+                Ok(())
             }
             other => {
                 if config.mode == ParseMode::Strict {
@@ -500,7 +516,7 @@ impl BuiltinPacketParser {
                     offset: 12,
                     message: "L2 only; unsupported ethertype, L3+ not parsed",
                 });
-                Ok(parsed)
+                Ok(())
             }
         }
     }
@@ -585,14 +601,20 @@ fn decode_pppoe_session(
         if depth_limited {
             None
         } else {
-            Some(BuiltinPacketParser::parse_ethertype(
-                bytes,
-                inner_ethertype,
-                config,
-                depth + 1,
-                offset + inner_offset,
-                ParsedPacket::default(),
-            ))
+            // The inner packet is its own value: a tunnel hangs it off
+            // `inner`, so it cannot share the outer buffer.
+            let mut inner_parsed = ParsedPacket::default();
+            Some(
+                BuiltinPacketParser::parse_ethertype(
+                    bytes,
+                    inner_ethertype,
+                    config,
+                    depth + 1,
+                    offset + inner_offset,
+                    &mut inner_parsed,
+                )
+                .map(|()| inner_parsed),
+            )
         }
     });
     recurse_or_warn(
