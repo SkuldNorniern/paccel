@@ -35,9 +35,10 @@ const STUN_PORT: u16 = 3478;
 const UDP_PORT_LLMNR: u16 = 5355;
 const UDP_PORT_NBNS: u16 = 137;
 pub(super) fn parse_udp_transport(
+    parsed: &mut ParsedPacket,
     l4_bytes: &[u8],
     config: ParseConfig,
-) -> Result<TransportParse, LayerError> {
+) -> Result<(), LayerError> {
     let udp = parse_udp_header(l4_bytes)?;
     let declared_end = usize::from(udp.length);
     if declared_end > l4_bytes.len() && config.mode == ParseMode::Strict {
@@ -162,38 +163,36 @@ pub(super) fn parse_udp_transport(
         already_classified || rtcp.is_some(),
     );
 
-    Ok(TransportParse {
-        transport: Some(TransportSegment::Udp(udp)),
-        vxlan,
-        geneve,
-        l2tp,
-        wireguard,
-        openvpn,
-        dns,
-        dhcp,
-        dhcp6,
-        tftp,
-        radius,
-        snmp,
-        ntp,
-        sip,
-        rtcp,
-        rtp,
-        quic,
-        coap,
-        ssdp,
-        nat_pmp,
-        pcp,
-        kerberos,
-        stun,
-        rip,
-        isakmp,
-        rpc,
-        syslog,
-        hsrp,
-        hints,
-        ..TransportParse::default()
-    })
+    parsed.transport = Some(TransportSegment::Udp(udp));
+    parsed.vxlan = vxlan;
+    parsed.geneve = geneve;
+    parsed.l2tp = l2tp;
+    parsed.wireguard = wireguard;
+    parsed.openvpn = openvpn;
+    parsed.dns = dns;
+    parsed.dhcp = dhcp;
+    parsed.dhcp6 = dhcp6;
+    parsed.tftp = tftp;
+    parsed.radius = radius;
+    parsed.snmp = snmp;
+    parsed.ntp = ntp;
+    parsed.sip = sip;
+    parsed.rtcp = rtcp;
+    parsed.rtp = rtp;
+    parsed.quic = quic;
+    parsed.coap = coap;
+    parsed.ssdp = ssdp;
+    parsed.nat_pmp = nat_pmp;
+    parsed.pcp = pcp;
+    parsed.kerberos = kerberos;
+    parsed.stun = stun;
+    parsed.rip = rip;
+    parsed.isakmp = isakmp;
+    parsed.rpc = rpc;
+    parsed.syslog = syslog;
+    parsed.hsrp = hsrp;
+    parsed.udp_hints = hints;
+    Ok(())
 }
 
 fn maybe_probe_hsrp_udp(
