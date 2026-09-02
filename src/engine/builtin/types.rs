@@ -629,6 +629,11 @@ impl ParsedPacket {
     /// adding a protocol cannot leave a stale value behind from the packet
     /// before. The two vectors keep the capacity they have already grown to,
     /// which is the point of reusing the buffer at all.
+    ///
+    /// `inner` is not kept. A reused buffer therefore still allocates one box
+    /// per tunnel level on every tunnelled packet, the same as parsing by
+    /// value does; keeping it would need somewhere to park the allocation that
+    /// `inner.is_some()` does not read as "this packet was tunnelled".
     pub fn reset(&mut self) {
         let udp_hints = mem::take(&mut self.udp_hints);
         let warnings = mem::take(&mut self.warnings);

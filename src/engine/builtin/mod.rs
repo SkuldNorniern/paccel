@@ -99,7 +99,9 @@ impl BuiltinPacketParser {
     /// of these and hand it back each time instead.
     ///
     /// `out` is reset first, so a reused buffer never carries a field over
-    /// from the packet before it.
+    /// from the packet before it. What the reuse saves is the move and the two
+    /// growable vectors; a tunnelled packet still allocates its inner chain.
+    /// See [`ParsedPacket::reset`].
     pub fn parse_into(
         raw: &[u8],
         config: ParseConfig,
