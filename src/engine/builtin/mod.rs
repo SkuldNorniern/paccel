@@ -72,7 +72,7 @@ impl BuiltinPacketParser {
     }
 
     pub fn parse_with_config(raw: &[u8], config: ParseConfig) -> Result<ParsedPacket, LayerError> {
-        Self::parse_l2(raw, config, 0)
+        Self::parse_with_config_and_linktype(raw, config, None)
     }
 
     pub fn parse_with_linktype(raw: &[u8], linktype: u16) -> Result<ParsedPacket, LayerError> {
@@ -84,11 +84,21 @@ impl BuiltinPacketParser {
         config: ParseConfig,
         linktype: Option<u16>,
     ) -> Result<ParsedPacket, LayerError> {
-        Self::parse_l2_with_linktype(raw, config, 0, linktype)
+        // Built once here and filled in by the chain below, so a packet is
+        // moved exactly as many times as the public signature demands: once,
+        // on the way out.
+        let mut parsed = ParsedPacket::default();
+        Self::parse_l2_with_linktype(raw, config, 0, linktype, &mut parsed)?;
+        Ok(parsed)
     }
 
-    fn parse_l2(raw: &[u8], config: ParseConfig, depth: usize) -> Result<ParsedPacket, LayerError> {
-        Self::parse_l2_with_linktype(raw, config, depth, None)
+    fn parse_l2(
+        raw: &[u8],
+        config: ParseConfig,
+        depth: usize,
+        parsed: &mut ParsedPacket,
+    ) -> Result<(), LayerError> {
+        Self::parse_l2_with_linktype(raw, config, depth, None, parsed)
     }
 
     /// Parse the transport header, or in permissive mode say why there is none.
@@ -149,22 +159,22 @@ impl BuiltinPacketParser {
         config: ParseConfig,
         depth: usize,
         linktype: Option<u16>,
-    ) -> Result<ParsedPacket, LayerError> {
+        parsed: &mut ParsedPacket,
+    ) -> Result<(), LayerError> {
         match linktype {
             Some(127) => {
                 let (radiotap, dot11_offset) = match parse_radiotap(raw) {
                     Ok(value) => value,
                     Err(LayerError::InvalidLength) if config.mode == ParseMode::Permissive => {
-                        return Ok(ParsedPacket::default());
+                        return Ok(());
                     }
                     Err(error) => return Err(error),
                 };
-                let mut parsed =
-                    Self::parse_dot11_l2(&raw[dot11_offset..], config, depth, dot11_offset)?;
+                Self::parse_dot11_l2(&raw[dot11_offset..], config, depth, dot11_offset, parsed)?;
                 parsed.radiotap = Some(radiotap);
-                return Ok(parsed);
+                return Ok(());
             }
-            Some(105) => return Self::parse_dot11_l2(raw, config, depth, 0),
+            Some(105) => return Self::parse_dot11_l2(raw, config, depth, 0, parsed),
             _ => {}
         }
 
@@ -173,37 +183,30 @@ impl BuiltinPacketParser {
         } else {
             parse_link_with_linktype(raw, linktype)?
         };
-        let parsed = ParsedPacket {
-            ethernet: Some(eth.clone()),
-            ..ParsedPacket::default()
-        };
+        parsed.ethernet = Some(eth.clone());
 
         if l3_offset >= raw.len() {
             return Err(LayerError::InvalidLength);
         }
 
         if eth.ethertype == 0 && eth.payload_offset == 17 {
-            let mut parsed = parsed;
             parsed.stp = Some(parse_stp(&raw[l3_offset..])?);
-            return Ok(parsed);
+            return Ok(());
         }
 
         if eth.ethertype == 0 && eth.payload_offset == 22 {
-            let mut parsed = parsed;
             parsed.cdp = parse_cdp_header(&raw[l3_offset..]).ok();
-            return Ok(parsed);
+            return Ok(());
         }
 
-        let mut parsed = parsed;
         Self::parse_ethertype(
             &raw[l3_offset..],
             eth.ethertype,
             config,
             depth,
             l3_offset,
-            &mut parsed,
-        )?;
-        Ok(parsed)
+            parsed,
+        )
     }
 
     fn parse_dot11_l2(
@@ -211,46 +214,45 @@ impl BuiltinPacketParser {
         config: ParseConfig,
         depth: usize,
         frame_offset: usize,
-    ) -> Result<ParsedPacket, LayerError> {
+        parsed: &mut ParsedPacket,
+    ) -> Result<(), LayerError> {
         let dot11 = match parse_dot11(raw) {
             Ok(dot11) => dot11,
             Err(LayerError::InvalidLength) if config.mode == ParseMode::Permissive => {
-                return Ok(ParsedPacket::default());
+                return Ok(());
             }
             Err(error) => return Err(error),
         };
-        let mut parsed = ParsedPacket {
-            dot11: Some(dot11),
-            ..ParsedPacket::default()
-        };
+        parsed.dot11 = Some(dot11);
 
         if dot11.frame_type != 2 {
-            return Ok(parsed);
+            return Ok(());
         }
 
         let Some(snap) = raw.get(dot11.header_len..dot11.header_len.saturating_add(8)) else {
-            return Ok(parsed);
+            return Ok(());
         };
         if snap[..6] != [0xaa, 0xaa, 0x03, 0x00, 0x00, 0x00] {
-            return Ok(parsed);
+            return Ok(());
         }
 
         let ethertype = u16::from_be_bytes([snap[6], snap[7]]);
         let l3_frame_offset = dot11.header_len + 8;
         let Some(l3_bytes) = raw.get(l3_frame_offset..) else {
-            return Ok(parsed);
+            return Ok(());
         };
         let l3_offset = frame_offset.saturating_add(l3_frame_offset);
-        match Self::parse_ethertype(l3_bytes, ethertype, config, depth, l3_offset, &mut parsed) {
+        match Self::parse_ethertype(l3_bytes, ethertype, config, depth, l3_offset, parsed) {
+            // A truncated payload leaves whatever the inner parse managed to
+            // write; reset to just the frame that was definitely read.
             Err(LayerError::InvalidLength) if config.mode == ParseMode::Permissive => {
-                parsed = ParsedPacket {
+                *parsed = ParsedPacket {
                     dot11: Some(dot11),
                     ..ParsedPacket::default()
                 };
-                Ok(parsed)
+                Ok(())
             }
-            Err(error) => Err(error),
-            Ok(()) => Ok(parsed),
+            other => other,
         }
     }
 
@@ -702,7 +704,11 @@ fn recurse_transport_tunnel(
             if depth_limited {
                 None
             } else if is_l2 {
-                Some(BuiltinPacketParser::parse_l2(bytes, config, depth + 1))
+                let mut inner_parsed = ParsedPacket::default();
+                Some(
+                    BuiltinPacketParser::parse_l2(bytes, config, depth + 1, &mut inner_parsed)
+                        .map(|()| inner_parsed),
+                )
             } else {
                 Some(BuiltinPacketParser::parse_l3(
                     bytes,
