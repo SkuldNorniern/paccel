@@ -304,6 +304,44 @@ mod tests {
         assert_eq!(parsed.ports(), None);
     }
 
+    /// Every extension header in the chain is treated alike: a capture that
+    /// cuts one short keeps the addresses and stops there, rather than throwing
+    /// the frame away. The authentication header used to be the exception.
+    #[test]
+    fn a_truncated_ipv6_extension_chain_keeps_the_addresses() {
+        for next_header in [0u8, 43, 60, 44, 51] {
+            let mut frame = vec![0xaa; 6];
+            frame.extend_from_slice(&[0xbb; 6]);
+            frame.extend_from_slice(&0x86ddu16.to_be_bytes());
+            frame.push(0x60);
+            frame.extend_from_slice(&[0x00, 0x00, 0x00]);
+            frame.extend_from_slice(&8u16.to_be_bytes());
+            frame.push(next_header);
+            frame.push(64);
+            frame.extend_from_slice(&[0u8; 32]);
+            // One byte where a whole extension header should be.
+            frame.push(0x2c);
+
+            let parsed = BuiltinPacketParser::parse_with_config(
+                &frame,
+                ParseConfig {
+                    stop_after: StopLayer::Transport,
+                    ..ParseConfig::default()
+                },
+            );
+
+            assert!(
+                parsed.is_ok(),
+                "next header {next_header} should survive permissively"
+            );
+            let parsed = parsed.expect("checked just above");
+            assert!(
+                parsed.ipv6.is_some(),
+                "next header {next_header} keeps its addresses"
+            );
+        }
+    }
+
     /// A complete header answers from itself, not from the truncated pair.
     #[test]
     fn a_whole_header_reports_its_ports_and_leaves_the_truncated_pair_empty() {

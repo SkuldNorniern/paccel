@@ -189,14 +189,16 @@ pub(super) fn resolve_ipv6_transport(
             }
             ip_proto::AH => {
                 if state.l4_offset + 2 > packet.len() {
-                    return Err(LayerError::InvalidLength);
+                    state.truncated = true;
+                    return Ok(state);
                 }
 
                 let ext_next = packet[state.l4_offset];
                 let payload_len = packet[state.l4_offset + 1] as usize;
                 let header_len = (payload_len + 2) * 4;
                 if state.l4_offset + header_len > packet.len() {
-                    return Err(LayerError::InvalidLength);
+                    state.truncated = true;
+                    return Ok(state);
                 }
 
                 state.next_header = ext_next;
