@@ -19,6 +19,9 @@ pub(super) struct Ipv6TransportState {
     pub l4_offset: usize,
     pub non_initial_fragment: bool,
     pub depth_limit_hit: bool,
+    /// The extension header chain ran past the end of the capture. The
+    /// addresses are still good; nothing beyond the chain could be read.
+    pub truncated: bool,
     pub fragment_header: Option<Ipv6FragmentHeader>,
 }
 
@@ -122,6 +125,7 @@ pub(super) fn resolve_ipv6_transport(
         l4_offset: 40,
         non_initial_fragment: false,
         depth_limit_hit: false,
+        truncated: false,
         fragment_header: None,
     };
     let mut depth = 0usize;
@@ -135,14 +139,16 @@ pub(super) fn resolve_ipv6_transport(
         match state.next_header {
             0 | 43 | 60 => {
                 if state.l4_offset + 2 > packet.len() {
-                    return Err(LayerError::InvalidLength);
+                    state.truncated = true;
+                    return Ok(state);
                 }
 
                 let ext_next = packet[state.l4_offset];
                 let ext_len = packet[state.l4_offset + 1] as usize;
                 let header_len = (ext_len + 1) * 8;
                 if state.l4_offset + header_len > packet.len() {
-                    return Err(LayerError::InvalidLength);
+                    state.truncated = true;
+                    return Ok(state);
                 }
 
                 state.next_header = ext_next;
@@ -150,13 +156,14 @@ pub(super) fn resolve_ipv6_transport(
                 depth += 1;
             }
             44 => {
-                let fragment_end = state
-                    .l4_offset
-                    .checked_add(8)
-                    .ok_or(LayerError::InvalidLength)?;
-                let fragment = packet
-                    .get(state.l4_offset..fragment_end)
-                    .ok_or(LayerError::InvalidLength)?;
+                let Some(fragment_end) = state.l4_offset.checked_add(8) else {
+                    state.truncated = true;
+                    return Ok(state);
+                };
+                let Some(fragment) = packet.get(state.l4_offset..fragment_end) else {
+                    state.truncated = true;
+                    return Ok(state);
+                };
                 let ext_next = fragment[0];
                 let frag_off_flags = u16::from_be_bytes([fragment[2], fragment[3]]);
                 let frag_offset = (frag_off_flags & 0xFFF8) >> 3;
