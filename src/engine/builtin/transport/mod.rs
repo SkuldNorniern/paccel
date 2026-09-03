@@ -76,6 +76,29 @@ pub(super) fn parse_transport(
     l4_bytes: &[u8],
     config: ParseConfig,
 ) -> Result<(), LayerError> {
+    let result = parse_transport_inner(parsed, protocol, l4_bytes, config);
+
+    // An application layer with nothing in it is not an application layer. The
+    // classifiers write into one as they probe, so a payload that matched
+    // nothing would leave `application` reading as `Some` and holding an
+    // allocation for a packet that has no application layer at all.
+    if parsed
+        .application
+        .as_deref()
+        .is_some_and(ApplicationLayers::is_empty)
+    {
+        parsed.application = None;
+    }
+
+    result
+}
+
+fn parse_transport_inner(
+    parsed: &mut ParsedPacket,
+    protocol: u8,
+    l4_bytes: &[u8],
+    config: ParseConfig,
+) -> Result<(), LayerError> {
     match protocol {
         ip_proto::TCP => {
             let parse_application = config.stop_after == StopLayer::Application;

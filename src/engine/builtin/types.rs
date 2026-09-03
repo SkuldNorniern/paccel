@@ -545,6 +545,56 @@ pub struct ApplicationLayers {
     pub hsrp: Option<HsrpHeader>,
 }
 
+impl ApplicationLayers {
+    /// Whether nothing above the transport layer was found.
+    ///
+    /// The classifiers write into an application layer as they probe, so a
+    /// payload that matched nothing still leaves one behind. The parse drops
+    /// it, and this is how it knows to.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.dnp3.is_none()
+            && self.dns.is_none()
+            && self.dhcp.is_none()
+            && self.dhcp6.is_none()
+            && self.tftp.is_none()
+            && self.radius.is_none()
+            && self.snmp.is_none()
+            && self.ntp.is_none()
+            && self.tls.is_none()
+            && self.tls_server_hello.is_none()
+            && self.http.is_none()
+            && self.ssdp.is_none()
+            && self.nat_pmp.is_none()
+            && self.pcp.is_none()
+            && self.sip.is_none()
+            && self.rtcp.is_none()
+            && self.rtp.is_none()
+            && self.quic.is_none()
+            && self.bgp.is_none()
+            && self.ldap.is_none()
+            && self.nntp.is_none()
+            && self.imap.is_none()
+            && self.ftp.is_none()
+            && self.smb1.is_none()
+            && self.smb2.is_none()
+            && self.smtp.is_none()
+            && self.telnet.is_none()
+            && self.mqtt.is_none()
+            && self.modbus.is_none()
+            && self.ssh.is_none()
+            && self.ssh_kex_init.is_none()
+            && self.coap.is_none()
+            && self.kerberos.is_none()
+            && self.stun.is_none()
+            && self.rip.is_none()
+            && self.isakmp.is_none()
+            && self.rpc.is_none()
+            && self.syslog.is_none()
+            && self.hsrp.is_none()
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct ParsedPacket {
     pub ethernet: Option<EthernetFrame>,
