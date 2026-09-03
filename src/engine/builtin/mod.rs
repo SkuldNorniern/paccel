@@ -148,7 +148,9 @@ impl BuiltinPacketParser {
             // Kept out of line: a truncated transport header is the rare case,
             // and leaving the warning construction inline slows every
             // well-formed packet down.
-            Err(error) => Self::transport_did_not_survive(parsed, config, offset, error),
+            Err(error) => {
+                Self::transport_did_not_survive(parsed, protocol, l4_bytes, config, offset, error)
+            }
         }
     }
 
@@ -156,12 +158,27 @@ impl BuiltinPacketParser {
     #[inline(never)]
     fn transport_did_not_survive(
         parsed: &mut ParsedPacket,
+        protocol: u8,
+        l4_bytes: &[u8],
         config: ParseConfig,
         offset: usize,
         error: LayerError,
     ) -> Result<bool, LayerError> {
         if config.mode != ParseMode::Permissive {
             return Err(error);
+        }
+
+        // TCP, UDP and SCTP all carry their ports in the first four bytes. A
+        // snaplen that cut the header short usually left those, and they are
+        // the part a flow is keyed on, so keep them rather than throwing away
+        // the whole header for want of the rest of it.
+        if matches!(protocol, ip_proto::TCP | ip_proto::UDP | ip_proto::SCTP)
+            && let Some(ports) = l4_bytes.get(..4)
+        {
+            parsed.truncated_ports = Some((
+                u16::from_be_bytes([ports[0], ports[1]]),
+                u16::from_be_bytes([ports[2], ports[3]]),
+            ));
         }
 
         parsed.warnings.push(ParseWarning {
@@ -393,6 +410,23 @@ impl BuiltinPacketParser {
                     ipv6.next_header,
                     config.max_ipv6_extension_headers,
                 )?;
+
+                // A chain the capture cut short leaves the addresses intact
+                // and nothing after them to read. Permissive keeps the frame
+                // and says so, the way a truncated transport header does;
+                // Strict still refuses it.
+                if state.truncated {
+                    if config.mode != ParseMode::Permissive {
+                        return Err(LayerError::InvalidLength);
+                    }
+                    parsed.warnings.push(ParseWarning {
+                        code: ParseWarningCode::Ipv6ExtensionTruncated,
+                        protocol: ParseWarningProtocol::Network,
+                        offset: l3_offset + state.l4_offset,
+                        message: "IPv6 extension header chain did not survive the \
+                                  capture; addresses are still valid",
+                    });
+                }
 
                 if state.l4_offset > ipv6_payload.len() {
                     return Err(LayerError::InvalidLength);

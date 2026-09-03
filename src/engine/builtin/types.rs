@@ -67,6 +67,8 @@ use super::network::Ipv6FragmentHeader;
 pub enum ParseWarningCode {
     Ipv6NonInitialFragment,
     Ipv6ExtensionDepthLimit,
+    /// The IPv6 extension header chain ran past the end of the capture.
+    Ipv6ExtensionTruncated,
     Ipv6Truncated,
     UnsupportedEthertype(u16),
     Ipv4Truncated,
@@ -90,6 +92,7 @@ impl ParseWarningCode {
             Self::TransportTruncated => "transport-truncated",
             Self::Ipv6NonInitialFragment => "ipv6-non-initial-fragment",
             Self::Ipv6ExtensionDepthLimit => "ipv6-ext-depth-limit",
+            Self::Ipv6ExtensionTruncated => "ipv6-ext-truncated",
             Self::Ipv6Truncated => "ipv6-truncated",
             Self::UnsupportedEthertype(_) => "unsupported-ethertype",
             Self::Ipv4Truncated => "ipv4-truncated",
@@ -636,6 +639,18 @@ pub struct ParsedPacket {
     /// `transport_segment_offset + 8`. Nested offsets are relative to the inner
     /// packet's buffer.
     pub transport_segment_offset: Option<usize>,
+    /// The port pair from a transport header that was cut short.
+    ///
+    /// TCP needs twenty bytes and UDP eight, but both carry their ports in the
+    /// first four, and so does SCTP. A capture taken with a short snaplen keeps
+    /// those and loses the rest, so a permissive parse reports them here rather
+    /// than discarding the only part of the header that survived.
+    ///
+    /// `transport` stays `None`: the header did not survive as a header, and
+    /// nothing is invented to fill the fields that went missing. Read
+    /// [`Self::ports`] to get the ports whichever way they arrived.
+    pub truncated_ports: Option<(u16, u16)>,
+
     /// What the parse found above the transport layer, if it looked and found
     /// anything. Allocated on first use, so a parse that stops below the
     /// application layer never allocates at all.
@@ -950,6 +965,23 @@ impl ParsedPacket {
     #[must_use]
     pub fn hsrp(&self) -> Option<&HsrpHeader> {
         self.application.as_ref()?.hsrp.as_ref()
+    }
+
+    /// The transport ports, however they survived.
+    ///
+    /// A complete header answers from itself; one cut short by a snaplen
+    /// answers from [`Self::truncated_ports`]. Callers that only want to know
+    /// where a packet was going should ask here rather than matching on
+    /// `transport`, which reports `None` for a header that did not survive
+    /// even when its ports did.
+    #[must_use]
+    pub fn ports(&self) -> Option<(u16, u16)> {
+        match &self.transport {
+            Some(TransportSegment::Tcp(tcp)) => Some((tcp.source_port, tcp.destination_port)),
+            Some(TransportSegment::Udp(udp)) => Some((udp.source_port, udp.destination_port)),
+            Some(TransportSegment::Sctp(sctp)) => Some((sctp.source_port, sctp.destination_port)),
+            None => self.truncated_ports,
+        }
     }
 
     /// Returns the first populated application field in declaration order.

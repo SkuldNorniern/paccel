@@ -237,6 +237,83 @@ mod tests {
     use crate::layer::application::http::HttpMessage;
     use crate::layer::network::icmpv6::NdpMessage;
 
+    /// An IPv4 frame whose header claims `claimed_payload` bytes of `protocol`
+    /// but carries only `body`, the way a short snaplen leaves one.
+    fn build_truncated_ipv4_frame(protocol: u8, body: &[u8], claimed_payload: usize) -> Vec<u8> {
+        let mut frame = Vec::new();
+        frame.extend_from_slice(&[0, 1, 2, 3, 4, 5]);
+        frame.extend_from_slice(&[6, 7, 8, 9, 10, 11]);
+        frame.extend_from_slice(&0x0800u16.to_be_bytes());
+
+        frame.push(0x45);
+        frame.push(0x00);
+        frame.extend_from_slice(&((20 + claimed_payload) as u16).to_be_bytes());
+        frame.extend_from_slice(&0x1234u16.to_be_bytes());
+        frame.extend_from_slice(&0x4000u16.to_be_bytes());
+        frame.push(64);
+        frame.push(protocol);
+        frame.extend_from_slice(&[0x00, 0x00]);
+        frame.extend_from_slice(&[192, 168, 1, 1]);
+        frame.extend_from_slice(&[192, 168, 1, 2]);
+        frame.extend_from_slice(body);
+        frame
+    }
+
+    /// A snaplen that cuts a TCP header short still leaves its ports, and those
+    /// are what a flow is keyed on. Permissive parsing used to discard the whole
+    /// header, so a truncated capture reported no ports at all.
+    #[test]
+    fn a_truncated_tcp_header_keeps_the_ports_that_survived() {
+        let frame =
+            build_truncated_ipv4_frame(6, &[0x00, 0x50, 0x01, 0xbb, 0x00, 0x00, 0x00, 0x00], 40);
+        let parsed = BuiltinPacketParser::parse_with_config(
+            &frame,
+            ParseConfig {
+                stop_after: StopLayer::Transport,
+                ..ParseConfig::default()
+            },
+        )
+        .expect("permissive parsing keeps the frame");
+
+        assert!(parsed.transport.is_none(), "the header did not survive");
+        assert_eq!(parsed.truncated_ports, Some((80, 443)));
+        assert_eq!(parsed.ports(), Some((80, 443)), "read either way");
+        assert!(
+            parsed
+                .warnings
+                .iter()
+                .any(|warning| warning.code == ParseWarningCode::TransportTruncated),
+            "and it says why"
+        );
+    }
+
+    /// Fewer than four bytes leaves nothing to read, and nothing is invented.
+    #[test]
+    fn a_transport_header_cut_before_its_ports_reports_none() {
+        let frame = build_truncated_ipv4_frame(6, &[0x00, 0x50], 40);
+        let parsed = BuiltinPacketParser::parse_with_config(
+            &frame,
+            ParseConfig {
+                stop_after: StopLayer::Transport,
+                ..ParseConfig::default()
+            },
+        )
+        .expect("permissive parsing keeps the frame");
+
+        assert_eq!(parsed.truncated_ports, None);
+        assert_eq!(parsed.ports(), None);
+    }
+
+    /// A complete header answers from itself, not from the truncated pair.
+    #[test]
+    fn a_whole_header_reports_its_ports_and_leaves_the_truncated_pair_empty() {
+        let frame = build_ethernet_ipv4_udp_frame(53, 5353, &[0u8; 4]);
+        let parsed = BuiltinPacketParser::parse(&frame).expect("parses");
+
+        assert_eq!(parsed.ports(), Some((53, 5353)));
+        assert_eq!(parsed.truncated_ports, None);
+    }
+
     fn build_ethernet_ipv4_udp_frame(src_port: u16, dst_port: u16, udp_payload: &[u8]) -> Vec<u8> {
         let udp_len = (8 + udp_payload.len()) as u16;
         let ip_total_len = (20 + udp_len as usize) as u16;
