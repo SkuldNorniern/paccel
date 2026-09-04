@@ -6,6 +6,7 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
+use crate::engine::flow::BiFlow;
 use crate::layer::application::quic::QuicFrame;
 use crate::layer::network::ipv4::Ipv4Header;
 
@@ -297,18 +298,6 @@ impl Default for IpFragmentReassembler {
     }
 }
 
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-struct Endpoint {
-    address: IpAddr,
-    port: u16,
-}
-
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-struct TcpFlowKey {
-    first: Endpoint,
-    second: Endpoint,
-}
-
 /// Policy for conflicting out-of-order TCP segments. Defaults to
 /// [`Self::Reject`].
 ///
@@ -360,8 +349,8 @@ pub struct TcpStreamReassembler {
     max_total_buffered_bytes: usize,
     total_buffered_bytes: usize,
     overlap_policy: TcpOverlapPolicy,
-    flows: HashMap<TcpFlowKey, TcpFlowState>,
-    insertion_order: VecDeque<TcpFlowKey>,
+    flows: HashMap<BiFlow, TcpFlowState>,
+    insertion_order: VecDeque<BiFlow>,
 }
 
 impl TcpStreamReassembler {
@@ -466,8 +455,8 @@ impl TcpStreamReassembler {
                 return Vec::new();
             }
             self.evict_until_room();
-            self.flows.insert(key.clone(), TcpFlowState::default());
-            self.insertion_order.push_back(key.clone());
+            self.flows.insert(key, TcpFlowState::default());
+            self.insertion_order.push_back(key);
         }
         let Some(flow) = self.flows.get_mut(&key) else {
             return Vec::new();
@@ -851,8 +840,7 @@ impl Default for TcpStreamReassembler {
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct QuicStreamKey {
-    first: Endpoint,
-    second: Endpoint,
+    flow: BiFlow,
     // A bidirectional stream carries independent byte sequences each way,
     // both under the same stream_id - without this, the two directions
     // collide into one QuicStreamState.
@@ -1075,15 +1063,14 @@ impl QuicStreamReassembler {
         let previous_len = self.streams.len();
         let mut freed = 0usize;
         self.streams.retain(|key, state| {
-            let keep = key.first != flow.first || key.second != flow.second;
+            let keep = key.flow != flow;
             if !keep {
                 freed += state.buffered_bytes;
             }
             keep
         });
         self.total_buffered_bytes = self.total_buffered_bytes.saturating_sub(freed);
-        self.insertion_order
-            .retain(|key| key.first != flow.first || key.second != flow.second);
+        self.insertion_order.retain(|key| key.flow != flow);
         self.streams.len() != previous_len
     }
 
@@ -1411,8 +1398,7 @@ fn normalized_quic_stream(
 ) -> QuicStreamKey {
     let (flow, direction) = normalized_flow(src, src_port, dst, dst_port);
     QuicStreamKey {
-        first: flow.first,
-        second: flow.second,
+        flow,
         direction,
         stream_id,
     }
@@ -1447,32 +1433,9 @@ fn truncate_at_final_offset<'a>(state: &QuicStreamState, bytes: &'a [u8]) -> &'a
     bytes.get(..bytes.len().min(remaining)).unwrap_or_default()
 }
 
-fn normalized_flow(src: IpAddr, src_port: u16, dst: IpAddr, dst_port: u16) -> (TcpFlowKey, usize) {
-    let source = Endpoint {
-        address: src,
-        port: src_port,
-    };
-    let destination = Endpoint {
-        address: dst,
-        port: dst_port,
-    };
-    if source <= destination {
-        (
-            TcpFlowKey {
-                first: source,
-                second: destination,
-            },
-            0,
-        )
-    } else {
-        (
-            TcpFlowKey {
-                first: destination,
-                second: source,
-            },
-            1,
-        )
-    }
+fn normalized_flow(src: IpAddr, src_port: u16, dst: IpAddr, dst_port: u16) -> (BiFlow, usize) {
+    let (flow, direction) = BiFlow::normalize(src, src_port, dst, dst_port);
+    (flow, direction.index())
 }
 
 fn flow_buffered_bytes(flow: &TcpFlowState) -> usize {

@@ -3,6 +3,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::net::IpAddr;
 
+use crate::engine::flow::BiFlow;
 use crate::engine::{BuiltinPacketParser, ParsedPacket, TcpStreamReassembler, TransportSegment};
 use crate::layer::ProbeResult;
 use crate::layer::application::http::{HttpMessage, probe_http};
@@ -32,21 +33,9 @@ pub struct StreamEvent {
     pub l7: StreamL7,
 }
 
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-struct Endpoint {
-    address: IpAddr,
-    port: u16,
-}
-
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-struct FlowKey {
-    first: Endpoint,
-    second: Endpoint,
-}
-
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct DirectionKey {
-    flow: FlowKey,
+    flow: BiFlow,
     direction: usize,
 }
 
@@ -61,7 +50,7 @@ struct ProbeState {
 pub struct SessionTracker {
     tcp: TcpStreamReassembler,
     probes: HashMap<DirectionKey, ProbeState>,
-    generations: HashMap<FlowKey, u64>,
+    generations: HashMap<BiFlow, u64>,
     max_probe_bytes: usize,
     max_probe_flows: usize,
     max_total_probe_bytes: usize,
@@ -158,7 +147,7 @@ impl SessionTracker {
             self.probes.insert(key.clone(), ProbeState::default());
             self.insertion_order.push_back(key.clone());
         }
-        self.generations.insert(key.flow.clone(), generation);
+        self.generations.insert(key.flow, generation);
         let state = self.probes.get_mut(&key)?;
         if state.done {
             return None;
@@ -197,7 +186,7 @@ impl SessionTracker {
         self.tcp.remove_flow(src, src_port, dst, dst_port) || probes_removed || generation_removed
     }
 
-    fn remove_probe_flow(&mut self, flow: &FlowKey) -> bool {
+    fn remove_probe_flow(&mut self, flow: &BiFlow) -> bool {
         let previous_len = self.probes.len();
         let mut freed = 0usize;
         self.probes.retain(|key, state| {
@@ -235,7 +224,7 @@ impl SessionTracker {
             // Clear stale TCP sequence state after both probe directions are gone.
             let flow = &oldest.flow;
             let other_direction = DirectionKey {
-                flow: flow.clone(),
+                flow: *flow,
                 direction: 1 - oldest.direction,
             };
             if !self.probes.contains_key(&other_direction) {
@@ -309,34 +298,14 @@ fn probe_l7(bytes: &[u8]) -> Option<StreamL7> {
 }
 
 fn direction_key(src: IpAddr, src_port: u16, dst: IpAddr, dst_port: u16) -> DirectionKey {
-    let source = Endpoint {
-        address: src,
-        port: src_port,
-    };
-    let destination = Endpoint {
-        address: dst,
-        port: dst_port,
-    };
-    if source <= destination {
-        DirectionKey {
-            flow: FlowKey {
-                first: source,
-                second: destination,
-            },
-            direction: 0,
-        }
-    } else {
-        DirectionKey {
-            flow: FlowKey {
-                first: destination,
-                second: source,
-            },
-            direction: 1,
-        }
+    let (flow, direction) = BiFlow::normalize(src, src_port, dst, dst_port);
+    DirectionKey {
+        flow,
+        direction: direction.index(),
     }
 }
 
-fn normalized_flow(src: IpAddr, src_port: u16, dst: IpAddr, dst_port: u16) -> FlowKey {
+fn normalized_flow(src: IpAddr, src_port: u16, dst: IpAddr, dst_port: u16) -> BiFlow {
     direction_key(src, src_port, dst, dst_port).flow
 }
 
