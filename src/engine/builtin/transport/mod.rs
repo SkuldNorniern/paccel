@@ -304,6 +304,38 @@ mod tests {
         assert_eq!(parsed.ports(), None);
     }
 
+    /// The flow key must agree with the canonical port accessor. It matched on
+    /// `transport` instead, so a capture cut after the ports reported them
+    /// through `ports()` and then keyed the flow on 0 -> 0.
+    #[test]
+    fn a_flow_key_uses_the_ports_a_short_capture_left() {
+        let frame =
+            build_truncated_ipv4_frame(6, &[0xc0, 0x00, 0x01, 0xbb, 0x00, 0x00, 0x00, 0x00], 40);
+        let parsed = BuiltinPacketParser::parse_with_config(
+            &frame,
+            ParseConfig {
+                stop_after: StopLayer::Transport,
+                ..ParseConfig::default()
+            },
+        )
+        .expect("permissive keeps the frame");
+
+        assert_eq!(parsed.ports(), Some((49152, 443)));
+        let key = parsed.outer_flow_key().expect("a key from the addresses");
+        assert_eq!(
+            (key.src_port, key.dst_port),
+            (49152, 443),
+            "the key agrees with ports()"
+        );
+        assert_eq!(
+            parsed
+                .innermost_flow_key()
+                .map(|k| (k.src_port, k.dst_port)),
+            Some((49152, 443)),
+            "and so does the innermost key"
+        );
+    }
+
     /// The fixed twenty bytes of an IPv4 header carry both addresses, so a
     /// capture that stopped inside the options still has what a flow is keyed
     /// on. It used to lose the whole frame.

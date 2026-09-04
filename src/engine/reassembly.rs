@@ -311,14 +311,28 @@ struct TcpFlowKey {
 
 /// Policy for conflicting out-of-order TCP segments. Defaults to
 /// [`Self::Reject`].
+///
+/// These decide what happens when a segment overlaps data that is still
+/// buffered awaiting a gap. Bytes already emitted to the caller are immutable:
+/// no policy can reach back and rewrite them, so this is not the full
+/// stream normalisation an operating system performs. A segment that overlaps
+/// only already-emitted bytes has nothing left to conflict with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TcpOverlapPolicy {
-    /// Drop overlapping bytes and buffer any non-overlapping portion.
+    /// Refuse the whole segment when any part of it overlaps buffered data,
+    /// including the parts that do not overlap.
+    ///
+    /// The conservative reading, and the default: a sender contradicting itself
+    /// is the shape of an evasion attempt, and guessing which copy was meant is
+    /// how a parser and the host it watches end up seeing different streams.
+    /// Use [`Self::FirstWins`] to keep the non-overlapping remainder.
     #[default]
     Reject,
-    /// Keep whichever bytes were buffered first for the overlapping range.
+    /// Keep whichever bytes were buffered first for the overlapping range, and
+    /// buffer the parts of the segment that do not overlap.
     FirstWins,
-    /// The incoming segment's bytes win the overlapping range.
+    /// The incoming segment's bytes win the overlapping range, replacing what
+    /// was buffered there.
     LastWins,
 }
 
