@@ -324,8 +324,27 @@ impl BuiltinPacketParser {
 
                 let ip_header_len = (ipv4.ihl as usize) * 4;
                 let total_len = ipv4.total_length as usize;
-                if total_len < ip_header_len || ip_header_len > l3_bytes.len() {
+                if total_len < ip_header_len {
                     return Err(LayerError::InvalidLength);
+                }
+
+                // The capture stopped inside the options, so the addresses are
+                // good and there is nothing after them to read. Permissive
+                // keeps the frame and says so; Strict refuses it, the same way
+                // both already treat a payload the capture cut short.
+                if ipv4.options_truncated {
+                    if config.mode == ParseMode::Strict {
+                        return Err(LayerError::InvalidLength);
+                    }
+                    parsed.warnings.push(ParseWarning {
+                        code: ParseWarningCode::Ipv4OptionsTruncated,
+                        protocol: ParseWarningProtocol::Network,
+                        offset: l3_offset,
+                        message: "IPv4 options did not survive the capture; \
+                                  addresses are still valid",
+                    });
+                    parsed.ipv4 = Some(ipv4);
+                    return Ok(());
                 }
 
                 let truncated = total_len > l3_bytes.len();

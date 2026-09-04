@@ -37,10 +37,12 @@ pub(super) fn parse_ipv4_header(data: &[u8]) -> Result<Ipv4Header, LayerError> {
         return Err(LayerError::InvalidHeader);
     }
 
+    // The fixed twenty bytes hold both addresses, so a capture that stopped
+    // inside the options still has the part a flow is keyed on. Report the
+    // header and say the options went missing; the caller decides whether that
+    // is acceptable, as it already does for a truncated payload.
     let header_len = (ihl as usize) * 4;
-    if data.len() < header_len {
-        return Err(LayerError::InvalidLength);
-    }
+    let options_truncated = data.len() < header_len;
 
     let dscp = data[1] >> 2;
     let ecn = data[1] & 0x03;
@@ -55,7 +57,7 @@ pub(super) fn parse_ipv4_header(data: &[u8]) -> Result<Ipv4Header, LayerError> {
     let checksum = u16::from_be_bytes([data[10], data[11]]);
     let source = Ipv4Addr::new(data[12], data[13], data[14], data[15]);
     let destination = Ipv4Addr::new(data[16], data[17], data[18], data[19]);
-    let options = if ihl > 5 {
+    let options = if ihl > 5 && !options_truncated {
         Some(data[20..header_len].to_vec())
     } else {
         None
@@ -76,6 +78,7 @@ pub(super) fn parse_ipv4_header(data: &[u8]) -> Result<Ipv4Header, LayerError> {
         source,
         destination,
         options,
+        options_truncated,
     })
 }
 

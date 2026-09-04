@@ -72,6 +72,8 @@ pub enum ParseWarningCode {
     Ipv6Truncated,
     UnsupportedEthertype(u16),
     Ipv4Truncated,
+    /// The IPv4 header declared options the capture did not keep.
+    Ipv4OptionsTruncated,
     Ipv4Fragmented,
     IpipInner,
     GreInner,
@@ -96,6 +98,7 @@ impl ParseWarningCode {
             Self::Ipv6Truncated => "ipv6-truncated",
             Self::UnsupportedEthertype(_) => "unsupported-ethertype",
             Self::Ipv4Truncated => "ipv4-truncated",
+            Self::Ipv4OptionsTruncated => "ipv4-options-truncated",
             Self::Ipv4Fragmented => "ipv4-fragmented",
             Self::IpipInner => "ipip-inner",
             Self::GreInner => "gre-inner",
