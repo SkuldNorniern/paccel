@@ -1165,6 +1165,26 @@ impl ParsedPacket {
 
 #[cfg(test)]
 mod tests {
+    use super::{ApplicationLayers, ParsedPacket};
+
+    /// `ParsedPacket` is built once per packet and, for `parse`, moved out by
+    /// value. Its size is a hot-path cost, so a change to it should be a
+    /// decision rather than a surprise. Update these numbers deliberately.
+    #[test]
+    fn the_parsed_packet_stays_the_size_it_was_measured_at() {
+        assert_eq!(
+            size_of::<ParsedPacket>(),
+            856,
+            "ParsedPacket changed size; the application layer moved behind a \
+             pointer to get it here from 2736"
+        );
+        assert_eq!(
+            size_of::<ApplicationLayers>(),
+            1896,
+            "ApplicationLayers changed size"
+        );
+    }
+
     use super::{
         OpenVpnOpcode, ParseMode, ParseWarningCode, ParseWarningProtocol, UdpAppHint,
         WireGuardMessageType,
