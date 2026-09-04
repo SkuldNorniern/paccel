@@ -196,6 +196,9 @@ pub enum ReassemblyEvent {
     GapLimit,
     /// A limit refused it: no room for the flow, or for the bytes.
     ResourceLimit,
+    /// A QUIC frame disagreed with the stream's already-declared final size,
+    /// which RFC 9000 calls a FINAL_SIZE_ERROR.
+    FinalSizeError,
     /// Nothing to do: no payload, or the segment could not be placed.
     Ignored,
 }

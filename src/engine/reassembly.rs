@@ -1176,6 +1176,56 @@ impl QuicStreamReassembler {
         self.offer_inner(
             src, src_port, dst, dst_port, stream_id, offset, fin, data, None,
         )
+        .data
+    }
+
+    /// As [`Self::offer`], also saying what happened to the frame.
+    ///
+    /// An empty `data` covers a duplicate, a refused conflict, a closed stream,
+    /// a gap too far ahead and a limit alike; the event tells them apart.
+    #[allow(clippy::too_many_arguments)]
+    pub fn offer_detailed(
+        &mut self,
+        src: IpAddr,
+        src_port: u16,
+        dst: IpAddr,
+        dst_port: u16,
+        stream_id: u64,
+        offset: u64,
+        fin: bool,
+        data: &[u8],
+    ) -> ReassemblyOutput {
+        self.offer_inner(
+            src, src_port, dst, dst_port, stream_id, offset, fin, data, None,
+        )
+    }
+
+    /// As [`Self::offer_detailed`], dating the stream for
+    /// [`Self::expire_before`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn offer_detailed_at(
+        &mut self,
+        src: IpAddr,
+        src_port: u16,
+        dst: IpAddr,
+        dst_port: u16,
+        stream_id: u64,
+        offset: u64,
+        fin: bool,
+        data: &[u8],
+        now: Timestamp,
+    ) -> ReassemblyOutput {
+        self.offer_inner(
+            src,
+            src_port,
+            dst,
+            dst_port,
+            stream_id,
+            offset,
+            fin,
+            data,
+            Some(now),
+        )
     }
 
     /// As [`Self::offer`], dating the stream so [`Self::expire_before`] can age
@@ -1204,6 +1254,7 @@ impl QuicStreamReassembler {
             data,
             Some(now),
         )
+        .data
     }
 
     /// Drop every dated stream last seen before `cutoff`. Undated streams are
@@ -1239,32 +1290,35 @@ impl QuicStreamReassembler {
         fin: bool,
         data: &[u8],
         now: Option<Timestamp>,
-    ) -> Vec<u8> {
+    ) -> ReassemblyOutput {
         let Ok(data_length) = u64::try_from(data.len()) else {
-            return Vec::new();
+            return ReassemblyOutput::empty(ReassemblyEvent::Ignored);
         };
         let Some(end) = offset.checked_add(data_length) else {
-            return Vec::new();
+            return ReassemblyOutput::empty(ReassemblyEvent::Ignored);
         };
         let key = normalized_quic_stream(src, src_port, dst, dst_port, stream_id);
         if !self.ensure_stream(&key) {
-            return Vec::new();
+            return ReassemblyOutput::empty(ReassemblyEvent::ResourceLimit);
         }
         let Some(state) = self.streams.get_mut(&key) else {
-            return Vec::new();
+            return ReassemblyOutput::empty(ReassemblyEvent::ResourceLimit);
         };
         if let Some(now) = now {
             state.last_seen.observe(now);
         }
-        if state.closed || !offset_within_gap(state.expected, offset, self.max_gap) {
-            return Vec::new();
+        if state.closed {
+            return ReassemblyOutput::empty(ReassemblyEvent::Closed);
+        }
+        if !offset_within_gap(state.expected, offset, self.max_gap) {
+            return ReassemblyOutput::empty(ReassemblyEvent::GapLimit);
         }
         if !Self::accept_final_offset(state, end, fin) {
-            return Vec::new();
+            return ReassemblyOutput::empty(ReassemblyEvent::FinalSizeError);
         }
 
         let mut output = Vec::new();
-        Self::accept_payload(
+        let result = Self::accept_payload(
             state,
             offset,
             data,
@@ -1275,7 +1329,10 @@ impl QuicStreamReassembler {
         );
         Self::consume_contiguous(state, &mut self.total_buffered_bytes, &mut output);
         Self::update_closed(state);
-        output
+
+        let event = quic_event(&output, state, result, data.is_empty());
+
+        ReassemblyOutput::new(output, event)
     }
 
     /// Accepts a parsed STREAM frame, returning `None` for other frame types.
@@ -1419,27 +1476,34 @@ impl QuicStreamReassembler {
         max_total_buffered_bytes: usize,
         total_buffered_bytes: &mut usize,
         output: &mut Vec<u8>,
-    ) {
+    ) -> QuicRangeResult {
         if data.is_empty() {
-            return;
+            return QuicRangeResult::Duplicate;
         }
 
         // Checked before the path is chosen, not inside buffering. A frame that
         // closes the gap and contradicts a buffered range beyond it went
         // straight out to the caller, which is the case the conflict check
         // exists to stop.
-        if Self::compare_with_buffered(state, offset, data) == QuicRangeResult::Conflict {
+        let compared = Self::compare_with_buffered(state, offset, data);
+        if compared == QuicRangeResult::Conflict {
             state.conflicts = state.conflicts.saturating_add(1);
-            return;
+            return QuicRangeResult::Conflict;
         }
 
         if offset == state.expected {
             output.extend_from_slice(data);
             advance_quic_expected(state, data.len());
-            return;
+            return QuicRangeResult::Accepted;
         }
         if offset > state.expected {
-            Self::buffer_range(
+            // Every byte is already held, so there is nothing to merge and the
+            // caller should hear that this was a duplicate rather than a new
+            // range being buffered.
+            if compared == QuicRangeResult::Duplicate {
+                return QuicRangeResult::Duplicate;
+            }
+            return Self::buffer_range(
                 state,
                 offset,
                 data,
@@ -1447,20 +1511,23 @@ impl QuicStreamReassembler {
                 max_total_buffered_bytes,
                 total_buffered_bytes,
             );
-            return;
         }
 
         let Some(consumed) = state.expected.checked_sub(offset) else {
-            return;
+            return compared;
         };
         let Ok(consumed) = usize::try_from(consumed) else {
-            return;
+            return compared;
         };
         let Some(contiguous) = data.get(consumed..) else {
-            return;
+            return compared;
         };
+        if contiguous.is_empty() {
+            return QuicRangeResult::Duplicate;
+        }
         output.extend_from_slice(contiguous);
         advance_quic_expected(state, contiguous.len());
+        QuicRangeResult::Accepted
     }
 
     /// Compare a range against what is already buffered.
@@ -1683,6 +1750,34 @@ fn normalized_quic_stream(
         flow,
         direction,
         stream_id,
+    }
+}
+
+/// What to report for a QUIC frame that produced `output`.
+fn quic_event(
+    output: &[u8],
+    state: &QuicStreamState,
+    result: QuicRangeResult,
+    data_empty: bool,
+) -> ReassemblyEvent {
+    if !output.is_empty() {
+        return ReassemblyEvent::Data;
+    }
+    if data_empty {
+        return ReassemblyEvent::Ignored;
+    }
+
+    match result {
+        QuicRangeResult::Conflict => ReassemblyEvent::Conflict,
+        QuicRangeResult::Duplicate => ReassemblyEvent::Duplicate,
+        QuicRangeResult::ResourceLimited => ReassemblyEvent::ResourceLimit,
+        QuicRangeResult::Accepted => {
+            if state.closed {
+                ReassemblyEvent::Closed
+            } else {
+                ReassemblyEvent::Buffered
+            }
+        }
     }
 }
 
@@ -2643,6 +2738,63 @@ mod tests {
                 .is_empty()
         );
         assert_eq!(reassembler.buffered_bytes(), 6);
+    }
+
+    /// QUIC has outcomes TCP does not: a stream that already closed, a gap too
+    /// far ahead, and a frame disagreeing with a declared final size.
+    #[test]
+    fn quic_detailed_tells_the_empty_results_apart() {
+        let (src, dst) = endpoints();
+        let mut reassembler = QuicStreamReassembler::new();
+
+        let buffered = reassembler.offer_detailed(src, 4_432, dst, 443, 0, 5, false, b"world");
+        assert_eq!(buffered.event, ReassemblyEvent::Buffered);
+
+        // Same bytes again: already held.
+        let duplicate = reassembler.offer_detailed(src, 4_432, dst, 443, 0, 5, false, b"world");
+        assert_eq!(duplicate.event, ReassemblyEvent::Duplicate);
+
+        // Different bytes for the same offset: refused.
+        let conflict = reassembler.offer_detailed(src, 4_432, dst, 443, 0, 5, false, b"EVIL!");
+        assert_eq!(conflict.event, ReassemblyEvent::Conflict);
+
+        let filled = reassembler.offer_detailed(src, 4_432, dst, 443, 0, 0, false, b"hello");
+        assert_eq!(filled.event, ReassemblyEvent::Data);
+        assert_eq!(filled.data, b"helloworld");
+    }
+
+    #[test]
+    fn quic_detailed_reports_a_gap_too_far_ahead() {
+        let (src, dst) = endpoints();
+        let mut reassembler = QuicStreamReassembler::with_limits(1_000, 16);
+
+        let far = reassembler.offer_detailed(src, 4_432, dst, 443, 0, 10_000, false, b"x");
+        assert_eq!(far.event, ReassemblyEvent::GapLimit);
+    }
+
+    /// A FIN declaring a final size below what was already received is
+    /// RFC 9000's FINAL_SIZE_ERROR.
+    #[test]
+    fn quic_detailed_reports_a_final_size_error() {
+        let (src, dst) = endpoints();
+        let mut reassembler = QuicStreamReassembler::new();
+
+        reassembler.offer_detailed(src, 4_432, dst, 443, 0, 0, false, b"0123456789");
+        let shrunk = reassembler.offer_detailed(src, 4_432, dst, 443, 0, 0, true, b"012");
+        assert_eq!(shrunk.event, ReassemblyEvent::FinalSizeError);
+    }
+
+    /// Once a stream is closed, later frames are not silently swallowed.
+    #[test]
+    fn quic_detailed_reports_a_closed_stream() {
+        let (src, dst) = endpoints();
+        let mut reassembler = QuicStreamReassembler::new();
+
+        let done = reassembler.offer_detailed(src, 4_432, dst, 443, 0, 0, true, b"hello");
+        assert_eq!(done.data, b"hello");
+
+        let after = reassembler.offer_detailed(src, 4_432, dst, 443, 0, 5, false, b"more");
+        assert_eq!(after.event, ReassemblyEvent::Closed);
     }
 
     #[test]
