@@ -1154,6 +1154,16 @@ impl QuicStreamReassembler {
         if data.is_empty() {
             return;
         }
+
+        // Checked before the path is chosen, not inside buffering. A frame that
+        // closes the gap and contradicts a buffered range beyond it went
+        // straight out to the caller, which is the case the conflict check
+        // exists to stop.
+        if Self::compare_with_buffered(state, offset, data) == QuicRangeResult::Conflict {
+            state.conflicts = state.conflicts.saturating_add(1);
+            return;
+        }
+
         if offset == state.expected {
             output.extend_from_slice(data);
             advance_quic_expected(state, data.len());
@@ -1243,26 +1253,44 @@ impl QuicStreamReassembler {
         max_total_buffered_bytes: usize,
         total_buffered_bytes: &mut usize,
     ) -> QuicRangeResult {
-        // A retransmission carrying the same bytes is ordinary; one carrying
-        // different bytes for an offset already held is not, and the first copy
-        // stands rather than being quietly replaced.
-        match Self::compare_with_buffered(state, offset, data) {
-            QuicRangeResult::Accepted => {}
-            QuicRangeResult::Conflict => {
-                state.conflicts = state.conflicts.saturating_add(1);
-                return QuicRangeResult::Conflict;
+        // The caller has already compared this range against what is held, so
+        // anything overlapping agrees byte for byte and the two can be merged.
+        // Stored ranges are kept non-overlapping and non-touching: overlapping
+        // ones let `compare_with_buffered` count the same bytes twice and call
+        // a range that carries new data a duplicate.
+        let Some(end) = offset.checked_add(data.len() as u64) else {
+            return QuicRangeResult::ResourceLimited;
+        };
+
+        let mut merge_start = offset;
+        let mut merge_end = end;
+        let mut absorbed: Vec<u64> = Vec::new();
+        for (&held_offset, held) in &state.ranges {
+            let Some(held_end) = held_offset.checked_add(held.len() as u64) else {
+                continue;
+            };
+            if held_end < offset || held_offset > end {
+                continue;
             }
-            other => return other,
+            absorbed.push(held_offset);
+            merge_start = merge_start.min(held_offset);
+            merge_end = merge_end.max(held_end);
         }
 
-        let replaced = state.ranges.get(&offset).map_or(0, Vec::len);
+        let Ok(merged_len) = usize::try_from(merge_end.saturating_sub(merge_start)) else {
+            return QuicRangeResult::ResourceLimited;
+        };
+        let replaced: usize = absorbed
+            .iter()
+            .map(|held_offset| state.ranges.get(held_offset).map_or(0, Vec::len))
+            .sum();
         let Some(without_replaced) = state.buffered_bytes.checked_sub(replaced) else {
             *total_buffered_bytes = total_buffered_bytes.saturating_sub(state.buffered_bytes);
             state.ranges.clear();
             state.buffered_bytes = 0;
             return QuicRangeResult::ResourceLimited;
         };
-        let Some(projected) = without_replaced.checked_add(data.len()) else {
+        let Some(projected) = without_replaced.checked_add(merged_len) else {
             *total_buffered_bytes = total_buffered_bytes.saturating_sub(state.buffered_bytes);
             state.ranges.clear();
             state.buffered_bytes = 0;
@@ -1275,13 +1303,31 @@ impl QuicStreamReassembler {
             return QuicRangeResult::ResourceLimited;
         }
         let without_replaced_total = total_buffered_bytes.saturating_sub(replaced);
-        let Some(projected_total) = without_replaced_total.checked_add(data.len()) else {
+        let Some(projected_total) = without_replaced_total.checked_add(merged_len) else {
             return QuicRangeResult::ResourceLimited;
         };
         if projected_total > max_total_buffered_bytes {
             return QuicRangeResult::ResourceLimited;
         }
-        state.ranges.insert(offset, data.to_vec());
+        let mut merged = vec![0u8; merged_len];
+        for held_offset in absorbed {
+            let Some(held) = state.ranges.remove(&held_offset) else {
+                continue;
+            };
+            let Ok(at) = usize::try_from(held_offset.saturating_sub(merge_start)) else {
+                continue;
+            };
+            if let Some(slot) = merged.get_mut(at..at + held.len()) {
+                slot.copy_from_slice(&held);
+            }
+        }
+        if let Ok(at) = usize::try_from(offset.saturating_sub(merge_start))
+            && let Some(slot) = merged.get_mut(at..at + data.len())
+        {
+            slot.copy_from_slice(data);
+        }
+
+        state.ranges.insert(merge_start, merged);
         state.buffered_bytes = projected;
         *total_buffered_bytes = projected_total;
 
@@ -2297,6 +2343,125 @@ mod tests {
             reassembler.offer(src, 4_432, dst, 443, 0, 0, false, b"hello"),
             b"helloworld",
             "the first copy is what the reader sees"
+        );
+    }
+
+    /// A frame that fills the gap is checked against what is already buffered
+    /// beyond it. The in-order path emitted straight to the caller without
+    /// looking, so a conflicting overlap slipped through whenever the same
+    /// frame also closed the gap.
+    #[test]
+    fn quic_gap_filling_frame_is_checked_against_buffered_ranges() {
+        let (src, dst) = endpoints();
+        let mut reassembler = QuicStreamReassembler::new();
+
+        // Buffered ahead of the gap: [4,8) = "AAAA".
+        assert!(
+            reassembler
+                .offer(src, 4_432, dst, 443, 0, 4, false, b"AAAA")
+                .is_empty()
+        );
+
+        // Fills [0,4) and contradicts [4,8) in the same frame.
+        assert!(
+            reassembler
+                .offer(src, 4_432, dst, 443, 0, 0, false, b"xxxxBBBB")
+                .is_empty(),
+            "the contradiction is refused, not emitted"
+        );
+        assert_eq!(reassembler.conflicts(), 1);
+
+        // The honest gap filler still works and the first copy stands.
+        assert_eq!(
+            reassembler.offer(src, 4_432, dst, 443, 0, 0, false, b"xxxx"),
+            b"xxxxAAAA"
+        );
+    }
+
+    /// The merge keeps stored ranges apart. `compare_with_buffered` sums the
+    /// overlap of each stored range against the incoming one, which only counts
+    /// correctly while no two stored ranges cover the same byte.
+    #[test]
+    fn quic_stored_ranges_never_overlap_or_touch() {
+        let (src, dst) = endpoints();
+        let mut reassembler = QuicStreamReassembler::new();
+        let truth: Vec<u8> = (0..256u32)
+            .map(|i| u8::try_from(i % 251).unwrap_or(0))
+            .collect();
+
+        // Deliberately overlapping, out of order, leaving a gap at the front so
+        // nothing drains.
+        for (offset, len) in [(40usize, 30usize), (60, 30), (100, 10), (50, 5), (105, 40)] {
+            let end = offset + len;
+            reassembler.offer(
+                src,
+                4_433,
+                dst,
+                443,
+                0,
+                offset as u64,
+                false,
+                &truth[offset..end],
+            );
+        }
+
+        let state = reassembler.streams.values().next().expect("one stream");
+        let mut bounds: Vec<(u64, u64)> = state
+            .ranges
+            .iter()
+            .map(|(&offset, bytes)| (offset, offset + bytes.len() as u64))
+            .collect();
+        bounds.sort_unstable();
+
+        for pair in bounds.windows(2) {
+            assert!(
+                pair[0].1 < pair[1].0,
+                "ranges {:?} and {:?} overlap or touch",
+                pair[0],
+                pair[1]
+            );
+        }
+
+        let stored: usize = state.ranges.values().map(Vec::len).sum();
+        assert_eq!(
+            stored, state.buffered_bytes,
+            "accounting matches what is held"
+        );
+    }
+
+    /// Stored ranges must not overlap, or coverage gets counted twice and a
+    /// range carrying new bytes is mistaken for a duplicate.
+    #[test]
+    fn quic_overlapping_stored_ranges_do_not_hide_new_bytes() {
+        let (src, dst) = endpoints();
+        let mut reassembler = QuicStreamReassembler::new();
+
+        // [10,20) then [15,25): agreeing on [15,20).
+        assert!(
+            reassembler
+                .offer(src, 4_432, dst, 443, 0, 10, false, b"BBBBBCCCCC")
+                .is_empty()
+        );
+        assert!(
+            reassembler
+                .offer(src, 4_432, dst, 443, 0, 15, false, b"CCCCCDDDDD")
+                .is_empty()
+        );
+        assert_eq!(reassembler.conflicts(), 0, "they agree where they overlap");
+
+        // [10,30) covers both and adds [25,30). Summing the two stored ranges
+        // reaches 20 bytes and would call this a duplicate.
+        assert!(
+            reassembler
+                .offer(src, 4_432, dst, 443, 0, 10, false, b"BBBBBCCCCCDDDDDEEEEE")
+                .is_empty()
+        );
+        assert_eq!(reassembler.conflicts(), 0);
+
+        assert_eq!(
+            reassembler.offer(src, 4_432, dst, 443, 0, 0, false, b"AAAAAAAAAA"),
+            b"AAAAAAAAAABBBBBCCCCCDDDDDEEEEE",
+            "the tail past the stored ranges is not lost"
         );
     }
 
