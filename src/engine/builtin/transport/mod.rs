@@ -229,9 +229,9 @@ mod tests {
 
     use crate::engine::builtin::{
         BuiltinPacketParser, Dnp3AppFunctionCode, Dnp3FunctionCode, FlowKey, FtpMessage,
-        ImapMessage, NatPmpMessage, OpenVpnOpcode, ParseConfig, ParseWarningCode, PcpHeader,
-        RpcMessage, SipMessage, SmtpMessage, SnmpMessage, SnmpPduType, SsdpMessage, StopLayer,
-        SyslogMessage, TelnetCommand, TftpMessage, TransportSegment, UdpAppHint,
+        ImapMessage, NatPmpMessage, OpenVpnOpcode, ParseConfig, ParseMode, ParseWarningCode,
+        PcpHeader, RpcMessage, SipMessage, SmtpMessage, SnmpMessage, SnmpPduType, SsdpMessage,
+        StopLayer, SyslogMessage, TelnetCommand, TftpMessage, TransportSegment, UdpAppHint,
         WireGuardMessageType,
     };
     use crate::layer::application::http::HttpMessage;
@@ -302,6 +302,53 @@ mod tests {
 
         assert_eq!(parsed.truncated_ports, None);
         assert_eq!(parsed.ports(), None);
+    }
+
+    /// The fixed twenty bytes of an IPv4 header carry both addresses, so a
+    /// capture that stopped inside the options still has what a flow is keyed
+    /// on. It used to lose the whole frame.
+    #[test]
+    fn truncated_ipv4_options_keep_the_addresses_but_only_permissively() {
+        let mut frame = vec![0xaa; 6];
+        frame.extend_from_slice(&[0xbb; 6]);
+        frame.extend_from_slice(&0x0800u16.to_be_bytes());
+        // IHL 15 declares a sixty-byte header; only thirty bytes survived.
+        let mut ip = vec![0x4f, 0x00];
+        ip.extend_from_slice(&60u16.to_be_bytes());
+        ip.extend_from_slice(&[0x12, 0x34, 0x40, 0x00, 64, 6, 0, 0]);
+        ip.extend_from_slice(&[192, 168, 1, 1]);
+        ip.extend_from_slice(&[192, 168, 1, 2]);
+        ip.resize(30, 0);
+        frame.extend_from_slice(&ip);
+
+        let permissive = BuiltinPacketParser::parse_with_config(
+            &frame,
+            ParseConfig {
+                stop_after: StopLayer::Transport,
+                ..ParseConfig::default()
+            },
+        )
+        .expect("permissive keeps what survived");
+        let ipv4 = permissive.ipv4.as_ref().expect("addresses are still there");
+        assert_eq!(ipv4.source.octets(), [192, 168, 1, 1]);
+        assert!(ipv4.options_truncated, "and it says the options went");
+        assert!(ipv4.options.is_none(), "none are reported, none invented");
+        assert!(
+            permissive
+                .warnings
+                .iter()
+                .any(|w| w.code == ParseWarningCode::Ipv4OptionsTruncated)
+        );
+
+        let strict = BuiltinPacketParser::parse_with_config(
+            &frame,
+            ParseConfig {
+                stop_after: StopLayer::Transport,
+                mode: ParseMode::Strict,
+                ..ParseConfig::default()
+            },
+        );
+        assert!(strict.is_err(), "strict still refuses it");
     }
 
     /// Every extension header in the chain is treated alike: a capture that

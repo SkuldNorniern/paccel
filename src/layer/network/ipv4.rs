@@ -17,4 +17,11 @@ pub struct Ipv4Header {
     pub source: Ipv4Addr,
     pub destination: Ipv4Addr,
     pub options: Option<Vec<u8>>,
+    /// The header declared options the capture did not keep.
+    ///
+    /// The fixed twenty bytes carry both addresses, so a header cut short in
+    /// its options is still worth reporting. `options` is `None` here for the
+    /// same reason it is `None` when there were none at all; this says which
+    /// of the two it was.
+    pub options_truncated: bool,
 }

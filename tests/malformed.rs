@@ -169,10 +169,15 @@ fn truncated_ethernet_headers_are_rejected() {
 }
 
 #[test]
-fn ipv4_max_ihl_with_short_header_is_rejected() {
+fn ipv4_max_ihl_with_short_header_is_rejected_only_in_strict_mode() {
     let mut bytes = ethernet(0x0800);
     bytes.extend_from_slice(&ipv4_header(15, 60, 6));
-    assert_packet_error(&bytes);
+
+    let parsed = BuiltinPacketParser::parse(&bytes).expect("permissive keeps what it read");
+    let ipv4 = parsed.ipv4.as_ref().expect("the addresses are still valid");
+    assert!(ipv4.options_truncated, "the options did not survive");
+    assert!(ipv4.options.is_none(), "and none are invented");
+    assert!(BuiltinPacketParser::parse_with_config(&bytes, strict_config()).is_err());
 }
 
 #[test]
