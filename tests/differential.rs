@@ -193,7 +193,7 @@ fn paccel_agrees_with_tshark_on_fixtures() {
                     );
                 }
                 Some(TransportSegment::Sctp(_)) => {}
-                None => {}
+                _ => {}
             }
 
             let qname = parsed

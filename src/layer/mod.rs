@@ -8,6 +8,7 @@ pub mod transport;
 
 /// Packet parsing errors.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum LayerError {
     MissingField,
     InvalidLength,
@@ -65,6 +66,7 @@ impl fmt::Display for Layer {
 
 /// Parse failure independent of layer or protocol.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ParseErrorKind {
     /// The buffer ended before a complete value could be read.
     Incomplete {

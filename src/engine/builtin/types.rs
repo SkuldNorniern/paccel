@@ -486,6 +486,7 @@ pub struct EthernetFrame {
 }
 
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum TransportSegment {
     Tcp(TcpHeader),
     Udp(UdpHeader),
@@ -665,6 +666,7 @@ pub struct ParsedPacket {
 /// Application protocol returned by [`ParsedPacket::application`]. Protocols
 /// also remain available through their named `Option<T>` fields.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub enum ApplicationLayer<'a> {
     Dnp3(&'a Dnp3Message),
     Dns(&'a DnsMessage),
