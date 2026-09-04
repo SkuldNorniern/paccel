@@ -4,8 +4,9 @@ use std::collections::{HashMap, VecDeque};
 use std::net::IpAddr;
 
 use crate::engine::{BuiltinPacketParser, ParsedPacket, TcpStreamReassembler, TransportSegment};
-use crate::layer::application::http::{HttpMessage, parse_http};
-use crate::layer::application::tls::{TlsClientHello, parse_tls_client_hello};
+use crate::layer::ProbeResult;
+use crate::layer::application::http::{HttpMessage, probe_http};
+use crate::layer::application::tls::{TlsClientHello, probe_tls_client_hello};
 use crate::layer::transport::tcp::TcpHeader;
 
 const DEFAULT_MAX_PROBE_BYTES: usize = 65_536;
@@ -288,35 +289,23 @@ fn tcp_payload<'a>(raw: &'a [u8], parsed: &ParsedPacket, tcp: &TcpHeader) -> Opt
     raw.get(payload_offset..ip_end)
 }
 
+/// Classify what a stream is carrying, once enough of it has arrived.
+///
+/// The probes own the framing rules, so this does not repeat them. `Incomplete`
+/// means the stream may still become this protocol and the caller keeps
+/// buffering; `Malformed` means it claimed to be and was not, so nothing else
+/// is tried.
 fn probe_l7(bytes: &[u8]) -> Option<StreamL7> {
-    let first = *bytes.first()?;
-    if first.is_ascii_uppercase()
-        && http_headers_complete(bytes)
-        && let Ok(http) = parse_http(bytes)
-    {
-        return Some(StreamL7::Http(http));
+    match probe_http(bytes) {
+        ProbeResult::Match(http) => return Some(StreamL7::Http(http)),
+        ProbeResult::Incomplete { .. } | ProbeResult::Malformed(_) => return None,
+        ProbeResult::NoMatch => {}
     }
-    if first == 22
-        && tls_record_complete(bytes)
-        && let Ok(tls) = parse_tls_client_hello(bytes)
-    {
-        return Some(StreamL7::Tls(tls));
+
+    match probe_tls_client_hello(bytes) {
+        ProbeResult::Match(tls) => Some(StreamL7::Tls(tls)),
+        _ => None,
     }
-    None
-}
-
-fn http_headers_complete(bytes: &[u8]) -> bool {
-    bytes.windows(4).any(|window| window == b"\r\n\r\n")
-}
-
-fn tls_record_complete(bytes: &[u8]) -> bool {
-    let Some(length_bytes) = bytes.get(3..5) else {
-        return false;
-    };
-    let record_length = usize::from(u16::from_be_bytes([length_bytes[0], length_bytes[1]]));
-    5usize
-        .checked_add(record_length)
-        .is_some_and(|record_end| record_end <= bytes.len())
 }
 
 fn direction_key(src: IpAddr, src_port: u16, dst: IpAddr, dst_port: u16) -> DirectionKey {
