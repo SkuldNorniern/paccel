@@ -3,7 +3,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::net::IpAddr;
 
-use crate::engine::flow::BiFlow;
+use crate::engine::flow::{BiFlow, LastSeen, Timestamp};
 use crate::engine::{BuiltinPacketParser, ParsedPacket, TcpStreamReassembler, TransportSegment};
 use crate::layer::ProbeResult;
 use crate::layer::application::http::{HttpMessage, probe_http};
@@ -43,6 +43,7 @@ struct DirectionKey {
 struct ProbeState {
     bytes: Vec<u8>,
     done: bool,
+    last_seen: LastSeen,
 }
 
 /// Reassembles TCP payloads and probes each direction once for HTTP or TLS.
@@ -103,6 +104,71 @@ impl SessionTracker {
 
     /// Returns the first HTTP or TLS message found in the frame's direction.
     pub fn offer_frame(&mut self, raw: &[u8]) -> Option<StreamEvent> {
+        self.offer_frame_inner(raw, None)
+    }
+
+    /// As [`Self::offer_frame`], dating the flow so [`Self::expire_before`] can
+    /// age it out. Pass the packet's own timestamp when replaying a capture.
+    pub fn offer_frame_at(&mut self, raw: &[u8], now: Timestamp) -> Option<StreamEvent> {
+        self.offer_frame_inner(raw, Some(now))
+    }
+
+    /// Drop every dated probe last seen before `cutoff`, and expire the TCP
+    /// reassembly under it. Returns how many probe directions went.
+    pub fn expire_before(&mut self, cutoff: Timestamp) -> usize {
+        let before = self.probes.len();
+        let total = &mut self.total_probe_bytes;
+        self.probes.retain(|_, probe| {
+            if probe.last_seen.is_before(cutoff) {
+                *total = total.saturating_sub(probe.bytes.len());
+                false
+            } else {
+                true
+            }
+        });
+        self.tcp.expire_before(cutoff);
+        before - self.probes.len()
+    }
+
+    /// Make sure a probe exists for this direction and is the current TCP
+    /// generation, dating it when the caller supplied a clock.
+    ///
+    /// A new SYN on the same tuple starts a new generation, and the probe from
+    /// the old connection must not carry over into it.
+    fn probe_state_for(
+        &mut self,
+        key: &DirectionKey,
+        src: IpAddr,
+        src_port: u16,
+        dst: IpAddr,
+        dst_port: u16,
+        now: Option<Timestamp>,
+    ) -> Option<()> {
+        let generation = self.tcp.generation(src, src_port, dst, dst_port)?;
+        if self.generations.get(&key.flow).copied() != Some(generation) {
+            self.remove_probe_flow(&key.flow);
+        }
+
+        if !self.probes.contains_key(key) {
+            if self.max_probe_flows == 0 {
+                return None;
+            }
+            self.evict_until_room();
+            self.probes.insert(key.clone(), ProbeState::default());
+            self.insertion_order.push_back(key.clone());
+        }
+        self.generations.insert(key.flow, generation);
+
+        if let Some(now) = now
+            && let Some(state) = self.probes.get_mut(key)
+        {
+            state.last_seen.observe(now);
+        }
+
+        Some(())
+    }
+
+    fn offer_frame_inner(&mut self, raw: &[u8], now: Option<Timestamp>) -> Option<StreamEvent> {
         let parsed = BuiltinPacketParser::parse(raw).ok()?;
         let (src, dst) = ip_endpoints(&parsed)?;
         let tcp = match parsed.transport.as_ref()? {
@@ -114,7 +180,7 @@ impl SessionTracker {
         let dst_port = tcp.destination_port;
         let key = direction_key(src, src_port, dst, dst_port);
 
-        let contiguous = self.tcp.offer(
+        let contiguous = self.tcp.offer_inner(
             src,
             src_port,
             dst,
@@ -124,6 +190,7 @@ impl SessionTracker {
             tcp.flags.fin,
             tcp.flags.rst,
             payload,
+            now,
         );
 
         if tcp.flags.rst {
@@ -134,20 +201,7 @@ impl SessionTracker {
             return None;
         }
 
-        let generation = self.tcp.generation(src, src_port, dst, dst_port)?;
-        if self.generations.get(&key.flow).copied() != Some(generation) {
-            self.remove_probe_flow(&key.flow);
-        }
-
-        if !self.probes.contains_key(&key) {
-            if self.max_probe_flows == 0 {
-                return None;
-            }
-            self.evict_until_room();
-            self.probes.insert(key.clone(), ProbeState::default());
-            self.insertion_order.push_back(key.clone());
-        }
-        self.generations.insert(key.flow, generation);
+        self.probe_state_for(&key, src, src_port, dst, dst_port, now)?;
         let state = self.probes.get_mut(&key)?;
         if state.done {
             return None;

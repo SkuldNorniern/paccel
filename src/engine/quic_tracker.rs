@@ -3,7 +3,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::net::IpAddr;
 
-use crate::engine::flow::BiFlow;
+use crate::engine::flow::{BiFlow, LastSeen, Timestamp};
 use crate::layer::Confidence;
 use crate::layer::application::quic::{
     QuicShortHeader, decode_packet_number, parse_quic_short_header,
@@ -33,6 +33,7 @@ impl QuicPacketNumberSpace {
 #[derive(Debug, Default)]
 struct QuicFlowState {
     expected_dcids: [Option<Vec<u8>>; 2],
+    last_seen: LastSeen,
     largest_packet_numbers: [[Option<u64>; 3]; 2],
 }
 
@@ -84,6 +85,47 @@ impl QuicConnectionTracker {
         dst_port: u16,
         scid: &[u8],
     ) {
+        self.observe_long_header_inner(src, src_port, dst, dst_port, scid, None);
+    }
+
+    /// As [`Self::observe_long_header`], dating the flow so
+    /// [`Self::expire_before`] can age it out.
+    pub fn observe_long_header_at(
+        &mut self,
+        src: IpAddr,
+        src_port: u16,
+        dst: IpAddr,
+        dst_port: u16,
+        scid: &[u8],
+        now: Timestamp,
+    ) {
+        self.observe_long_header_inner(src, src_port, dst, dst_port, scid, Some(now));
+    }
+
+    /// Drop every dated flow last seen before `cutoff`, and the connection IDs
+    /// that pointed at it. Undated flows are left to the capacity limit.
+    pub fn expire_before(&mut self, cutoff: Timestamp) -> usize {
+        let before = self.flows.len();
+        self.flows
+            .retain(|_, flow| !flow.last_seen.is_before(cutoff));
+        let expired = before - self.flows.len();
+        if expired > 0 {
+            self.cid_index.retain(|_, key| self.flows.contains_key(key));
+            self.insertion_order
+                .retain(|key| self.flows.contains_key(key));
+        }
+        expired
+    }
+
+    fn observe_long_header_inner(
+        &mut self,
+        src: IpAddr,
+        src_port: u16,
+        dst: IpAddr,
+        dst_port: u16,
+        scid: &[u8],
+        now: Option<Timestamp>,
+    ) {
         if scid.is_empty() {
             return;
         }
@@ -93,6 +135,9 @@ impl QuicConnectionTracker {
         }
         if let Some(flow) = self.flows.get_mut(&key) {
             flow.expected_dcids[1 - direction] = Some(scid.to_vec());
+            if let Some(now) = now {
+                flow.last_seen.observe(now);
+            }
             self.cid_index.insert(scid.to_vec(), key);
         }
     }
@@ -238,6 +283,35 @@ fn normalized_flow(src: IpAddr, src_port: u16, dst: IpAddr, dst_port: u16) -> (B
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn expire_before_drops_dated_flows_and_their_connection_ids() {
+        let mut tracker = QuicConnectionTracker::new();
+        let a = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+
+        tracker.observe_long_header_at(a, 5_000, b, 443, &[1, 2, 3, 4], 1_000);
+        tracker.observe_long_header_at(a, 6_000, b, 443, &[5, 6, 7, 8], 9_000);
+        assert!(tracker.connection_for_dcid(&[1, 2, 3, 4]).is_some());
+
+        assert_eq!(tracker.expire_before(5_000), 1);
+        assert!(
+            tracker.connection_for_dcid(&[1, 2, 3, 4]).is_none(),
+            "the id goes with the flow"
+        );
+        assert!(tracker.connection_for_dcid(&[5, 6, 7, 8]).is_some());
+    }
+
+    #[test]
+    fn undated_flows_survive_expiry() {
+        let mut tracker = QuicConnectionTracker::new();
+        let a = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+
+        tracker.observe_long_header(a, 5_000, b, 443, &[1, 2, 3, 4]);
+        assert_eq!(tracker.expire_before(u64::MAX), 0);
+        assert!(tracker.connection_for_dcid(&[1, 2, 3, 4]).is_some());
+    }
     use super::*;
     use std::net::Ipv4Addr;
 

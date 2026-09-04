@@ -38,6 +38,7 @@ enum IpDatagramKey {
 #[derive(Debug, Default)]
 struct IpDatagramState {
     bytes: Vec<u8>,
+    last_seen: LastSeen,
     received: Vec<bool>,
     fragment_count: usize,
     total_length: Option<usize>,
@@ -118,7 +119,51 @@ impl IpFragmentReassembler {
             identification: header.identification,
         };
         let offset = usize::from(header.fragment_offset) * 8;
-        self.offer_fragment(key, offset, more_fragments, l4_payload)
+        self.offer_fragment(key, offset, more_fragments, l4_payload, None)
+    }
+
+    /// As [`Self::offer_ipv4`], dating the datagram so [`Self::expire_before`]
+    /// can age a half-arrived one out.
+    pub fn offer_ipv4_at(
+        &mut self,
+        header: &Ipv4Header,
+        l4_payload: &[u8],
+        now: Timestamp,
+    ) -> Option<Vec<u8>> {
+        let more_fragments = header.flags & 1 != 0;
+        if header.fragment_offset == 0 && !more_fragments {
+            return None;
+        }
+
+        let key = IpDatagramKey::V4 {
+            source: header.source,
+            destination: header.destination,
+            protocol: header.protocol,
+            identification: header.identification,
+        };
+        let offset = usize::from(header.fragment_offset) * 8;
+        self.offer_fragment(key, offset, more_fragments, l4_payload, Some(now))
+    }
+
+    /// Drop every dated datagram last seen before `cutoff`. A fragment set
+    /// whose remainder never arrives is exactly what this is for.
+    pub fn expire_before(&mut self, cutoff: Timestamp) -> usize {
+        let before = self.datagrams.len();
+        let total = &mut self.total_bytes;
+        self.datagrams.retain(|_, datagram| {
+            if datagram.last_seen.is_before(cutoff) {
+                *total = total.saturating_sub(datagram.bytes.len());
+                false
+            } else {
+                true
+            }
+        });
+        let expired = before - self.datagrams.len();
+        if expired > 0 {
+            self.insertion_order
+                .retain(|key| self.datagrams.contains_key(key));
+        }
+        expired
     }
 
     /// Returns the complete upper-layer payload after accepting an IPv6 fragment.
@@ -142,7 +187,7 @@ impl IpFragmentReassembler {
             identification: id,
         };
         let offset = usize::from(frag_offset) * 8;
-        self.offer_fragment(key, offset, more_fragments, payload)
+        self.offer_fragment(key, offset, more_fragments, payload, None)
     }
 
     fn offer_fragment(
@@ -151,6 +196,7 @@ impl IpFragmentReassembler {
         offset: usize,
         more_fragments: bool,
         payload: &[u8],
+        now: Option<Timestamp>,
     ) -> Option<Vec<u8>> {
         let Some(end) = offset.checked_add(payload.len()) else {
             self.remove_datagram(&key);
@@ -171,6 +217,11 @@ impl IpFragmentReassembler {
             self.insertion_order.push_back(key.clone());
         }
 
+        if let Some(now) = now
+            && let Some(state) = self.datagrams.get_mut(&key)
+        {
+            state.last_seen.observe(now);
+        }
         let result = match self.datagrams.get_mut(&key) {
             Some(state) => Self::insert_fragment(
                 state,
@@ -500,8 +551,11 @@ impl TcpStreamReassembler {
         expired
     }
 
+    /// The shared body of [`Self::offer`] and [`Self::offer_at`]. Visible in the
+    /// crate so `SessionTracker` can pass its optional timestamp straight
+    /// through rather than branching on it.
     #[allow(clippy::too_many_arguments)]
-    fn offer_inner(
+    pub(crate) fn offer_inner(
         &mut self,
         src: IpAddr,
         src_port: u16,
