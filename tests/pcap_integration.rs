@@ -658,9 +658,7 @@ fn hsrp_synthetic_frame_one_is_hello() {
     let hsrp = parsed.hsrp().expect("HSRP should be present");
     let udp = match parsed.transport.as_ref() {
         Some(TransportSegment::Udp(udp)) => udp,
-        Some(TransportSegment::Tcp(_)) | Some(TransportSegment::Sctp(_)) | None => {
-            panic!("UDP should be present")
-        }
+        _ => panic!("UDP should be present"),
     };
 
     assert_eq!(udp.destination_port, 1985);
@@ -1711,7 +1709,7 @@ fn dns_query_frame_parses_ethernet_ipv4_udp_dns() {
 
     let udp = match parsed.transport.as_ref().expect("transport") {
         TransportSegment::Udp(u) => u,
-        TransportSegment::Tcp(_) | TransportSegment::Sctp(_) => panic!("expected UDP"),
+        _ => panic!("expected UDP"),
     };
     assert_eq!(udp.destination_port, 53);
     assert_eq!(udp.source_port, 12345);
@@ -1750,7 +1748,7 @@ fn dns_response_frame_parses_correctly() {
 
     let udp = match parsed.transport.as_ref().expect("transport") {
         TransportSegment::Udp(u) => u,
-        TransportSegment::Tcp(_) | TransportSegment::Sctp(_) => panic!("expected UDP"),
+        _ => panic!("expected UDP"),
     };
     assert_eq!(udp.source_port, 53);
     assert_eq!(udp.destination_port, 12345);
@@ -1786,7 +1784,7 @@ fn tcp_syn_pcap_parses_correctly() {
 
     let tcp = match parsed.transport.as_ref().expect("transport") {
         TransportSegment::Tcp(t) => t,
-        TransportSegment::Udp(_) | TransportSegment::Sctp(_) => panic!("expected TCP"),
+        _ => panic!("expected TCP"),
     };
     assert_eq!(tcp.destination_port, 80);
     assert_eq!(tcp.source_port, 54321);

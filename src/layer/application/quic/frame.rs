@@ -3,6 +3,7 @@ use crate::layer::LayerError;
 use super::decode_varint;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum QuicFrame<'a> {
     Padding {
         count: usize,
