@@ -349,6 +349,28 @@ impl Default for IpFragmentReassembler {
     }
 }
 
+/// What a [`TcpStreamReassembler`] is holding and what it has refused.
+///
+/// The counters are cumulative; the sizes are current. Together they say
+/// whether state pressure is growing and whether the traffic causing it looks
+/// ordinary.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[non_exhaustive]
+pub struct TcpReassemblyStats {
+    /// Flows held right now.
+    pub active_flows: usize,
+    /// Out-of-order bytes held across every flow.
+    pub buffered_bytes: usize,
+    /// Flows dropped to make room for another.
+    pub evictions: u64,
+    /// Flows torn down by a reset.
+    pub resets: u64,
+    /// Segments refused because they contradicted buffered bytes.
+    pub overlap_conflicts: u64,
+    /// Segments dropped for sitting too far past what was expected.
+    pub gap_rejections: u64,
+}
+
 /// Policy for conflicting out-of-order TCP segments. Defaults to
 /// [`Self::Reject`].
 ///
@@ -395,6 +417,7 @@ struct TcpFlowState {
 /// Reassembles each direction of a TCP flow independently with capped out-of-order storage.
 #[derive(Debug)]
 pub struct TcpStreamReassembler {
+    stats: TcpReassemblyStats,
     max_buffered_bytes: usize,
     max_gap: usize,
     max_flows: usize,
@@ -416,6 +439,7 @@ impl TcpStreamReassembler {
     #[must_use]
     pub fn with_limits(max_buffered_bytes: usize, max_gap: usize) -> Self {
         Self {
+            stats: TcpReassemblyStats::default(),
             max_buffered_bytes,
             max_gap,
             max_flows: DEFAULT_MAX_FLOWS,
@@ -468,6 +492,16 @@ impl TcpStreamReassembler {
     ) -> Option<u64> {
         let (key, _) = normalized_flow(src, src_port, dst, dst_port);
         self.flows.get(&key).map(|flow| flow.generation)
+    }
+
+    /// What this reassembler is holding, and what it has refused.
+    #[must_use]
+    pub fn stats(&self) -> TcpReassemblyStats {
+        TcpReassemblyStats {
+            active_flows: self.flows.len(),
+            buffered_bytes: self.total_buffered_bytes,
+            ..self.stats
+        }
     }
 
     /// Returns newly contiguous payload after accepting one TCP segment.
@@ -633,6 +667,7 @@ impl TcpStreamReassembler {
                     .saturating_sub(flow_buffered_bytes(&flow));
             }
             self.insertion_order.retain(|queued| queued != &key);
+            self.stats.resets = self.stats.resets.saturating_add(1);
             return ReassemblyOutput::empty(ReassemblyEvent::Reset);
         }
 
@@ -684,6 +719,15 @@ impl TcpStreamReassembler {
         let finished = Self::consume_fin(state);
 
         let event = tcp_event(&output, placed, finished || fin);
+        match event {
+            ReassemblyEvent::Conflict => {
+                self.stats.overlap_conflicts = self.stats.overlap_conflicts.saturating_add(1);
+            }
+            ReassemblyEvent::GapLimit => {
+                self.stats.gap_rejections = self.stats.gap_rejections.saturating_add(1);
+            }
+            _ => {}
+        }
 
         ReassemblyOutput::new(output, event)
     }
@@ -715,6 +759,7 @@ impl TcpStreamReassembler {
                 self.total_buffered_bytes = 0;
                 break;
             };
+            self.stats.evictions = self.stats.evictions.saturating_add(1);
             if let Some(flow) = self.flows.remove(&oldest) {
                 self.total_buffered_bytes = self
                     .total_buffered_bytes
@@ -1099,9 +1144,27 @@ struct QuicStreamState {
     highest_received_end: u64,
 }
 
+/// What a [`QuicStreamReassembler`] is holding and what it has refused.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[non_exhaustive]
+pub struct QuicReassemblyStats {
+    /// Streams held right now.
+    pub active_streams: usize,
+    /// Out-of-order bytes held across every stream.
+    pub buffered_bytes: usize,
+    /// Streams dropped to make room for another.
+    pub evictions: u64,
+    /// Retransmissions that contradicted bytes already held.
+    pub conflicts: u64,
+    /// Frames dropped for sitting too far past what was expected.
+    pub gap_rejections: u64,
+}
+
 /// Reassembles QUIC STREAM-frame data with capped out-of-order storage.
 #[derive(Debug)]
 pub struct QuicStreamReassembler {
+    evictions: u64,
+    gap_rejections: u64,
     max_buffered_bytes_per_stream: usize,
     max_gap: usize,
     max_streams: usize,
@@ -1122,6 +1185,8 @@ impl QuicStreamReassembler {
     #[must_use]
     pub fn with_limits(max_buffered_bytes_per_stream: usize, max_gap: usize) -> Self {
         Self {
+            evictions: 0,
+            gap_rejections: 0,
             max_buffered_bytes_per_stream,
             max_gap,
             max_streams: DEFAULT_MAX_STREAMS,
@@ -1152,6 +1217,18 @@ impl QuicStreamReassembler {
     #[must_use]
     pub fn buffered_bytes(&self) -> usize {
         self.total_buffered_bytes
+    }
+
+    /// What this reassembler is holding, and what it has refused.
+    #[must_use]
+    pub fn stats(&self) -> QuicReassemblyStats {
+        QuicReassemblyStats {
+            active_streams: self.streams.len(),
+            buffered_bytes: self.total_buffered_bytes,
+            evictions: self.evictions,
+            conflicts: self.conflicts(),
+            gap_rejections: self.gap_rejections,
+        }
     }
 
     /// Retransmissions that contradicted bytes already buffered, across every
@@ -1316,6 +1393,7 @@ impl QuicStreamReassembler {
             return ReassemblyOutput::empty(ReassemblyEvent::Closed);
         }
         if !offset_within_gap(state.expected, offset, self.max_gap) {
+            self.gap_rejections = self.gap_rejections.saturating_add(1);
             return ReassemblyOutput::empty(ReassemblyEvent::GapLimit);
         }
         if !Self::accept_final_offset(state, end, fin) {
@@ -1445,6 +1523,7 @@ impl QuicStreamReassembler {
                 self.total_buffered_bytes = 0;
                 break;
             };
+            self.evictions = self.evictions.saturating_add(1);
             if let Some(state) = self.streams.remove(&oldest) {
                 self.total_buffered_bytes = self
                     .total_buffered_bytes
@@ -2397,6 +2476,46 @@ mod tests {
         assert_eq!(reset.event, ReassemblyEvent::Reset);
     }
 
+    /// State pressure and the traffic causing it, without a logging crate.
+    #[test]
+    fn tcp_stats_count_what_was_refused() {
+        let (src, dst) = endpoints();
+        let mut reassembler = TcpStreamReassembler::with_limits(1_000, 16);
+
+        assert_eq!(reassembler.stats(), TcpReassemblyStats::default());
+
+        reassembler.offer(src, 1_000, dst, 80, 0, true, false, false, b"");
+        reassembler.offer(src, 1_000, dst, 80, 5, false, false, false, b"XXXXX");
+        assert_eq!(reassembler.stats().active_flows, 1);
+        assert_eq!(reassembler.stats().buffered_bytes, 5);
+
+        // Too far ahead.
+        reassembler.offer(src, 1_000, dst, 80, 9_000, false, false, false, b"x");
+        assert_eq!(reassembler.stats().gap_rejections, 1);
+
+        // Contradicts what is buffered.
+        reassembler.offer(src, 1_000, dst, 80, 8, false, false, false, b"YYYYY");
+        assert_eq!(reassembler.stats().overlap_conflicts, 1);
+
+        reassembler.offer(src, 1_000, dst, 80, 0, false, false, true, b"");
+        let stats = reassembler.stats();
+        assert_eq!(stats.resets, 1);
+        assert_eq!(stats.active_flows, 0, "and the flow went with it");
+        assert_eq!(stats.buffered_bytes, 0);
+    }
+
+    #[test]
+    fn tcp_stats_count_evictions() {
+        let (src, dst) = endpoints();
+        let mut reassembler = TcpStreamReassembler::new().with_max_flows(1);
+
+        reassembler.offer(src, 1_000, dst, 80, 0, true, false, false, b"");
+        reassembler.offer(src, 2_000, dst, 80, 0, true, false, false, b"");
+
+        assert_eq!(reassembler.stats().evictions, 1);
+        assert_eq!(reassembler.stats().active_flows, 1);
+    }
+
     /// A segment too far ahead is dropped, not held. It used to report as
     /// buffered, which told the caller memory was growing when it was not.
     #[test]
@@ -2788,6 +2907,36 @@ mod tests {
                 .is_empty()
         );
         assert_eq!(reassembler.buffered_bytes(), 6);
+    }
+
+    #[test]
+    fn quic_stats_count_what_was_refused() {
+        let (src, dst) = endpoints();
+        let mut reassembler = QuicStreamReassembler::with_limits(1_000, 16);
+
+        assert_eq!(reassembler.stats(), QuicReassemblyStats::default());
+
+        reassembler.offer(src, 4_432, dst, 443, 0, 5, false, b"world");
+        assert_eq!(reassembler.stats().active_streams, 1);
+        assert_eq!(reassembler.stats().buffered_bytes, 5);
+
+        reassembler.offer(src, 4_432, dst, 443, 0, 9_000, false, b"x");
+        assert_eq!(reassembler.stats().gap_rejections, 1);
+
+        reassembler.offer(src, 4_432, dst, 443, 0, 5, false, b"EVIL!");
+        assert_eq!(reassembler.stats().conflicts, 1);
+    }
+
+    #[test]
+    fn quic_stats_count_evictions() {
+        let (src, dst) = endpoints();
+        let mut reassembler = QuicStreamReassembler::new().with_max_streams(1);
+
+        reassembler.offer(src, 4_432, dst, 443, 0, 5, false, b"a");
+        reassembler.offer(src, 4_432, dst, 443, 1, 5, false, b"b");
+
+        assert_eq!(reassembler.stats().evictions, 1);
+        assert_eq!(reassembler.stats().active_streams, 1);
     }
 
     /// QUIC has outcomes TCP does not: a stream that already closed, a gap too
