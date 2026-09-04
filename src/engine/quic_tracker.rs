@@ -3,6 +3,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::net::IpAddr;
 
+use crate::engine::flow::BiFlow;
 use crate::layer::Confidence;
 use crate::layer::application::quic::{
     QuicShortHeader, decode_packet_number, parse_quic_short_header,
@@ -29,18 +30,6 @@ impl QuicPacketNumberSpace {
     }
 }
 
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-struct Endpoint {
-    address: IpAddr,
-    port: u16,
-}
-
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-struct FlowKey {
-    first: Endpoint,
-    second: Endpoint,
-}
-
 #[derive(Debug, Default)]
 struct QuicFlowState {
     expected_dcids: [Option<Vec<u8>>; 2],
@@ -61,9 +50,9 @@ struct QuicFlowState {
 #[derive(Debug)]
 pub struct QuicConnectionTracker {
     max_flows: usize,
-    flows: HashMap<FlowKey, QuicFlowState>,
-    insertion_order: VecDeque<FlowKey>,
-    cid_index: HashMap<Vec<u8>, FlowKey>,
+    flows: HashMap<BiFlow, QuicFlowState>,
+    insertion_order: VecDeque<BiFlow>,
+    cid_index: HashMap<Vec<u8>, BiFlow>,
 }
 
 impl QuicConnectionTracker {
@@ -206,7 +195,7 @@ impl QuicConnectionTracker {
         self.cid_index.clear();
     }
 
-    fn ensure_flow(&mut self, key: &FlowKey) -> bool {
+    fn ensure_flow(&mut self, key: &BiFlow) -> bool {
         if self.flows.contains_key(key) {
             return true;
         }
@@ -214,8 +203,8 @@ impl QuicConnectionTracker {
             return false;
         }
         self.evict_until_room();
-        self.flows.insert(key.clone(), QuicFlowState::default());
-        self.insertion_order.push_back(key.clone());
+        self.flows.insert(*key, QuicFlowState::default());
+        self.insertion_order.push_back(*key);
         true
     }
 
@@ -231,7 +220,7 @@ impl QuicConnectionTracker {
         }
     }
 
-    fn remove_indexed_cids(&mut self, key: &FlowKey) {
+    fn remove_indexed_cids(&mut self, key: &BiFlow) {
         self.cid_index.retain(|_, indexed_flow| indexed_flow != key);
     }
 }
@@ -242,32 +231,9 @@ impl Default for QuicConnectionTracker {
     }
 }
 
-fn normalized_flow(src: IpAddr, src_port: u16, dst: IpAddr, dst_port: u16) -> (FlowKey, usize) {
-    let source = Endpoint {
-        address: src,
-        port: src_port,
-    };
-    let destination = Endpoint {
-        address: dst,
-        port: dst_port,
-    };
-    if source <= destination {
-        (
-            FlowKey {
-                first: source,
-                second: destination,
-            },
-            0,
-        )
-    } else {
-        (
-            FlowKey {
-                first: destination,
-                second: source,
-            },
-            1,
-        )
-    }
+fn normalized_flow(src: IpAddr, src_port: u16, dst: IpAddr, dst_port: u16) -> (BiFlow, usize) {
+    let (flow, direction) = BiFlow::normalize(src, src_port, dst, dst_port);
+    (flow, direction.index())
 }
 
 #[cfg(test)]
