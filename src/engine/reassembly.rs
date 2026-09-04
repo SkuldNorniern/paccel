@@ -669,7 +669,7 @@ impl TcpStreamReassembler {
         }
 
         let mut output = Vec::new();
-        Self::accept_payload(
+        let placed = Self::accept_payload(
             state,
             data_sequence,
             payload,
@@ -683,7 +683,7 @@ impl TcpStreamReassembler {
         Self::consume_contiguous(state, &mut self.total_buffered_bytes, &mut output);
         let finished = Self::consume_fin(state);
 
-        let event = tcp_event(&output, finished || fin, payload.is_empty());
+        let event = tcp_event(&output, placed, finished || fin);
 
         ReassemblyOutput::new(output, event)
     }
@@ -734,24 +734,26 @@ impl TcpStreamReassembler {
         total_buffered_bytes: &mut usize,
         overlap_policy: TcpOverlapPolicy,
         output: &mut Vec<u8>,
-    ) {
+    ) -> ReassemblyEvent {
         if payload.is_empty() {
-            return;
+            return ReassemblyEvent::Ignored;
         }
         let Some(expected) = state.expected else {
-            return;
+            return ReassemblyEvent::Ignored;
         };
         let delta = sequence.wrapping_sub(expected);
         if delta == 0 {
             output.extend_from_slice(payload);
             advance_expected(state, payload.len());
-            return;
+            return ReassemblyEvent::Data;
         }
         if delta < TCP_SEQUENCE_HALF_RANGE {
+            // Too far ahead to be worth holding: the segment is dropped, not
+            // buffered, and the caller should hear the difference.
             if u32_to_usize(delta) > max_gap {
-                return;
+                return ReassemblyEvent::GapLimit;
             }
-            Self::buffer_segment(
+            return Self::buffer_segment(
                 state,
                 sequence,
                 payload,
@@ -760,14 +762,16 @@ impl TcpStreamReassembler {
                 total_buffered_bytes,
                 overlap_policy,
             );
-            return;
         }
 
+        // Behind what has already been delivered: a retransmission.
         let already_consumed = u32_to_usize(expected.wrapping_sub(sequence));
         if already_consumed < payload.len() {
             output.extend_from_slice(&payload[already_consumed..]);
             advance_expected(state, payload.len() - already_consumed);
+            return ReassemblyEvent::Data;
         }
+        ReassemblyEvent::Duplicate
     }
 
     /// Buffers an out-of-order segment and applies `policy` to overlaps. Byte
@@ -782,9 +786,9 @@ impl TcpStreamReassembler {
         max_total_buffered_bytes: usize,
         total_buffered_bytes: &mut usize,
         policy: TcpOverlapPolicy,
-    ) {
+    ) -> ReassemblyEvent {
         let Some(expected) = state.expected else {
-            return;
+            return ReassemblyEvent::Ignored;
         };
         let new_start = u32_to_usize(sequence.wrapping_sub(expected));
         let new_end = new_start + payload.len();
@@ -808,11 +812,12 @@ impl TcpStreamReassembler {
                 max_total_buffered_bytes,
                 total_buffered_bytes,
             );
-            return;
+            return ReassemblyEvent::Buffered;
         }
 
         match policy {
-            TcpOverlapPolicy::Reject => {}
+            // The whole segment goes, including any part that did not overlap.
+            TcpOverlapPolicy::Reject => return ReassemblyEvent::Conflict,
             TcpOverlapPolicy::FirstWins => {
                 let mut covered: Vec<(usize, usize)> = overlaps
                     .iter()
@@ -887,6 +892,8 @@ impl TcpStreamReassembler {
                 );
             }
         }
+
+        ReassemblyEvent::Buffered
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1031,16 +1038,14 @@ impl TcpStreamReassembler {
 ///
 /// Data wins: a segment that both delivered bytes and carried a FIN is reported
 /// as data, because the bytes are the part a caller must not miss.
-fn tcp_event(output: &[u8], finished: bool, payload_empty: bool) -> ReassemblyEvent {
+fn tcp_event(output: &[u8], placed: ReassemblyEvent, finished: bool) -> ReassemblyEvent {
     if !output.is_empty() {
-        ReassemblyEvent::Data
-    } else if finished {
-        ReassemblyEvent::Fin
-    } else if payload_empty {
-        ReassemblyEvent::Ignored
-    } else {
-        ReassemblyEvent::Buffered
+        return ReassemblyEvent::Data;
     }
+    if finished {
+        return ReassemblyEvent::Fin;
+    }
+    placed
 }
 
 impl Default for TcpStreamReassembler {
@@ -2390,6 +2395,51 @@ mod tests {
         // A reset is not the same as nothing happening.
         let reset = reassembler.offer_detailed(src, 1_000, dst, 80, 9, false, false, true, b"");
         assert_eq!(reset.event, ReassemblyEvent::Reset);
+    }
+
+    /// A segment too far ahead is dropped, not held. It used to report as
+    /// buffered, which told the caller memory was growing when it was not.
+    #[test]
+    fn tcp_detailed_reports_a_gap_too_far_ahead() {
+        let (src, dst) = endpoints();
+        let mut reassembler = TcpStreamReassembler::with_limits(1_000, 16);
+
+        reassembler.offer_detailed(src, 1_000, dst, 80, 0, true, false, false, b"");
+        let far = reassembler.offer_detailed(src, 1_000, dst, 80, 5_000, false, false, false, b"x");
+
+        assert_eq!(far.event, ReassemblyEvent::GapLimit);
+        assert_eq!(reassembler.buffered_bytes(), 0, "and nothing was held");
+    }
+
+    /// Reject drops the whole overlapping segment; that is a conflict, not a
+    /// buffered one.
+    #[test]
+    fn tcp_detailed_reports_a_rejected_overlap() {
+        let (src, dst) = endpoints();
+        let mut reassembler = TcpStreamReassembler::new();
+
+        reassembler.offer_detailed(src, 1_000, dst, 80, 0, true, false, false, b"");
+        reassembler.offer_detailed(src, 1_000, dst, 80, 5, false, false, false, b"XXXXX");
+        let clash =
+            reassembler.offer_detailed(src, 1_000, dst, 80, 8, false, false, false, b"YYYYY");
+
+        assert_eq!(clash.event, ReassemblyEvent::Conflict);
+    }
+
+    /// A retransmission of already-delivered bytes adds nothing.
+    #[test]
+    fn tcp_detailed_reports_a_duplicate() {
+        let (src, dst) = endpoints();
+        let mut reassembler = TcpStreamReassembler::new();
+
+        reassembler.offer_detailed(src, 1_000, dst, 80, 0, true, false, false, b"");
+        let first =
+            reassembler.offer_detailed(src, 1_000, dst, 80, 1, false, false, false, b"abcd");
+        assert_eq!(first.event, ReassemblyEvent::Data);
+
+        let again =
+            reassembler.offer_detailed(src, 1_000, dst, 80, 1, false, false, false, b"abcd");
+        assert_eq!(again.event, ReassemblyEvent::Duplicate);
     }
 
     /// The sender finishing a direction is its own outcome.
