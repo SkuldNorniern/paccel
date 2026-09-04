@@ -37,6 +37,19 @@ struct QuicFlowState {
     largest_packet_numbers: [[Option<u64>; 3]; 2],
 }
 
+/// What a [`QuicConnectionTracker`] is holding.
+///
+/// `active_tuples` and `active_cids` differ once a connection has announced
+/// more than one identifier, or migrated.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[non_exhaustive]
+pub struct QuicTrackerStats {
+    /// UDP flows held right now.
+    pub active_tuples: usize,
+    /// Connection IDs that resolve to one of them.
+    pub active_cids: usize,
+}
+
 /// Tracks connection IDs and packet numbers for each direction of a UDP flow.
 ///
 /// State is keyed on the 5-tuple, with connection IDs as a lookup into it.
@@ -139,6 +152,15 @@ impl QuicConnectionTracker {
                 flow.last_seen.observe(now);
             }
             self.cid_index.insert(scid.to_vec(), key);
+        }
+    }
+
+    /// What this tracker is holding.
+    #[must_use]
+    pub fn stats(&self) -> QuicTrackerStats {
+        QuicTrackerStats {
+            active_tuples: self.flows.len(),
+            active_cids: self.cid_index.len(),
         }
     }
 

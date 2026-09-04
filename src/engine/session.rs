@@ -4,6 +4,7 @@ use std::collections::{HashMap, VecDeque};
 use std::net::IpAddr;
 
 use crate::engine::flow::{BiFlow, LastSeen, Timestamp};
+use crate::engine::reassembly::TcpReassemblyStats;
 use crate::engine::{BuiltinPacketParser, ParsedPacket, TcpStreamReassembler, TransportSegment};
 use crate::layer::ProbeResult;
 use crate::layer::application::http::{HttpMessage, probe_http};
@@ -44,6 +45,18 @@ struct ProbeState {
     bytes: Vec<u8>,
     done: bool,
     last_seen: LastSeen,
+}
+
+/// What a [`SessionTracker`] is holding.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[non_exhaustive]
+pub struct SessionStats {
+    /// Directions currently being probed.
+    pub active_probes: usize,
+    /// Bytes held across every probe.
+    pub probe_bytes: usize,
+    /// The TCP reassembly underneath.
+    pub tcp: TcpReassemblyStats,
 }
 
 /// Reassembles TCP payloads and probes each direction once for HTTP or TLS.
@@ -103,6 +116,16 @@ impl SessionTracker {
     }
 
     /// Returns the first HTTP or TLS message found in the frame's direction.
+    /// What this tracker is holding, including the TCP reassembly under it.
+    #[must_use]
+    pub fn stats(&self) -> SessionStats {
+        SessionStats {
+            active_probes: self.probes.len(),
+            probe_bytes: self.total_probe_bytes,
+            tcp: self.tcp.stats(),
+        }
+    }
+
     pub fn offer_frame(&mut self, raw: &[u8]) -> Option<StreamEvent> {
         self.offer_frame_inner(raw, None)
     }
