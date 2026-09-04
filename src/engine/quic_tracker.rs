@@ -48,6 +48,16 @@ struct QuicFlowState {
 }
 
 /// Tracks connection IDs and packet numbers for each direction of a UDP flow.
+///
+/// State is keyed on the 5-tuple, with connection IDs as a lookup into it.
+/// That is not migration tracking. A connection that changes address gets a
+/// new tuple with no learned DCID length, and short-header classification
+/// needs that length before it can read the DCID, so the CID cannot pull the
+/// two tuples back together. Packet-number state stays on the old tuple too.
+///
+/// Following a connection across a move needs identity on the connection
+/// rather than the tuple, plus `NEW_CONNECTION_ID` and
+/// `RETIRE_CONNECTION_ID` frames. Not in 0.3.
 #[derive(Debug)]
 pub struct QuicConnectionTracker {
     max_flows: usize,
