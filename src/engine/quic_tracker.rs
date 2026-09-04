@@ -11,6 +11,10 @@ use crate::layer::application::quic::{
 
 const DEFAULT_MAX_FLOWS: usize = 65_536;
 
+/// The longest connection ID RFC 9000 allows. Longer ones cannot be indexed by
+/// length, so they are not remembered.
+const MAX_CID_LEN: usize = 20;
+
 /// RFC 9000 sec 12.3: packet numbers are independent per space, not one
 /// sequence across a connection. 0-RTT and 1-RTT share the Application space.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -53,16 +57,24 @@ pub struct QuicTrackerStats {
 /// Tracks connection IDs and packet numbers for each direction of a UDP flow.
 ///
 /// State is keyed on the 5-tuple, with connection IDs as a lookup into it.
-/// That is not migration tracking. A connection that changes address gets a
-/// new tuple with no learned DCID length, and short-header classification
-/// needs that length before it can read the DCID, so the CID cannot pull the
-/// two tuples back together. Packet-number state stays on the old tuple too.
 ///
-/// Following a connection across a move needs identity on the connection
-/// rather than the tuple, plus `NEW_CONNECTION_ID` and
-/// `RETIRE_CONNECTION_ID` frames. Not in 0.3.
+/// A packet from a tuple never seen before is still matched by its connection
+/// ID: [`Self::classify_short_header`] falls back to the ID lengths other
+/// connections have used, so a connection that changes address is recognised
+/// rather than lost. Packet-number state, though, still belongs to the tuple
+/// it was learned on, so a moved connection starts that part again.
+///
+/// Carrying the rest across a move needs identity on the connection itself,
+/// plus `NEW_CONNECTION_ID` and `RETIRE_CONNECTION_ID`.
 #[derive(Debug)]
 pub struct QuicConnectionTracker {
+    /// Every connection-ID length seen, as a bit per length.
+    ///
+    /// A short header carries no length field, so one has to be assumed before
+    /// the ID can be read. The tuple's own learned length is tried first; this
+    /// is what lets a packet from a tuple that has never been seen - the shape
+    /// of a migration - still be matched by its ID.
+    cid_lengths: u32,
     max_flows: usize,
     flows: HashMap<BiFlow, QuicFlowState>,
     insertion_order: VecDeque<BiFlow>,
@@ -74,6 +86,7 @@ impl QuicConnectionTracker {
     #[must_use]
     pub fn new() -> Self {
         Self {
+            cid_lengths: 0,
             max_flows: DEFAULT_MAX_FLOWS,
             flows: HashMap::new(),
             insertion_order: VecDeque::new(),
@@ -151,6 +164,9 @@ impl QuicConnectionTracker {
             if let Some(now) = now {
                 flow.last_seen.observe(now);
             }
+            if scid.len() <= MAX_CID_LEN {
+                self.cid_lengths |= 1 << scid.len();
+            }
             self.cid_index.insert(scid.to_vec(), key);
         }
     }
@@ -206,14 +222,38 @@ impl QuicConnectionTracker {
         dst_port: u16,
         payload: &'a [u8],
     ) -> Option<(QuicShortHeader<'a>, Confidence)> {
-        let dcid_len = self.expected_dcid_len(src, src_port, dst, dst_port)?;
-        let header = parse_quic_short_header(payload, dcid_len)?;
-        let confidence = if self.connection_for_dcid(header.dcid).is_some() {
-            Confidence::Stateful
-        } else {
-            Confidence::Structural
-        };
-        Some((header, confidence))
+        // The tuple's own learned length first: that is the ordinary case and
+        // it costs one lookup.
+        if let Some(dcid_len) = self.expected_dcid_len(src, src_port, dst, dst_port)
+            && let Some(header) = parse_quic_short_header(payload, dcid_len)
+        {
+            let confidence = if self.connection_for_dcid(header.dcid).is_some() {
+                Confidence::Stateful
+            } else {
+                Confidence::Structural
+            };
+            return Some((header, confidence));
+        }
+
+        // No length for this tuple. A connection that moved arrives exactly
+        // this way, so try the lengths other connections have used and let the
+        // ID say which connection it is. Longest first: a short ID can be a
+        // prefix of a longer one, and the longer match is the specific
+        // connection.
+        let mut remaining = self.cid_lengths;
+        while remaining != 0 {
+            let length = (u32::BITS - 1 - remaining.leading_zeros()) as usize;
+            remaining &= !(1 << length);
+
+            let Some(header) = parse_quic_short_header(payload, length) else {
+                continue;
+            };
+            if self.connection_for_dcid(header.dcid).is_some() {
+                return Some((header, Confidence::Stateful));
+            }
+        }
+
+        None
     }
 
     /// Reconstructs the packet number per RFC 9000 Appendix A.3 and updates
@@ -385,6 +425,56 @@ mod tests {
 
         assert_eq!(header.dcid, cid);
         assert_eq!(confidence, Confidence::Stateful);
+    }
+
+    /// A connection that changes address arrives on a tuple that has never been
+    /// seen, so it has no learned DCID length. Classification used to give up
+    /// there, before the connection ID had a chance to say which connection it
+    /// was - which is exactly the migration case.
+    #[test]
+    fn classify_short_header_follows_a_connection_that_moved() {
+        let (src, dst) = endpoints();
+        let mut tracker = QuicConnectionTracker::new();
+        let cid = [1, 2, 3, 4, 5, 6, 7, 8];
+
+        // Handshake on the original tuple.
+        tracker.observe_long_header(src, 50_000, dst, 443, &cid);
+
+        let mut payload = vec![0x40];
+        payload.extend_from_slice(&cid);
+
+        // The client reappears on a different port, carrying the same ID.
+        let moved = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9));
+        let (header, confidence) = tracker
+            .classify_short_header(dst, 443, moved, 53_000, &payload)
+            .expect("the id should still resolve");
+
+        assert_eq!(header.dcid, cid);
+        assert_eq!(
+            confidence,
+            Confidence::Stateful,
+            "matched by connection ID, not by tuple"
+        );
+        assert!(tracker.connection_for_dcid(&cid).is_some());
+    }
+
+    /// An unknown ID on an unknown tuple stays unknown: the fallback must not
+    /// invent a match out of whatever bytes happen to be there.
+    #[test]
+    fn classify_short_header_does_not_invent_a_connection() {
+        let (src, dst) = endpoints();
+        let mut tracker = QuicConnectionTracker::new();
+        tracker.observe_long_header(src, 50_000, dst, 443, &[1, 2, 3, 4, 5, 6, 7, 8]);
+
+        let mut payload = vec![0x40];
+        payload.extend_from_slice(&[9, 9, 9, 9, 9, 9, 9, 9]);
+
+        let moved = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9));
+        assert!(
+            tracker
+                .classify_short_header(dst, 443, moved, 53_000, &payload)
+                .is_none()
+        );
     }
 
     #[test]
