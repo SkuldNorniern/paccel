@@ -860,11 +860,32 @@ struct QuicStreamKey {
     stream_id: u64,
 }
 
+/// What became of a range offered to a stream's buffer.
+///
+/// RFC 9000 section 2.2 requires that the data at a given offset never change:
+/// a stream frame may be retransmitted, but not with different bytes. Telling
+/// a duplicate apart from a contradiction is the difference between ordinary
+/// loss recovery and a sender trying to make two readers see two streams.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QuicRangeResult {
+    /// Buffered, carrying bytes not already held.
+    Accepted,
+    /// Every overlapping byte matched what was already buffered.
+    Duplicate,
+    /// An overlapping byte disagreed with what was already buffered. Nothing
+    /// is changed: the first copy stands.
+    Conflict,
+    /// The buffer had no room. Nothing is changed.
+    ResourceLimited,
+}
+
 #[derive(Debug, Default)]
 struct QuicStreamState {
     ranges: BTreeMap<u64, Vec<u8>>,
     expected: u64,
     buffered_bytes: usize,
+    /// Retransmissions that contradicted bytes already buffered.
+    conflicts: u64,
     fin_offset: Option<u64>,
     closed: bool,
     // Highest offset+len seen from any accepted frame so far, in-order or
@@ -926,6 +947,17 @@ impl QuicStreamReassembler {
     #[must_use]
     pub fn buffered_bytes(&self) -> usize {
         self.total_buffered_bytes
+    }
+
+    /// Retransmissions that contradicted bytes already buffered, across every
+    /// stream.
+    ///
+    /// RFC 9000 requires that the data at a given offset never change, so a
+    /// non-zero count is a sender contradicting itself: ordinary loss recovery
+    /// does not do this. The first copy is what was kept.
+    #[must_use]
+    pub fn conflicts(&self) -> u64 {
+        self.streams.values().map(|state| state.conflicts).sum()
     }
 
     /// Returns newly contiguous bytes after accepting one QUIC STREAM frame.
@@ -1152,6 +1184,57 @@ impl QuicStreamReassembler {
         advance_quic_expected(state, contiguous.len());
     }
 
+    /// Compare a range against what is already buffered.
+    ///
+    /// Returns `Conflict` on the first byte that disagrees, `Duplicate` when
+    /// every byte the range carries is already held, and `Accepted` when it
+    /// adds something. Bytes below `expected` have already been handed to the
+    /// caller and are gone, so a range overlapping only those cannot be
+    /// checked and is treated as a duplicate.
+    fn compare_with_buffered(state: &QuicStreamState, offset: u64, data: &[u8]) -> QuicRangeResult {
+        let Some(end) = offset.checked_add(data.len() as u64) else {
+            return QuicRangeResult::Conflict;
+        };
+
+        let mut covered = 0usize;
+        for (&held_offset, held) in &state.ranges {
+            let Some(held_end) = held_offset.checked_add(held.len() as u64) else {
+                continue;
+            };
+            let start = offset.max(held_offset);
+            let stop = end.min(held_end);
+            if start >= stop {
+                continue;
+            }
+
+            let Ok(mine_from) = usize::try_from(start - offset) else {
+                continue;
+            };
+            let Ok(theirs_from) = usize::try_from(start - held_offset) else {
+                continue;
+            };
+            let Ok(len) = usize::try_from(stop - start) else {
+                continue;
+            };
+            let (Some(mine), Some(theirs)) = (
+                data.get(mine_from..mine_from + len),
+                held.get(theirs_from..theirs_from + len),
+            ) else {
+                continue;
+            };
+            if mine != theirs {
+                return QuicRangeResult::Conflict;
+            }
+            covered += len;
+        }
+
+        if covered >= data.len() {
+            QuicRangeResult::Duplicate
+        } else {
+            QuicRangeResult::Accepted
+        }
+    }
+
     fn buffer_range(
         state: &mut QuicStreamState,
         offset: u64,
@@ -1159,36 +1242,50 @@ impl QuicStreamReassembler {
         max_buffered_bytes: usize,
         max_total_buffered_bytes: usize,
         total_buffered_bytes: &mut usize,
-    ) {
+    ) -> QuicRangeResult {
+        // A retransmission carrying the same bytes is ordinary; one carrying
+        // different bytes for an offset already held is not, and the first copy
+        // stands rather than being quietly replaced.
+        match Self::compare_with_buffered(state, offset, data) {
+            QuicRangeResult::Accepted => {}
+            QuicRangeResult::Conflict => {
+                state.conflicts = state.conflicts.saturating_add(1);
+                return QuicRangeResult::Conflict;
+            }
+            other => return other,
+        }
+
         let replaced = state.ranges.get(&offset).map_or(0, Vec::len);
         let Some(without_replaced) = state.buffered_bytes.checked_sub(replaced) else {
             *total_buffered_bytes = total_buffered_bytes.saturating_sub(state.buffered_bytes);
             state.ranges.clear();
             state.buffered_bytes = 0;
-            return;
+            return QuicRangeResult::ResourceLimited;
         };
         let Some(projected) = without_replaced.checked_add(data.len()) else {
             *total_buffered_bytes = total_buffered_bytes.saturating_sub(state.buffered_bytes);
             state.ranges.clear();
             state.buffered_bytes = 0;
-            return;
+            return QuicRangeResult::ResourceLimited;
         };
         if projected > max_buffered_bytes {
             *total_buffered_bytes = total_buffered_bytes.saturating_sub(state.buffered_bytes);
             state.ranges.clear();
             state.buffered_bytes = 0;
-            return;
+            return QuicRangeResult::ResourceLimited;
         }
         let without_replaced_total = total_buffered_bytes.saturating_sub(replaced);
         let Some(projected_total) = without_replaced_total.checked_add(data.len()) else {
-            return;
+            return QuicRangeResult::ResourceLimited;
         };
         if projected_total > max_total_buffered_bytes {
-            return;
+            return QuicRangeResult::ResourceLimited;
         }
         state.ranges.insert(offset, data.to_vec());
         state.buffered_bytes = projected;
         *total_buffered_bytes = projected_total;
+
+        QuicRangeResult::Accepted
     }
 
     fn consume_contiguous(
@@ -2151,6 +2248,89 @@ mod tests {
                 .is_empty()
         );
         assert_eq!(reassembler.buffered_bytes(), 6);
+    }
+
+    /// A retransmission carrying the same bytes is ordinary QUIC loss
+    /// recovery and must be accepted quietly.
+    #[test]
+    fn quic_identical_retransmission_is_not_a_conflict() {
+        let (src, dst) = endpoints();
+        let mut reassembler = QuicStreamReassembler::new();
+
+        assert!(
+            reassembler
+                .offer(src, 4_432, dst, 443, 0, 5, false, b"world")
+                .is_empty()
+        );
+        assert!(
+            reassembler
+                .offer(src, 4_432, dst, 443, 0, 5, false, b"world")
+                .is_empty()
+        );
+        assert_eq!(reassembler.conflicts(), 0);
+        assert_eq!(
+            reassembler.offer(src, 4_432, dst, 443, 0, 0, false, b"hello"),
+            b"helloworld"
+        );
+    }
+
+    /// The same offset carrying different bytes is a sender contradicting
+    /// itself. The first copy stands: it used to be replaced silently, so a
+    /// reader could be steered to a different stream than the host sees.
+    #[test]
+    fn quic_conflicting_retransmission_keeps_the_first_copy() {
+        let (src, dst) = endpoints();
+        let mut reassembler = QuicStreamReassembler::new();
+
+        assert!(
+            reassembler
+                .offer(src, 4_432, dst, 443, 0, 5, false, b"world")
+                .is_empty()
+        );
+        assert!(
+            reassembler
+                .offer(src, 4_432, dst, 443, 0, 5, false, b"EVIL!")
+                .is_empty()
+        );
+        assert_eq!(reassembler.conflicts(), 1, "and it is counted");
+        assert_eq!(
+            reassembler.offer(src, 4_432, dst, 443, 0, 0, false, b"hello"),
+            b"helloworld",
+            "the first copy is what the reader sees"
+        );
+    }
+
+    /// A partial overlap is compared byte by byte, not ignored because the
+    /// offsets differ.
+    #[test]
+    fn quic_partially_overlapping_ranges_are_compared() {
+        let (src, dst) = endpoints();
+        let mut reassembler = QuicStreamReassembler::new();
+
+        assert!(
+            reassembler
+                .offer(src, 4_432, dst, 443, 0, 5, false, b"world")
+                .is_empty()
+        );
+        // [7,12) overlaps [5,10) on "rld"; disagreeing there is a conflict.
+        assert!(
+            reassembler
+                .offer(src, 4_432, dst, 443, 0, 7, false, b"XXXyy")
+                .is_empty()
+        );
+        assert_eq!(reassembler.conflicts(), 1);
+
+        // Agreeing on the overlap is accepted and extends the range.
+        assert!(
+            reassembler
+                .offer(src, 4_432, dst, 443, 0, 7, false, b"rldyy")
+                .is_empty()
+        );
+        assert_eq!(reassembler.conflicts(), 1, "no new conflict");
+        assert_eq!(
+            reassembler.offer(src, 4_432, dst, 443, 0, 0, false, b"hello"),
+            b"helloworldyy"
+        );
     }
 
     #[test]
