@@ -192,6 +192,7 @@ impl SessionTracker {
             payload,
             now,
         );
+        let contiguous = contiguous.data;
 
         if tcp.flags.rst {
             // TCP state for this flow is already gone; drop application probe

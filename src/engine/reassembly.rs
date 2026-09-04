@@ -6,7 +6,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-use crate::engine::flow::{BiFlow, LastSeen, Timestamp};
+use crate::engine::flow::{BiFlow, LastSeen, ReassemblyEvent, ReassemblyOutput, Timestamp};
 use crate::layer::application::quic::QuicFrame;
 use crate::layer::network::ipv4::Ipv4Header;
 
@@ -490,6 +490,58 @@ impl TcpStreamReassembler {
         self.offer_inner(
             src, src_port, dst, dst_port, seq, syn, fin, rst, payload, None,
         )
+        .data
+    }
+
+    /// As [`Self::offer`], also saying what happened to the segment.
+    ///
+    /// An empty `data` covers several outcomes - buffered behind a gap, a
+    /// reset, a refused overlap, a limit - and the event tells them apart.
+    #[allow(clippy::too_many_arguments)]
+    pub fn offer_detailed(
+        &mut self,
+        src: IpAddr,
+        src_port: u16,
+        dst: IpAddr,
+        dst_port: u16,
+        seq: u32,
+        syn: bool,
+        fin: bool,
+        rst: bool,
+        payload: &[u8],
+    ) -> ReassemblyOutput {
+        self.offer_inner(
+            src, src_port, dst, dst_port, seq, syn, fin, rst, payload, None,
+        )
+    }
+
+    /// As [`Self::offer_detailed`], dating the flow for [`Self::expire_before`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn offer_detailed_at(
+        &mut self,
+        src: IpAddr,
+        src_port: u16,
+        dst: IpAddr,
+        dst_port: u16,
+        seq: u32,
+        syn: bool,
+        fin: bool,
+        rst: bool,
+        payload: &[u8],
+        now: Timestamp,
+    ) -> ReassemblyOutput {
+        self.offer_inner(
+            src,
+            src_port,
+            dst,
+            dst_port,
+            seq,
+            syn,
+            fin,
+            rst,
+            payload,
+            Some(now),
+        )
     }
 
     /// As [`Self::offer`], dating the flow so [`Self::expire_before`] can age
@@ -521,6 +573,7 @@ impl TcpStreamReassembler {
             payload,
             Some(now),
         )
+        .data
     }
 
     /// Drop every dated flow last seen before `cutoff`.
@@ -567,9 +620,9 @@ impl TcpStreamReassembler {
         rst: bool,
         payload: &[u8],
         now: Option<Timestamp>,
-    ) -> Vec<u8> {
+    ) -> ReassemblyOutput {
         let Ok(payload_sequence_length) = u32::try_from(payload.len()) else {
-            return Vec::new();
+            return ReassemblyOutput::empty(ReassemblyEvent::Ignored);
         };
         let (key, direction) = normalized_flow(src, src_port, dst, dst_port);
 
@@ -580,19 +633,19 @@ impl TcpStreamReassembler {
                     .saturating_sub(flow_buffered_bytes(&flow));
             }
             self.insertion_order.retain(|queued| queued != &key);
-            return Vec::new();
+            return ReassemblyOutput::empty(ReassemblyEvent::Reset);
         }
 
         if !self.flows.contains_key(&key) {
             if self.max_flows == 0 {
-                return Vec::new();
+                return ReassemblyOutput::empty(ReassemblyEvent::ResourceLimit);
             }
             self.evict_until_room();
             self.flows.insert(key, TcpFlowState::default());
             self.insertion_order.push_back(key);
         }
         let Some(flow) = self.flows.get_mut(&key) else {
-            return Vec::new();
+            return ReassemblyOutput::empty(ReassemblyEvent::ResourceLimit);
         };
         if let Some(now) = now {
             flow.last_seen.observe(now);
@@ -628,8 +681,11 @@ impl TcpStreamReassembler {
             &mut output,
         );
         Self::consume_contiguous(state, &mut self.total_buffered_bytes, &mut output);
-        Self::consume_fin(state);
-        output
+        let finished = Self::consume_fin(state);
+
+        let event = tcp_event(&output, finished || fin, payload.is_empty());
+
+        ReassemblyOutput::new(output, event)
     }
 
     /// Removes both directions of a normalized flow, returning whether it existed.
@@ -958,13 +1014,32 @@ impl TcpStreamReassembler {
         }
     }
 
-    fn consume_fin(state: &mut TcpDirectionState) {
+    /// Returns whether the FIN was reached, so the caller can report it.
+    fn consume_fin(state: &mut TcpDirectionState) -> bool {
         if let (Some(expected), Some(fin_sequence)) = (state.expected, state.fin_sequence)
             && expected == fin_sequence
         {
             state.expected = Some(expected.wrapping_add(1));
             state.fin_sequence = None;
+            return true;
         }
+        false
+    }
+}
+
+/// What to report for a segment that produced `output`.
+///
+/// Data wins: a segment that both delivered bytes and carried a FIN is reported
+/// as data, because the bytes are the part a caller must not miss.
+fn tcp_event(output: &[u8], finished: bool, payload_empty: bool) -> ReassemblyEvent {
+    if !output.is_empty() {
+        ReassemblyEvent::Data
+    } else if finished {
+        ReassemblyEvent::Fin
+    } else if payload_empty {
+        ReassemblyEvent::Ignored
+    } else {
+        ReassemblyEvent::Buffered
     }
 }
 
@@ -2196,6 +2271,53 @@ mod tests {
 
     /// Aging is driven by the caller's clock, so a pcap replay expires state at
     /// the times in the file rather than at wall-clock times.
+    /// An empty result used to cover buffering, a reset, a refused overlap and
+    /// a limit alike. The event says which.
+    #[test]
+    fn tcp_detailed_tells_the_empty_results_apart() {
+        let (src, dst) = endpoints();
+        let mut reassembler = TcpStreamReassembler::new();
+
+        let syn = reassembler.offer_detailed(src, 1_000, dst, 80, 0, true, false, false, b"");
+        assert!(syn.data.is_empty());
+
+        // Held behind a gap.
+        let gap = reassembler.offer_detailed(src, 1_000, dst, 80, 5, false, false, false, b"XXXX");
+        assert_eq!(gap.event, ReassemblyEvent::Buffered);
+        assert!(gap.data.is_empty());
+
+        // Fills the gap: data comes out, and the buffered tail with it.
+        let filled =
+            reassembler.offer_detailed(src, 1_000, dst, 80, 1, false, false, false, b"abcd");
+        assert_eq!(filled.event, ReassemblyEvent::Data);
+        assert_eq!(filled.data, b"abcdXXXX");
+
+        // A reset is not the same as nothing happening.
+        let reset = reassembler.offer_detailed(src, 1_000, dst, 80, 9, false, false, true, b"");
+        assert_eq!(reset.event, ReassemblyEvent::Reset);
+    }
+
+    /// The sender finishing a direction is its own outcome.
+    #[test]
+    fn tcp_detailed_reports_a_fin() {
+        let (src, dst) = endpoints();
+        let mut reassembler = TcpStreamReassembler::new();
+
+        reassembler.offer_detailed(src, 1_000, dst, 80, 0, true, false, false, b"");
+        let fin = reassembler.offer_detailed(src, 1_000, dst, 80, 1, false, true, false, b"");
+        assert_eq!(fin.event, ReassemblyEvent::Fin);
+    }
+
+    /// No room for a flow at all is a limit, not silence.
+    #[test]
+    fn tcp_detailed_reports_a_refused_flow() {
+        let (src, dst) = endpoints();
+        let mut reassembler = TcpStreamReassembler::new().with_max_flows(0);
+
+        let refused = reassembler.offer_detailed(src, 1_000, dst, 80, 0, true, false, false, b"hi");
+        assert_eq!(refused.event, ReassemblyEvent::ResourceLimit);
+    }
+
     #[test]
     fn tcp_expire_before_drops_only_flows_last_seen_earlier() {
         let (src, dst) = endpoints();
