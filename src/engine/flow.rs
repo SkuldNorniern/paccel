@@ -167,3 +167,55 @@ impl LastSeen {
         self.0
     }
 }
+
+/// What a reassembler did with one offered segment or frame.
+///
+/// [`crate::engine::TcpStreamReassembler::offer`] and its QUIC counterpart
+/// return only the bytes that became contiguous, so an empty result covers
+/// several different outcomes: buffered behind a gap, a duplicate, a refused
+/// overlap, a flow that hit a limit. A consumer deciding whether traffic is
+/// suspicious needs to tell those apart.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum ReassemblyEvent {
+    /// Bytes became contiguous and are in the output.
+    Data,
+    /// Held behind a gap, waiting for what comes before it.
+    Buffered,
+    /// Already seen. Nothing changed.
+    Duplicate,
+    /// Contradicted bytes already held. The first copy stands.
+    Conflict,
+    /// A reset tore the flow down.
+    Reset,
+    /// The sender finished this direction.
+    Fin,
+    /// The stream is closed; later data is ignored.
+    Closed,
+    /// Too far past what is expected to be worth holding.
+    GapLimit,
+    /// A limit refused it: no room for the flow, or for the bytes.
+    ResourceLimit,
+    /// Nothing to do: no payload, or the segment could not be placed.
+    Ignored,
+}
+
+/// Bytes that became contiguous, and what happened to the offered data.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReassemblyOutput {
+    pub data: Vec<u8>,
+    pub event: ReassemblyEvent,
+}
+
+impl ReassemblyOutput {
+    pub(crate) fn new(data: Vec<u8>, event: ReassemblyEvent) -> Self {
+        ReassemblyOutput { data, event }
+    }
+
+    pub(crate) fn empty(event: ReassemblyEvent) -> Self {
+        ReassemblyOutput {
+            data: Vec::new(),
+            event,
+        }
+    }
+}

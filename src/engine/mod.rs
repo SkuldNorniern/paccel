@@ -22,7 +22,9 @@ pub use builtin::{
     TransportSegment, UdpAppHint, VrrpHeader, VxlanInfo, WireGuardInfo, WireGuardMessageType,
 };
 pub use constants::{ethertype_name, ip_protocol_name};
-pub use flow::{BiFlow, Direction, Endpoint};
+pub use flow::{
+    BiFlow, Direction, Endpoint, LastSeen, ReassemblyEvent, ReassemblyOutput, Timestamp,
+};
 pub use pcap::{
     CaptureFrameIter, PcapFrame, PcapFrameIter, PcapNgFrameIter, TsResolution, iter_capture_frames,
     iter_pcap_frames, iter_pcapng_frames, parse_capture_frames, parse_pcap_frames,
