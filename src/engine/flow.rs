@@ -101,6 +101,27 @@ mod tests {
         assert_ne!(forward_direction.index(), reverse_direction.index());
     }
 
+    #[test]
+    fn an_undated_entry_is_never_expired() {
+        let undated = LastSeen::default();
+        assert!(!undated.is_before(u64::MAX));
+        assert_eq!(undated.get(), None);
+    }
+
+    #[test]
+    fn last_seen_moves_forward_only() {
+        let mut seen = LastSeen::default();
+        seen.observe(1_000);
+        seen.observe(500);
+        assert_eq!(
+            seen.get(),
+            Some(1_000),
+            "a late packet does not age it early"
+        );
+        assert!(seen.is_before(1_001));
+        assert!(!seen.is_before(1_000));
+    }
+
     /// Same address, different ports: the port decides the order.
     #[test]
     fn ports_break_the_tie() {
@@ -109,5 +130,40 @@ mod tests {
         assert_eq!(flow.first.port, 80);
         assert_eq!(flow.second.port, 9_000);
         assert_eq!(direction, Direction::SecondToFirst);
+    }
+}
+
+/// Capture time in nanoseconds, supplied by the caller.
+///
+/// Paccel never reads a clock. Live capture passes a monotonic reading, a pcap
+/// replay passes the packet's own timestamp, and a test passes whatever integer
+/// it likes; all three then age state the same way.
+pub type Timestamp = u64;
+
+/// When an entry was last touched, for callers that age their state.
+///
+/// `None` means nothing has been dated: entries fed through the untimed methods
+/// are never expired by [`Self::is_before`], so mixing the two is safe rather
+/// than quietly dropping everything.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct LastSeen(Option<Timestamp>);
+
+impl LastSeen {
+    /// Move forward to `now`, never backwards. Out-of-order delivery would
+    /// otherwise age an entry out early.
+    pub fn observe(&mut self, now: Timestamp) {
+        self.0 = Some(self.0.map_or(now, |seen| seen.max(now)));
+    }
+
+    /// Whether this entry was last touched before `cutoff`. Undated entries
+    /// are never before anything.
+    #[must_use]
+    pub fn is_before(self, cutoff: Timestamp) -> bool {
+        self.0.is_some_and(|seen| seen < cutoff)
+    }
+
+    #[must_use]
+    pub fn get(self) -> Option<Timestamp> {
+        self.0
     }
 }

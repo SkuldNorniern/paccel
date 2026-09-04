@@ -3,10 +3,10 @@
 //! The built-in parser remains stateless. Configurable limits bound all payload
 //! state; excess IP datagrams are evicted and excess TCP data is refused.
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-use crate::engine::flow::BiFlow;
+use crate::engine::flow::{BiFlow, LastSeen, Timestamp};
 use crate::layer::application::quic::QuicFrame;
 use crate::layer::network::ipv4::Ipv4Header;
 
@@ -338,6 +338,7 @@ struct TcpDirectionState {
 struct TcpFlowState {
     directions: [TcpDirectionState; 2],
     generation: u64,
+    last_seen: LastSeen,
 }
 
 /// Reassembles each direction of a TCP flow independently with capped out-of-order storage.
@@ -435,6 +436,84 @@ impl TcpStreamReassembler {
         rst: bool,
         payload: &[u8],
     ) -> Vec<u8> {
+        self.offer_inner(
+            src, src_port, dst, dst_port, seq, syn, fin, rst, payload, None,
+        )
+    }
+
+    /// As [`Self::offer`], dating the flow so [`Self::expire_before`] can age
+    /// it out. `now` is the caller's clock: a packet timestamp when replaying a
+    /// capture, a monotonic reading when live.
+    #[allow(clippy::too_many_arguments)]
+    pub fn offer_at(
+        &mut self,
+        src: IpAddr,
+        src_port: u16,
+        dst: IpAddr,
+        dst_port: u16,
+        seq: u32,
+        syn: bool,
+        fin: bool,
+        rst: bool,
+        payload: &[u8],
+        now: Timestamp,
+    ) -> Vec<u8> {
+        self.offer_inner(
+            src,
+            src_port,
+            dst,
+            dst_port,
+            seq,
+            syn,
+            fin,
+            rst,
+            payload,
+            Some(now),
+        )
+    }
+
+    /// Drop every dated flow last seen before `cutoff`.
+    ///
+    /// Flows fed through [`Self::offer`] carry no date and are left alone;
+    /// they leave through the capacity limits as before.
+    pub fn expire_before(&mut self, cutoff: Timestamp) -> usize {
+        let before = self.flows.len();
+        let total = &mut self.total_buffered_bytes;
+        self.flows.retain(|_, flow| {
+            if flow.last_seen.is_before(cutoff) {
+                let held: usize = flow
+                    .directions
+                    .iter()
+                    .map(|direction| direction.buffered_bytes)
+                    .sum();
+                *total = total.saturating_sub(held);
+                false
+            } else {
+                true
+            }
+        });
+        let expired = before - self.flows.len();
+        if expired > 0 {
+            let live: HashSet<BiFlow> = self.flows.keys().copied().collect();
+            self.insertion_order.retain(|key| live.contains(key));
+        }
+        expired
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn offer_inner(
+        &mut self,
+        src: IpAddr,
+        src_port: u16,
+        dst: IpAddr,
+        dst_port: u16,
+        seq: u32,
+        syn: bool,
+        fin: bool,
+        rst: bool,
+        payload: &[u8],
+        now: Option<Timestamp>,
+    ) -> Vec<u8> {
         let Ok(payload_sequence_length) = u32::try_from(payload.len()) else {
             return Vec::new();
         };
@@ -461,6 +540,9 @@ impl TcpStreamReassembler {
         let Some(flow) = self.flows.get_mut(&key) else {
             return Vec::new();
         };
+        if let Some(now) = now {
+            flow.last_seen.observe(now);
+        }
 
         if syn && flow.directions[direction].expected.is_some() {
             self.total_buffered_bytes = self
@@ -870,6 +952,7 @@ enum QuicRangeResult {
 #[derive(Debug, Default)]
 struct QuicStreamState {
     ranges: BTreeMap<u64, Vec<u8>>,
+    last_seen: LastSeen,
     expected: u64,
     buffered_bytes: usize,
     /// Retransmissions that contradicted bytes already buffered.
@@ -961,6 +1044,73 @@ impl QuicStreamReassembler {
         fin: bool,
         data: &[u8],
     ) -> Vec<u8> {
+        self.offer_inner(
+            src, src_port, dst, dst_port, stream_id, offset, fin, data, None,
+        )
+    }
+
+    /// As [`Self::offer`], dating the stream so [`Self::expire_before`] can age
+    /// it out.
+    #[allow(clippy::too_many_arguments)]
+    pub fn offer_at(
+        &mut self,
+        src: IpAddr,
+        src_port: u16,
+        dst: IpAddr,
+        dst_port: u16,
+        stream_id: u64,
+        offset: u64,
+        fin: bool,
+        data: &[u8],
+        now: Timestamp,
+    ) -> Vec<u8> {
+        self.offer_inner(
+            src,
+            src_port,
+            dst,
+            dst_port,
+            stream_id,
+            offset,
+            fin,
+            data,
+            Some(now),
+        )
+    }
+
+    /// Drop every dated stream last seen before `cutoff`. Undated streams are
+    /// left to the capacity limits.
+    pub fn expire_before(&mut self, cutoff: Timestamp) -> usize {
+        let before = self.streams.len();
+        let total = &mut self.total_buffered_bytes;
+        self.streams.retain(|_, stream| {
+            if stream.last_seen.is_before(cutoff) {
+                *total = total.saturating_sub(stream.buffered_bytes);
+                false
+            } else {
+                true
+            }
+        });
+        let expired = before - self.streams.len();
+        if expired > 0 {
+            let live: HashSet<QuicStreamKey> = self.streams.keys().cloned().collect();
+            self.insertion_order.retain(|key| live.contains(key));
+        }
+        expired
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn offer_inner(
+        &mut self,
+        src: IpAddr,
+        src_port: u16,
+        dst: IpAddr,
+        dst_port: u16,
+        stream_id: u64,
+        offset: u64,
+        fin: bool,
+        data: &[u8],
+        now: Option<Timestamp>,
+    ) -> Vec<u8> {
         let Ok(data_length) = u64::try_from(data.len()) else {
             return Vec::new();
         };
@@ -974,6 +1124,9 @@ impl QuicStreamReassembler {
         let Some(state) = self.streams.get_mut(&key) else {
             return Vec::new();
         };
+        if let Some(now) = now {
+            state.last_seen.observe(now);
+        }
         if state.closed || !offset_within_gap(state.expected, offset, self.max_gap) {
             return Vec::new();
         }
@@ -1987,6 +2140,59 @@ mod tests {
         );
     }
 
+    /// Aging is driven by the caller's clock, so a pcap replay expires state at
+    /// the times in the file rather than at wall-clock times.
+    #[test]
+    fn tcp_expire_before_drops_only_flows_last_seen_earlier() {
+        let (src, dst) = endpoints();
+        let mut reassembler = TcpStreamReassembler::new();
+
+        reassembler.offer_at(src, 1_000, dst, 80, 0, true, false, false, b"", 1_000);
+        reassembler.offer_at(src, 1_000, dst, 80, 5, false, false, false, b"late", 1_000);
+        reassembler.offer_at(src, 2_000, dst, 80, 0, true, false, false, b"", 9_000);
+
+        assert_eq!(reassembler.expire_before(5_000), 1, "only the older flow");
+        assert_eq!(
+            reassembler.buffered_bytes(),
+            0,
+            "its buffered bytes go with it"
+        );
+
+        // The younger flow still works.
+        assert_eq!(
+            reassembler.offer_at(src, 2_000, dst, 80, 1, false, false, false, b"hi", 9_100),
+            b"hi"
+        );
+    }
+
+    /// A late packet must not age its own flow out early.
+    #[test]
+    fn tcp_out_of_order_delivery_does_not_age_a_flow_early() {
+        let (src, dst) = endpoints();
+        let mut reassembler = TcpStreamReassembler::new();
+
+        reassembler.offer_at(src, 1_000, dst, 80, 0, true, false, false, b"", 9_000);
+        reassembler.offer_at(src, 1_000, dst, 80, 1, false, false, false, b"a", 1_000);
+
+        assert_eq!(reassembler.expire_before(5_000), 0, "still seen at 9_000");
+    }
+
+    /// Flows fed without a timestamp are never expired, so mixing the two calls
+    /// cannot quietly drop everything.
+    #[test]
+    fn tcp_undated_flows_survive_expiry() {
+        let (src, dst) = endpoints();
+        let mut reassembler = TcpStreamReassembler::new();
+
+        reassembler.offer(src, 1_000, dst, 80, 0, true, false, false, b"");
+        assert_eq!(reassembler.expire_before(u64::MAX), 0);
+
+        assert_eq!(
+            reassembler.offer(src, 1_000, dst, 80, 1, false, false, false, b"hi"),
+            b"hi"
+        );
+    }
+
     #[test]
     fn tcp_overlap_first_wins_keeps_original_bytes_but_buffers_new_tail() {
         let (src, dst) = endpoints();
@@ -2261,6 +2467,33 @@ mod tests {
                 .is_empty()
         );
         assert_eq!(reassembler.buffered_bytes(), 6);
+    }
+
+    #[test]
+    fn quic_expire_before_drops_only_streams_last_seen_earlier() {
+        let (src, dst) = endpoints();
+        let mut reassembler = QuicStreamReassembler::new();
+
+        reassembler.offer_at(src, 4_432, dst, 443, 0, 5, false, b"late", 1_000);
+        reassembler.offer_at(src, 4_432, dst, 443, 1, 5, false, b"late", 9_000);
+        assert_eq!(reassembler.buffered_bytes(), 8);
+
+        assert_eq!(reassembler.expire_before(5_000), 1);
+        assert_eq!(
+            reassembler.buffered_bytes(),
+            4,
+            "only the older stream's bytes"
+        );
+    }
+
+    #[test]
+    fn quic_undated_streams_survive_expiry() {
+        let (src, dst) = endpoints();
+        let mut reassembler = QuicStreamReassembler::new();
+
+        reassembler.offer(src, 4_432, dst, 443, 0, 5, false, b"late");
+        assert_eq!(reassembler.expire_before(u64::MAX), 0);
+        assert_eq!(reassembler.buffered_bytes(), 4);
     }
 
     /// A retransmission carrying the same bytes is ordinary QUIC loss
