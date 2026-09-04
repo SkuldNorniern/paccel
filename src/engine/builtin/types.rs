@@ -1062,12 +1062,10 @@ impl ParsedPacket {
             )
         };
 
-        let (src_port, dst_port) = match self.transport.as_ref() {
-            Some(TransportSegment::Tcp(tcp)) => (tcp.source_port, tcp.destination_port),
-            Some(TransportSegment::Udp(udp)) => (udp.source_port, udp.destination_port),
-            Some(TransportSegment::Sctp(sctp)) => (sctp.source_port, sctp.destination_port),
-            None => (0, 0),
-        };
+        // Through the canonical accessor, so a header a snaplen cut short keys
+        // on the ports it did carry. Matching on `transport` here reported 0
+        // for a packet whose `ports()` answered correctly.
+        let (src_port, dst_port) = self.ports().unwrap_or((0, 0));
 
         Some(FlowKey {
             src_ip,
