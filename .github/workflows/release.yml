@@ -17,6 +17,16 @@ jobs:
         with:
           fetch-depth: 0
 
+      # A tag that disagrees with Cargo.toml publishes the wrong version.
+      - name: Tag matches the crate version
+        run: |
+          CRATE=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+          TAG="${GITHUB_REF_NAME#v}"
+          if [ "$CRATE" != "$TAG" ]; then
+            echo "tag ${GITHUB_REF_NAME} but Cargo.toml says ${CRATE}"
+            exit 1
+          fi
+
       - name: Install stable toolchain
         run: rustup toolchain install stable --profile minimal
 
