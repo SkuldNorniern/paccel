@@ -1255,9 +1255,9 @@ impl QuicStreamReassembler {
     ) -> QuicRangeResult {
         // The caller has already compared this range against what is held, so
         // anything overlapping agrees byte for byte and the two can be merged.
-        // Stored ranges are kept non-overlapping and non-touching: overlapping
-        // ones let `compare_with_buffered` count the same bytes twice and call
-        // a range that carries new data a duplicate.
+        // Stored ranges are kept non-overlapping: overlapping ones let
+        // `compare_with_buffered` count the same bytes twice and call a range
+        // that carries new data a duplicate.
         let Some(end) = offset.checked_add(data.len() as u64) else {
             return QuicRangeResult::ResourceLimited;
         };
@@ -1269,7 +1269,11 @@ impl QuicStreamReassembler {
             let Some(held_end) = held_offset.checked_add(held.len() as u64) else {
                 continue;
             };
-            if held_end < offset || held_offset > end {
+            // Only genuine overlap needs merging. Ranges that merely touch
+            // share no byte, so they cannot be counted twice, and leaving them
+            // apart keeps ordinary out-of-order delivery from rebuilding a
+            // growing buffer on every insert.
+            if held_end <= offset || held_offset >= end {
                 continue;
             }
             absorbed.push(held_offset);
@@ -2378,11 +2382,13 @@ mod tests {
         );
     }
 
-    /// The merge keeps stored ranges apart. `compare_with_buffered` sums the
-    /// overlap of each stored range against the incoming one, which only counts
-    /// correctly while no two stored ranges cover the same byte.
+    /// The merge keeps stored ranges from covering the same byte.
+    /// `compare_with_buffered` sums the overlap of each stored range against
+    /// the incoming one, which only counts correctly while none of them share a
+    /// byte. Ranges that merely touch are left alone: they cost nothing to the
+    /// count and merging them rebuilds a buffer on every ordinary insert.
     #[test]
-    fn quic_stored_ranges_never_overlap_or_touch() {
+    fn quic_stored_ranges_never_cover_the_same_byte() {
         let (src, dst) = endpoints();
         let mut reassembler = QuicStreamReassembler::new();
         let truth: Vec<u8> = (0..256u32)
@@ -2415,8 +2421,8 @@ mod tests {
 
         for pair in bounds.windows(2) {
             assert!(
-                pair[0].1 < pair[1].0,
-                "ranges {:?} and {:?} overlap or touch",
+                pair[0].1 <= pair[1].0,
+                "ranges {:?} and {:?} overlap",
                 pair[0],
                 pair[1]
             );
