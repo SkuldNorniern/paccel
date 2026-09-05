@@ -17,6 +17,7 @@ use paccel::layer::application::ntp::probe_ntp;
 use paccel::layer::application::ospf::probe_ospf;
 use paccel::layer::application::pcp::probe_pcp;
 use paccel::layer::application::pim::probe_pim;
+use paccel::layer::application::quic::probe_quic_long_header;
 use paccel::layer::application::radius::probe_radius;
 use paccel::layer::application::rip::probe_rip;
 use paccel::layer::application::rpc::probe_rpc;
@@ -496,4 +497,79 @@ fn telnet_data_is_not_a_negotiation() {
         ProbeResult::NoMatch
     ));
     assert!(probe_telnet(&[0xff, 0xfd]).is_incomplete());
+}
+
+/// A QUIC v1 Initial: long-header bit, version 1, an 8-byte DCID, no SCID.
+fn quic_long() -> Vec<u8> {
+    let mut packet = vec![0xc0, 0x00, 0x00, 0x00, 0x01, 0x08];
+    packet.extend([0xab; 8]);
+    packet.push(0x00);
+    packet.extend([0x00, 0x41, 0x00]);
+    packet
+}
+
+#[test]
+fn quic_matches_its_long_header() {
+    assert!(probe_quic_long_header(&quic_long()).is_match());
+}
+
+/// RFC 9000 sec 6: an endpoint must recognise a long header carrying a version
+/// it does not know, or version negotiation could never happen.
+#[test]
+fn an_unknown_quic_version_is_still_a_long_header() {
+    let mut future = quic_long();
+    future[1..5].copy_from_slice(&[0xff, 0x00, 0x00, 0x22]);
+    assert!(
+        probe_quic_long_header(&future).is_match(),
+        "an unknown version must not be read as a different protocol"
+    );
+}
+
+/// STUN, RTP and RTCP share a port with QUIC under WebRTC. STUN and RTCP leave
+/// the header-form bit clear, but RTP does not: its version 2 sets the same
+/// bit, and only the fixed bit below it tells the two apart.
+#[test]
+fn quic_declines_what_shares_its_port() {
+    assert!(matches!(
+        probe_quic_long_header(&stun()),
+        ProbeResult::NoMatch
+    ));
+    assert!(matches!(
+        probe_quic_long_header(&rtp()),
+        ProbeResult::NoMatch
+    ));
+    assert!(matches!(
+        probe_quic_long_header(&rtcp()),
+        ProbeResult::NoMatch
+    ));
+    assert!(
+        matches!(probe_stun(&quic_long()), ProbeResult::NoMatch),
+        "stun must not claim a quic initial either"
+    );
+}
+
+/// RFC 9000 sec 17.2 caps a v1 connection id at 20 bytes, which is what stops
+/// arbitrary bytes with the high bit set from parsing as QUIC.
+#[test]
+fn quic_rejects_a_connection_id_longer_than_the_version_allows() {
+    let mut oversized = quic_long();
+    oversized[5] = 21;
+    assert!(matches!(
+        probe_quic_long_header(&oversized),
+        ProbeResult::NoMatch
+    ));
+}
+
+/// A long header cut short is incomplete: the rest of the datagram has not
+/// been seen, which is not the same as it being another protocol.
+#[test]
+fn a_truncated_quic_long_header_is_incomplete() {
+    let full = quic_long();
+    for cut in 1..7 {
+        assert!(
+            probe_quic_long_header(&full[..cut]).is_incomplete(),
+            "a {cut}-byte long header was not incomplete"
+        );
+    }
+    assert!(probe_quic_long_header(&full[..10]).is_incomplete());
 }

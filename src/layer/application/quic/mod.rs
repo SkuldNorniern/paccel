@@ -1,4 +1,4 @@
-use crate::layer::LayerError;
+use crate::layer::{Layer, LayerError, ParseError, ProbeResult};
 
 #[cfg(feature = "quic-decrypt")]
 pub mod decrypt;
@@ -347,6 +347,67 @@ fn coalesced_packet_len(packet: &[u8]) -> Option<usize> {
     let length = usize::try_from(header.length?).ok()?;
     let total_len = header.packet_number_offset?.checked_add(length)?;
     (total_len != 0 && total_len <= packet.len()).then_some(total_len)
+}
+
+/// Probes a QUIC long header by its header form bit and version.
+///
+/// RFC 9000 sec 17.2: the high bit marks a long header and the version follows
+/// it, but the fixed bit below it is required too. RTP sets the header-form bit
+/// for its own version field, so without the fixed bit every RTP packet reads
+/// as a long header carrying an unknown version. RFC 9443 sec 4.1 draws the
+/// line at 0xc0 for exactly this reason.
+///
+/// An unrecognised version is still a long header - RFC 9000 sec 6 requires
+/// that so version negotiation can work - so it matches structurally rather
+/// than being refused.
+///
+/// This does not see short headers, which carry no version and no length:
+/// identifying one needs connection state, which is
+/// [`crate::engine::QuicConnectionTracker::classify_short_header`]'s job.
+#[must_use]
+pub fn probe_quic_long_header(payload: &[u8]) -> ProbeResult<QuicLongHeader> {
+    let Some(&first_byte) = payload.first() else {
+        return ProbeResult::Incomplete {
+            needed: Some(7),
+            available: 0,
+        };
+    };
+    // RFC 9443 sec 4.1: on a port shared with RTP, only 0xc0 upward is QUIC.
+    // RTP sets the same high bit for its version 2, so the header-form bit
+    // alone would read every RTP packet as a long header with an unrecognised
+    // version. The fixed bit is what separates them, and RFC 9443 sec 4.2 bars
+    // an endpoint that multiplexes from greasing it away.
+    if first_byte & 0xc0 != 0xc0 {
+        return ProbeResult::NoMatch;
+    }
+    if payload.len() < 7 {
+        return ProbeResult::Incomplete {
+            needed: Some(7),
+            available: payload.len(),
+        };
+    }
+
+    // A connection-ID length past the maximum is how a non-QUIC datagram that
+    // happens to set the high bit gives itself away, but only for the versions
+    // that impose one.
+    let version = u32::from_be_bytes([payload[1], payload[2], payload[3], payload[4]]);
+    if is_v1_or_v2_family(version) && usize::from(payload[5]) > MAX_V1_V2_CID_LEN {
+        return ProbeResult::NoMatch;
+    }
+
+    match parse_quic_long_header(payload) {
+        Ok(header) => ProbeResult::Match(header),
+        Err(LayerError::InvalidLength) => ProbeResult::Incomplete {
+            needed: None,
+            available: payload.len(),
+        },
+        Err(error) => ProbeResult::Malformed(ParseError::from_layer_error(
+            &error,
+            Layer::Application,
+            Some("quic"),
+            0,
+        )),
+    }
 }
 
 #[cfg(test)]
