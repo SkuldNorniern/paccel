@@ -29,7 +29,9 @@ pub use pcap::{
     CaptureFrameIter, PcapFrame, PcapFrameIter, PcapNgFrameIter, TsResolution, iter_capture_frames,
     iter_pcap_frames, iter_pcapng_frames, parse_capture_frames, parse_pcap_frames,
 };
-pub use quic_tracker::{QuicConnectionTracker, QuicPacketNumberSpace, QuicTrackerStats};
+pub use quic_tracker::{
+    QuicConnectionId, QuicConnectionTracker, QuicPacketNumberSpace, QuicTrackerStats,
+};
 pub use reassembly::{
     IpFragmentReassembler, QuicReassemblyStats, QuicStreamReassembler, TcpOverlapPolicy,
     TcpReassemblyStats, TcpStreamReassembler,
