@@ -1,4 +1,4 @@
-use crate::layer::LayerError;
+use crate::layer::{Layer, LayerError, ParseError, ProbeResult};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TftpMessage {
@@ -76,6 +76,32 @@ fn parse_null_terminated_string(payload: &[u8], offset: usize) -> (String, usize
         String::from_utf8_lossy(&remaining[..string_len]).into_owned(),
         next_offset,
     )
+}
+
+/// Probes a TFTP message by opcode.
+///
+/// RFC 1350 sec 5 defines opcodes 1 to 5, and RFC 2347 adds OACK as 6.
+#[must_use]
+pub fn probe_tftp(payload: &[u8]) -> ProbeResult<TftpMessage> {
+    let Some(opcode) = payload.get(..2) else {
+        return ProbeResult::Incomplete {
+            needed: Some(2),
+            available: payload.len(),
+        };
+    };
+    if !matches!(u16::from_be_bytes([opcode[0], opcode[1]]), 1..=6) {
+        return ProbeResult::NoMatch;
+    }
+
+    match parse_tftp_message(payload) {
+        Ok(message) => ProbeResult::Match(message),
+        Err(error) => ProbeResult::Malformed(ParseError::from_layer_error(
+            &error,
+            Layer::Application,
+            Some("tftp"),
+            0,
+        )),
+    }
 }
 
 #[cfg(test)]

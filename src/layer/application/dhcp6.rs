@@ -1,4 +1,4 @@
-use crate::layer::LayerError;
+use crate::layer::{Layer, LayerError, ParseError, ProbeResult};
 
 const DHCP6_FIXED_MESSAGE_LEN: usize = 4;
 
@@ -53,6 +53,38 @@ pub fn parse_dhcp6_message(payload: &[u8]) -> Result<Dhcp6Message, LayerError> {
         transaction_id: u32::from_be_bytes([0, payload[1], payload[2], payload[3]]),
         options,
     })
+}
+
+/// Probes a DHCPv6 message by its message type.
+///
+/// RFC 8415 sec 7.3 assigns 1 to 13; anything else is not DHCPv6.
+#[must_use]
+pub fn probe_dhcp6(payload: &[u8]) -> ProbeResult<Dhcp6Message> {
+    let Some(&message_type) = payload.first() else {
+        return ProbeResult::Incomplete {
+            needed: Some(DHCP6_FIXED_MESSAGE_LEN),
+            available: 0,
+        };
+    };
+    if !matches!(message_type, 1..=13) {
+        return ProbeResult::NoMatch;
+    }
+    if payload.len() < DHCP6_FIXED_MESSAGE_LEN {
+        return ProbeResult::Incomplete {
+            needed: Some(DHCP6_FIXED_MESSAGE_LEN),
+            available: payload.len(),
+        };
+    }
+
+    match parse_dhcp6_message(payload) {
+        Ok(message) => ProbeResult::Match(message),
+        Err(error) => ProbeResult::Malformed(ParseError::from_layer_error(
+            &error,
+            Layer::Application,
+            Some("dhcp6"),
+            0,
+        )),
+    }
 }
 
 #[cfg(test)]
