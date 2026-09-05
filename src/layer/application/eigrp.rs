@@ -1,4 +1,4 @@
-use crate::layer::LayerError;
+use crate::layer::{Layer, LayerError, ParseError, ProbeResult};
 
 const HEADER_LEN: usize = 20;
 
@@ -22,6 +22,36 @@ pub fn parse_eigrp_header(payload: &[u8]) -> Result<EigrpHeader, LayerError> {
         opcode: header[1],
         as_number: u16::from_be_bytes([header[18], header[19]]),
     })
+}
+
+/// Probes an EIGRP header by version and opcode.
+#[must_use]
+pub fn probe_eigrp(payload: &[u8]) -> ProbeResult<EigrpHeader> {
+    let Some(head) = payload.get(..2) else {
+        return ProbeResult::Incomplete {
+            needed: Some(HEADER_LEN),
+            available: payload.len(),
+        };
+    };
+    if head[0] != 2 || !matches!(head[1], 1 | 3 | 4 | 5 | 10 | 11) {
+        return ProbeResult::NoMatch;
+    }
+    if payload.len() < HEADER_LEN {
+        return ProbeResult::Incomplete {
+            needed: Some(HEADER_LEN),
+            available: payload.len(),
+        };
+    }
+
+    match parse_eigrp_header(payload) {
+        Ok(value) => ProbeResult::Match(value),
+        Err(error) => ProbeResult::Malformed(ParseError::from_layer_error(
+            &error,
+            Layer::Application,
+            Some("eigrp"),
+            0,
+        )),
+    }
 }
 
 #[cfg(test)]

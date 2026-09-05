@@ -3,14 +3,23 @@
 //! port with, rather than merely parsing what it is handed.
 
 use paccel::layer::ProbeResult;
+use paccel::layer::application::cdp::probe_cdp;
 use paccel::layer::application::coap::probe_coap;
 use paccel::layer::application::dhcp::probe_dhcp;
+use paccel::layer::application::eigrp::probe_eigrp;
+use paccel::layer::application::hsrp::probe_hsrp;
 use paccel::layer::application::http2::probe_http2;
 use paccel::layer::application::isakmp::probe_isakmp;
+use paccel::layer::application::kerberos::{probe_kerberos_tcp, probe_kerberos_udp};
+use paccel::layer::application::lacp::probe_lacp;
 use paccel::layer::application::nat_pmp::probe_nat_pmp;
 use paccel::layer::application::ntp::probe_ntp;
+use paccel::layer::application::ospf::probe_ospf;
 use paccel::layer::application::pcp::probe_pcp;
+use paccel::layer::application::pim::probe_pim;
 use paccel::layer::application::radius::probe_radius;
+use paccel::layer::application::rip::probe_rip;
+use paccel::layer::application::rpc::probe_rpc;
 use paccel::layer::application::rtcp::probe_rtcp;
 use paccel::layer::application::rtp::probe_rtp;
 use paccel::layer::application::sip::probe_sip;
@@ -18,7 +27,9 @@ use paccel::layer::application::snmp::probe_snmp;
 use paccel::layer::application::ssdp::probe_ssdp;
 use paccel::layer::application::stun::probe_stun;
 use paccel::layer::application::syslog::probe_syslog;
+use paccel::layer::application::telnet::probe_telnet;
 use paccel::layer::application::tftp::probe_tftp;
+use paccel::layer::application::vrrp::probe_vrrp;
 
 /// A STUN binding request: type, length, magic cookie, transaction id.
 fn stun() -> Vec<u8> {
@@ -80,16 +91,31 @@ fn http2() -> Vec<u8> {
     payload
 }
 
+/// Reports every probe that failed at once, rather than stopping at the first.
+fn all_matched(cases: &[(&str, bool)]) {
+    let missed: Vec<&str> = cases
+        .iter()
+        .filter(|(_, matched)| !matched)
+        .map(|(name, _)| *name)
+        .collect();
+    assert!(
+        missed.is_empty(),
+        "these probes did not match their own protocol: {missed:?}"
+    );
+}
+
 #[test]
 fn each_probe_matches_its_own_protocol() {
-    assert!(probe_stun(&stun()).is_match());
-    assert!(probe_rtp(&rtp()).is_match());
-    assert!(probe_rtcp(&rtcp()).is_match());
-    assert!(probe_ntp(&ntp()).is_match());
-    assert!(probe_coap(&coap()).is_match());
-    assert!(probe_isakmp(&isakmp()).is_match());
-    assert!(probe_dhcp(&dhcp()).is_match());
-    assert!(probe_http2(&http2()).is_match());
+    all_matched(&[
+        ("stun", probe_stun(&stun()).is_match()),
+        ("rtp", probe_rtp(&rtp()).is_match()),
+        ("rtcp", probe_rtcp(&rtcp()).is_match()),
+        ("ntp", probe_ntp(&ntp()).is_match()),
+        ("coap", probe_coap(&coap()).is_match()),
+        ("isakmp", probe_isakmp(&isakmp()).is_match()),
+        ("dhcp", probe_dhcp(&dhcp()).is_match()),
+        ("http2", probe_http2(&http2()).is_match()),
+    ]);
 }
 
 /// STUN, RTP, RTCP and QUIC are multiplexed onto one UDP port by WebRTC, so
@@ -174,14 +200,29 @@ fn a_partial_http2_preface_is_incomplete() {
 /// An empty payload decides nothing, and no probe may claim a match on it.
 #[test]
 fn no_probe_matches_an_empty_payload() {
-    assert!(!probe_stun(&[]).is_match());
-    assert!(!probe_rtp(&[]).is_match());
-    assert!(!probe_rtcp(&[]).is_match());
-    assert!(!probe_ntp(&[]).is_match());
-    assert!(!probe_coap(&[]).is_match());
-    assert!(!probe_isakmp(&[]).is_match());
-    assert!(!probe_dhcp(&[]).is_match());
-    assert!(!probe_http2(&[]).is_match());
+    let claimed: Vec<&str> = [
+        ("stun", probe_stun(&[]).is_match()),
+        ("rtp", probe_rtp(&[]).is_match()),
+        ("rtcp", probe_rtcp(&[]).is_match()),
+        ("ntp", probe_ntp(&[]).is_match()),
+        ("coap", probe_coap(&[]).is_match()),
+        ("isakmp", probe_isakmp(&[]).is_match()),
+        ("dhcp", probe_dhcp(&[]).is_match()),
+        ("http2", probe_http2(&[]).is_match()),
+        ("radius", probe_radius(&[]).is_match()),
+        ("tftp", probe_tftp(&[]).is_match()),
+        ("snmp", probe_snmp(&[]).is_match()),
+        ("telnet", probe_telnet(&[]).is_match()),
+        ("kerberos", probe_kerberos_udp(&[]).is_match()),
+    ]
+    .into_iter()
+    .filter(|(_, matched)| *matched)
+    .map(|(name, _)| name)
+    .collect();
+    assert!(
+        claimed.is_empty(),
+        "these probes claimed a match on no bytes at all: {claimed:?}"
+    );
 }
 
 /// An Access-Request whose length field covers the message.
@@ -235,14 +276,16 @@ fn snmp() -> Vec<u8> {
 
 #[test]
 fn the_second_batch_matches_its_own_protocols() {
-    assert!(probe_radius(&radius()).is_match());
-    assert!(probe_tftp(&tftp()).is_match());
-    assert!(probe_nat_pmp(&nat_pmp()).is_match());
-    assert!(probe_pcp(&pcp()).is_match());
-    assert!(probe_syslog(&syslog()).is_match());
-    assert!(probe_sip(&sip()).is_match());
-    assert!(probe_ssdp(&ssdp()).is_match());
-    assert!(probe_snmp(&snmp()).is_match());
+    all_matched(&[
+        ("radius", probe_radius(&radius()).is_match()),
+        ("tftp", probe_tftp(&tftp()).is_match()),
+        ("nat_pmp", probe_nat_pmp(&nat_pmp()).is_match()),
+        ("pcp", probe_pcp(&pcp()).is_match()),
+        ("syslog", probe_syslog(&syslog()).is_match()),
+        ("sip", probe_sip(&sip()).is_match()),
+        ("ssdp", probe_ssdp(&ssdp()).is_match()),
+        ("snmp", probe_snmp(&snmp()).is_match()),
+    ]);
 }
 
 /// RFC 6887 sec 7.1: PCP and NAT-PMP share port 5351 and are told apart by the
@@ -307,4 +350,150 @@ fn too_short_to_decide_is_not_a_mismatch() {
         "two bytes cannot decide a 20-byte header"
     );
     assert!(matches!(probe_nat_pmp(&nat_pmp()), ProbeResult::Match(_)));
+}
+
+/// An OSPFv2 hello.
+fn ospf() -> Vec<u8> {
+    let mut header = vec![0u8; 24];
+    header[0] = 2;
+    header[1] = 1;
+    header
+}
+
+fn eigrp() -> Vec<u8> {
+    let mut header = vec![0u8; 20];
+    header[0] = 2;
+    header[1] = 5;
+    header
+}
+
+fn rip() -> Vec<u8> {
+    vec![1, 2, 0, 0]
+}
+
+/// A PIM v2 hello.
+fn pim() -> Vec<u8> {
+    vec![0x20, 0x00, 0x00, 0x00]
+}
+
+/// A VRRPv3 advertisement.
+fn vrrp() -> Vec<u8> {
+    let mut header = vec![0u8; 8];
+    header[0] = 0x31;
+    header[1] = 1;
+    header[2] = 100;
+    header
+}
+
+fn hsrp() -> Vec<u8> {
+    vec![0u8; 20]
+}
+
+fn cdp() -> Vec<u8> {
+    vec![0x02, 0xb4, 0x00, 0x00]
+}
+
+fn lacp() -> Vec<u8> {
+    let mut header = vec![0u8; 18];
+    header[0] = 1;
+    header[1] = 1;
+    header
+}
+
+/// An ONC RPC reply, which needs only the common header.
+fn rpc() -> Vec<u8> {
+    let mut message = vec![0u8; 8];
+    message[3] = 0x2a;
+    message[7] = 1;
+    message
+}
+
+/// IAC DO ECHO.
+fn telnet() -> Vec<u8> {
+    vec![0xff, 0xfd, 0x01]
+}
+
+/// An AS-REQ, ASN.1 APPLICATION tag 10.
+fn kerberos() -> Vec<u8> {
+    vec![0x6a, 0x81, 0x00]
+}
+
+#[test]
+fn the_third_batch_matches_its_own_protocols() {
+    all_matched(&[
+        ("ospf", probe_ospf(&ospf()).is_match()),
+        ("eigrp", probe_eigrp(&eigrp()).is_match()),
+        ("rip", probe_rip(&rip()).is_match()),
+        ("pim", probe_pim(&pim()).is_match()),
+        ("vrrp", probe_vrrp(&vrrp()).is_match()),
+        ("hsrp", probe_hsrp(&hsrp()).is_match()),
+        ("cdp", probe_cdp(&cdp()).is_match()),
+        ("lacp", probe_lacp(&lacp()).is_match()),
+        ("rpc", probe_rpc(&rpc()).is_match()),
+        ("telnet", probe_telnet(&telnet()).is_match()),
+        ("kerberos", probe_kerberos_udp(&kerberos()).is_match()),
+    ]);
+}
+
+/// PIM and VRRP both read a version from the high nibble of byte 0 and are
+/// carried over IP directly, so a version mismatch is all that separates them.
+#[test]
+fn pim_and_vrrp_do_not_claim_each_other() {
+    assert!(matches!(probe_pim(&vrrp()), ProbeResult::NoMatch));
+    assert!(matches!(probe_vrrp(&pim()), ProbeResult::NoMatch));
+}
+
+#[test]
+fn the_third_batch_declines_each_other() {
+    assert!(matches!(probe_lacp(&cdp()), ProbeResult::NoMatch));
+    assert!(matches!(probe_telnet(&rip()), ProbeResult::NoMatch));
+    assert!(matches!(probe_kerberos_udp(&rip()), ProbeResult::NoMatch));
+    assert!(matches!(probe_cdp(&hsrp()), ProbeResult::NoMatch));
+}
+
+/// OSPF and EIGRP genuinely cannot be told apart by their headers: version 2
+/// opcode 5 is a valid opening for both. IP protocol number 89 against 88 is
+/// what separates them, one layer up, so neither probe is asked to.
+#[test]
+fn ospf_and_eigrp_overlap_and_the_probes_do_not_pretend_otherwise() {
+    let mut ambiguous = ospf();
+    ambiguous[1] = 5;
+    assert!(probe_ospf(&ambiguous).is_match());
+
+    let mut as_eigrp = ambiguous.clone();
+    as_eigrp.truncate(20);
+    assert!(
+        probe_eigrp(&as_eigrp).is_match(),
+        "the same bytes are a valid eigrp header, which is the point"
+    );
+}
+
+/// RFC 4120 sec 7.2.2: over TCP the tag sits behind a four-byte length, so the
+/// two probes must not accept each other's framing.
+#[test]
+fn kerberos_framing_differs_between_udp_and_tcp() {
+    let mut over_tcp = vec![0x00, 0x00, 0x00, 0x03];
+    over_tcp.extend(kerberos());
+
+    assert!(probe_kerberos_tcp(&over_tcp).is_match());
+    assert!(
+        matches!(probe_kerberos_udp(&over_tcp), ProbeResult::NoMatch),
+        "the length prefix is not an application tag"
+    );
+    assert!(
+        probe_kerberos_tcp(&kerberos()).is_incomplete(),
+        "three bytes do not reach past a four-byte length prefix"
+    );
+}
+
+/// A Telnet stream that is carrying data rather than negotiating has nothing
+/// to match on, and saying so beats guessing from the port.
+#[test]
+fn telnet_data_is_not_a_negotiation() {
+    assert!(matches!(probe_telnet(b"login: "), ProbeResult::NoMatch));
+    assert!(matches!(
+        probe_telnet(&[0xff, 0x01, 0x02]),
+        ProbeResult::NoMatch
+    ));
+    assert!(probe_telnet(&[0xff, 0xfd]).is_incomplete());
 }

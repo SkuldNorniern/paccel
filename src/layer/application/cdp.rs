@@ -1,4 +1,4 @@
-use crate::layer::LayerError;
+use crate::layer::{Layer, LayerError, ParseError, ProbeResult};
 
 const HEADER_LEN: usize = 4;
 
@@ -22,6 +22,36 @@ pub fn parse_cdp_header(payload: &[u8]) -> Result<CdpHeader, LayerError> {
         ttl: header[1],
         checksum: u16::from_be_bytes([header[2], header[3]]),
     })
+}
+
+/// Probes a CDP header by version.
+#[must_use]
+pub fn probe_cdp(payload: &[u8]) -> ProbeResult<CdpHeader> {
+    let Some(head) = payload.get(..1) else {
+        return ProbeResult::Incomplete {
+            needed: Some(HEADER_LEN),
+            available: payload.len(),
+        };
+    };
+    if !matches!(head[0], 1 | 2) {
+        return ProbeResult::NoMatch;
+    }
+    if payload.len() < HEADER_LEN {
+        return ProbeResult::Incomplete {
+            needed: Some(HEADER_LEN),
+            available: payload.len(),
+        };
+    }
+
+    match parse_cdp_header(payload) {
+        Ok(value) => ProbeResult::Match(value),
+        Err(error) => ProbeResult::Malformed(ParseError::from_layer_error(
+            &error,
+            Layer::Application,
+            Some("cdp"),
+            0,
+        )),
+    }
 }
 
 #[cfg(test)]

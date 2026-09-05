@@ -1,4 +1,4 @@
-use crate::layer::LayerError;
+use crate::layer::{Layer, LayerError, ParseError, ProbeResult};
 
 const HEADER_LEN: usize = 4;
 
@@ -22,6 +22,38 @@ pub fn parse_rip_header(payload: &[u8]) -> Result<RipHeader, LayerError> {
     }
 
     Ok(RipHeader { command, version })
+}
+
+/// Probes a RIP header by command and version.
+///
+/// RFC 2453 sec 4: commands 1 to 5, versions 1 and 2.
+#[must_use]
+pub fn probe_rip(payload: &[u8]) -> ProbeResult<RipHeader> {
+    let Some(head) = payload.get(..2) else {
+        return ProbeResult::Incomplete {
+            needed: Some(HEADER_LEN),
+            available: payload.len(),
+        };
+    };
+    if !(1..=5).contains(&head[0]) || !matches!(head[1], 1 | 2) {
+        return ProbeResult::NoMatch;
+    }
+    if payload.len() < HEADER_LEN {
+        return ProbeResult::Incomplete {
+            needed: Some(HEADER_LEN),
+            available: payload.len(),
+        };
+    }
+
+    match parse_rip_header(payload) {
+        Ok(value) => ProbeResult::Match(value),
+        Err(error) => ProbeResult::Malformed(ParseError::from_layer_error(
+            &error,
+            Layer::Application,
+            Some("rip"),
+            0,
+        )),
+    }
 }
 
 #[cfg(test)]

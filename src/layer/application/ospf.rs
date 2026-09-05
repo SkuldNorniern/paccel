@@ -1,6 +1,6 @@
 use std::net::Ipv4Addr;
 
-use crate::layer::LayerError;
+use crate::layer::{Layer, LayerError, ParseError, ProbeResult};
 
 const HEADER_LEN: usize = 24;
 
@@ -33,6 +33,39 @@ pub fn parse_ospf_header(payload: &[u8]) -> Result<OspfHeader, LayerError> {
         router_id: Ipv4Addr::new(header[4], header[5], header[6], header[7]),
         area_id: Ipv4Addr::new(header[8], header[9], header[10], header[11]),
     })
+}
+
+/// Probes an OSPF header by version and message type.
+///
+/// RFC 2328 sec A.3.1: version 2, with the five packet types. Version 1 is
+/// accepted for the same reason the parser does.
+#[must_use]
+pub fn probe_ospf(payload: &[u8]) -> ProbeResult<OspfHeader> {
+    let Some(head) = payload.get(..2) else {
+        return ProbeResult::Incomplete {
+            needed: Some(HEADER_LEN),
+            available: payload.len(),
+        };
+    };
+    if !matches!(head[0], 1 | 2) || !(1..=5).contains(&head[1]) {
+        return ProbeResult::NoMatch;
+    }
+    if payload.len() < HEADER_LEN {
+        return ProbeResult::Incomplete {
+            needed: Some(HEADER_LEN),
+            available: payload.len(),
+        };
+    }
+
+    match parse_ospf_header(payload) {
+        Ok(value) => ProbeResult::Match(value),
+        Err(error) => ProbeResult::Malformed(ParseError::from_layer_error(
+            &error,
+            Layer::Application,
+            Some("ospf"),
+            0,
+        )),
+    }
 }
 
 #[cfg(test)]
