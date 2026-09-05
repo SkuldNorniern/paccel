@@ -3,7 +3,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::net::IpAddr;
 
-use crate::engine::flow::{BiFlow, LastSeen, Timestamp};
+use crate::engine::flow::{BiFlow, Endpoint, LastSeen, Timestamp};
 use crate::layer::Confidence;
 use crate::layer::application::quic::{
     QuicShortHeader, decode_packet_number, parse_quic_short_header,
@@ -34,11 +34,46 @@ impl QuicPacketNumberSpace {
     }
 }
 
-#[derive(Debug, Default)]
-struct QuicFlowState {
+/// A connection, independent of the addresses carrying it.
+///
+/// Handed out by the tracker and only meaningful to it. A connection keeps its
+/// id across a migration, which is the point: the tuple changes, this does not.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct QuicConnectionId(u64);
+
+#[derive(Debug)]
+struct QuicConnectionState {
+    /// The endpoint that did not initiate. Direction is measured against it, so
+    /// that a client changing address keeps the same two directions.
+    ///
+    /// Taken from the destination of the first long header seen, which in a
+    /// capture that starts at the handshake is the server. A capture joined
+    /// mid-connection, or one where the server's packet is seen first, can
+    /// anchor on the wrong end; directions are then consistent but swapped.
+    responder: Endpoint,
+    /// Every tuple this connection has been seen on, most recent last.
+    tuples: Vec<BiFlow>,
+    /// Indexed by direction: 0 toward the responder, 1 away from it.
     expected_dcids: [Option<Vec<u8>>; 2],
     last_seen: LastSeen,
     largest_packet_numbers: [[Option<u64>; 3]; 2],
+}
+
+impl QuicConnectionState {
+    fn new(responder: Endpoint) -> Self {
+        QuicConnectionState {
+            responder,
+            tuples: Vec::new(),
+            expected_dcids: [None, None],
+            last_seen: LastSeen::default(),
+            largest_packet_numbers: [[None; 3]; 2],
+        }
+    }
+
+    /// 0 when the packet is headed for the responder, 1 when it comes from it.
+    fn direction_to(&self, destination: Endpoint) -> usize {
+        usize::from(destination != self.responder)
+    }
 }
 
 /// What a [`QuicConnectionTracker`] is holding.
@@ -52,20 +87,33 @@ pub struct QuicTrackerStats {
     pub active_tuples: usize,
     /// Connection IDs that resolve to one of them.
     pub active_cids: usize,
+    /// Connections held right now. Lower than `active_tuples` once one has
+    /// migrated, since the old tuple stays bound until it is expired.
+    pub active_connections: usize,
 }
 
-/// Tracks connection IDs and packet numbers for each direction of a UDP flow.
+/// Tracks connection IDs and packet numbers for each direction of a connection.
 ///
-/// State is keyed on the 5-tuple, with connection IDs as a lookup into it.
+/// State lives on the connection, not on the address pair carrying it. Tuples
+/// and connection IDs are both indices into it:
 ///
-/// A packet from a tuple never seen before is still matched by its connection
-/// ID: [`Self::classify_short_header`] falls back to the ID lengths other
-/// connections have used, so a connection that changes address is recognised
-/// rather than lost. Packet-number state, though, still belongs to the tuple
-/// it was learned on, so a moved connection starts that part again.
+/// ```text
+/// 5-tuple ────┐
+/// CID ────────┼──> QuicConnectionId ──> packet numbers, expected DCIDs
+/// old tuple ──┘
+/// ```
 ///
-/// Carrying the rest across a move needs identity on the connection itself,
-/// plus `NEW_CONNECTION_ID` and `RETIRE_CONNECTION_ID`.
+/// So a connection that changes address keeps its packet-number state.
+/// [`Self::classify_short_header`] recognises the moved packet by its ID, and
+/// [`Self::observe_short_header`] binds the new tuple to the connection it
+/// names.
+///
+/// Direction is measured against the responder, the end that did not initiate,
+/// rather than against the tuple, because the tuple's own ordering is not
+/// stable across a move. The responder is taken to be the destination of the
+/// first packet seen, which in a capture that starts at the handshake is the
+/// server. A capture joined mid-connection can anchor on the wrong end;
+/// directions are then consistent with each other but swapped.
 #[derive(Debug)]
 pub struct QuicConnectionTracker {
     /// Every connection-ID length seen, as a bit per length.
@@ -76,9 +124,12 @@ pub struct QuicConnectionTracker {
     /// of a migration - still be matched by its ID.
     cid_lengths: u32,
     max_flows: usize,
-    flows: HashMap<BiFlow, QuicFlowState>,
-    insertion_order: VecDeque<BiFlow>,
-    cid_index: HashMap<Vec<u8>, BiFlow>,
+    connections: HashMap<QuicConnectionId, QuicConnectionState>,
+    by_tuple: HashMap<BiFlow, QuicConnectionId>,
+    by_cid: HashMap<Vec<u8>, QuicConnectionId>,
+    /// Connections oldest first, for the capacity limit.
+    insertion_order: VecDeque<QuicConnectionId>,
+    next_id: u64,
 }
 
 impl QuicConnectionTracker {
@@ -88,9 +139,11 @@ impl QuicConnectionTracker {
         Self {
             cid_lengths: 0,
             max_flows: DEFAULT_MAX_FLOWS,
-            flows: HashMap::new(),
+            connections: HashMap::new(),
+            by_tuple: HashMap::new(),
+            by_cid: HashMap::new(),
             insertion_order: VecDeque::new(),
-            cid_index: HashMap::new(),
+            next_id: 0,
         }
     }
 
@@ -128,19 +181,31 @@ impl QuicConnectionTracker {
         self.observe_long_header_inner(src, src_port, dst, dst_port, scid, Some(now));
     }
 
-    /// Drop every dated flow last seen before `cutoff`, and the connection IDs
-    /// that pointed at it. Undated flows are left to the capacity limit.
+    /// Drop every dated connection last seen before `cutoff`, along with the
+    /// tuples and connection IDs that pointed at it. Undated connections are
+    /// left to the capacity limit.
+    ///
+    /// Returns the number of connections dropped, not tuples: a migrated
+    /// connection expires once however many addresses it used.
     pub fn expire_before(&mut self, cutoff: Timestamp) -> usize {
-        let before = self.flows.len();
-        self.flows
-            .retain(|_, flow| !flow.last_seen.is_before(cutoff));
-        let expired = before - self.flows.len();
+        let before = self.connections.len();
+        self.connections
+            .retain(|_, connection| !connection.last_seen.is_before(cutoff));
+        let expired = before - self.connections.len();
         if expired > 0 {
-            self.cid_index.retain(|_, key| self.flows.contains_key(key));
-            self.insertion_order
-                .retain(|key| self.flows.contains_key(key));
+            self.reindex();
         }
         expired
+    }
+
+    /// Drops index entries whose connection is gone.
+    fn reindex(&mut self) {
+        self.by_tuple
+            .retain(|_, id| self.connections.contains_key(id));
+        self.by_cid
+            .retain(|_, id| self.connections.contains_key(id));
+        self.insertion_order
+            .retain(|id| self.connections.contains_key(id));
     }
 
     fn observe_long_header_inner(
@@ -155,28 +220,116 @@ impl QuicConnectionTracker {
         if scid.is_empty() {
             return;
         }
-        let (key, direction) = normalized_flow(src, src_port, dst, dst_port);
-        if !self.ensure_flow(&key) {
+        let (key, _) = normalized_flow(src, src_port, dst, dst_port);
+        let source = Endpoint::new(src, src_port);
+        let destination = Endpoint::new(dst, dst_port);
+
+        // An SCID already on the books names the connection even when the
+        // address pair does not: that is a long header arriving after a move.
+        let id = match self.by_tuple.get(&key).or_else(|| self.by_cid.get(scid)) {
+            Some(id) => *id,
+            // Nothing known yet, so this is the first packet of a connection
+            // and its destination is the end that did not initiate.
+            None => {
+                let Some(id) = self.open_connection(key, destination) else {
+                    return;
+                };
+                id
+            }
+        };
+        self.bind_tuple(id, key);
+
+        let Some(connection) = self.connections.get_mut(&id) else {
             return;
+        };
+        // The sender announces the ID its peer should send *back* to, so this
+        // is the DCID expected on packets headed the other way.
+        let reply_direction = connection.direction_to(source);
+        connection.expected_dcids[reply_direction] = Some(scid.to_vec());
+        if let Some(now) = now {
+            connection.last_seen.observe(now);
         }
-        if let Some(flow) = self.flows.get_mut(&key) {
-            flow.expected_dcids[1 - direction] = Some(scid.to_vec());
-            if let Some(now) = now {
-                flow.last_seen.observe(now);
-            }
-            if scid.len() <= MAX_CID_LEN {
-                self.cid_lengths |= 1 << scid.len();
-            }
-            self.cid_index.insert(scid.to_vec(), key);
+        if scid.len() <= MAX_CID_LEN {
+            self.cid_lengths |= 1 << scid.len();
         }
+        self.by_cid.insert(scid.to_vec(), id);
+    }
+
+    /// Binds the arrival tuple of a short-header packet to the connection its
+    /// DCID names, so that packet-number state follows a connection that moved.
+    /// Returns the connection, or `None` when the DCID is not known.
+    ///
+    /// [`Self::classify_short_header`] only reads; this is what records the
+    /// move.
+    pub fn observe_short_header(
+        &mut self,
+        src: IpAddr,
+        src_port: u16,
+        dst: IpAddr,
+        dst_port: u16,
+        dcid: &[u8],
+    ) -> Option<QuicConnectionId> {
+        self.observe_short_header_inner(src, src_port, dst, dst_port, dcid, None)
+    }
+
+    /// As [`Self::observe_short_header`], dating the connection so
+    /// [`Self::expire_before`] can age it out.
+    #[allow(clippy::too_many_arguments)]
+    pub fn observe_short_header_at(
+        &mut self,
+        src: IpAddr,
+        src_port: u16,
+        dst: IpAddr,
+        dst_port: u16,
+        dcid: &[u8],
+        now: Timestamp,
+    ) -> Option<QuicConnectionId> {
+        self.observe_short_header_inner(src, src_port, dst, dst_port, dcid, Some(now))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn observe_short_header_inner(
+        &mut self,
+        src: IpAddr,
+        src_port: u16,
+        dst: IpAddr,
+        dst_port: u16,
+        dcid: &[u8],
+        now: Option<Timestamp>,
+    ) -> Option<QuicConnectionId> {
+        let id = *self.by_cid.get(dcid)?;
+        let (key, _) = normalized_flow(src, src_port, dst, dst_port);
+        self.bind_tuple(id, key);
+        if let Some(now) = now
+            && let Some(connection) = self.connections.get_mut(&id)
+        {
+            connection.last_seen.observe(now);
+        }
+        Some(id)
+    }
+
+    /// The connection a DCID names, if it is one being tracked.
+    #[must_use]
+    pub fn connection_id_for_dcid(&self, dcid: &[u8]) -> Option<QuicConnectionId> {
+        self.by_cid.get(dcid).copied()
+    }
+
+    /// Every address pair a connection has been seen on, oldest first. A
+    /// connection that has not migrated has exactly one.
+    #[must_use]
+    pub fn tuples_for_connection(&self, id: QuicConnectionId) -> &[BiFlow] {
+        self.connections
+            .get(&id)
+            .map_or(&[][..], |connection| &connection.tuples)
     }
 
     /// What this tracker is holding.
     #[must_use]
     pub fn stats(&self) -> QuicTrackerStats {
         QuicTrackerStats {
-            active_tuples: self.flows.len(),
-            active_cids: self.cid_index.len(),
+            active_tuples: self.by_tuple.len(),
+            active_cids: self.by_cid.len(),
+            active_connections: self.connections.len(),
         }
     }
 
@@ -184,7 +337,8 @@ impl QuicConnectionTracker {
     /// are the connection's last-seen tuple, not the packet's arrival tuple.
     #[must_use]
     pub fn connection_for_dcid(&self, dcid: &[u8]) -> Option<(IpAddr, u16, IpAddr, u16)> {
-        let key = self.cid_index.get(dcid)?;
+        let id = self.by_cid.get(dcid)?;
+        let key = self.connections.get(id)?.tuples.last()?;
         Some((
             key.first.address,
             key.first.port,
@@ -202,10 +356,11 @@ impl QuicConnectionTracker {
         dst: IpAddr,
         dst_port: u16,
     ) -> Option<usize> {
-        let (key, direction) = normalized_flow(src, src_port, dst, dst_port);
-        self.flows.get(&key)?.expected_dcids[direction]
-            .as_ref()
-            .map(Vec::len)
+        let (key, _) = normalized_flow(src, src_port, dst, dst_port);
+        let id = self.by_tuple.get(&key)?;
+        let connection = self.connections.get(id)?;
+        let direction = connection.direction_to(Endpoint::new(dst, dst_port));
+        connection.expected_dcids[direction].as_ref().map(Vec::len)
     }
 
     /// Parses a short header using the learned DCID length and rates the
@@ -270,65 +425,106 @@ impl QuicConnectionTracker {
         truncated_pn: u32,
         pn_len: usize,
     ) -> u64 {
-        let (key, direction) = normalized_flow(src, src_port, dst, dst_port);
-        if !self.ensure_flow(&key) {
-            return decode_packet_number(None, truncated_pn, pn_len);
-        }
-        let Some(flow) = self.flows.get_mut(&key) else {
+        let (key, _) = normalized_flow(src, src_port, dst, dst_port);
+        let destination = Endpoint::new(dst, dst_port);
+        let id = match self.by_tuple.get(&key) {
+            Some(id) => *id,
+            None => match self.open_connection(key, destination) {
+                Some(id) => id,
+                None => return decode_packet_number(None, truncated_pn, pn_len),
+            },
+        };
+        let Some(connection) = self.connections.get_mut(&id) else {
             return decode_packet_number(None, truncated_pn, pn_len);
         };
+        let direction = connection.direction_to(destination);
         let space_index = space.index();
-        let largest_pn = flow.largest_packet_numbers[direction][space_index];
+        let largest_pn = connection.largest_packet_numbers[direction][space_index];
         let packet_number = decode_packet_number(largest_pn, truncated_pn, pn_len);
         if largest_pn.is_none_or(|largest| packet_number >= largest) {
-            flow.largest_packet_numbers[direction][space_index] = Some(packet_number);
+            connection.largest_packet_numbers[direction][space_index] = Some(packet_number);
         }
         packet_number
     }
 
-    /// Removes both directions of a normalized flow, returning whether it existed.
+    /// Removes both directions of a normalized flow, returning whether it
+    /// existed.
+    ///
+    /// Removing one tuple of a migrated connection leaves the connection, and
+    /// its other tuples, in place.
     pub fn remove_flow(&mut self, src: IpAddr, src_port: u16, dst: IpAddr, dst_port: u16) -> bool {
         let (key, _) = normalized_flow(src, src_port, dst, dst_port);
-        let removed = self.flows.remove(&key).is_some();
-        self.insertion_order.retain(|queued| queued != &key);
-        self.remove_indexed_cids(&key);
-        removed
-    }
-
-    /// Removes all flow state.
-    pub fn clear(&mut self) {
-        self.flows.clear();
-        self.insertion_order.clear();
-        self.cid_index.clear();
-    }
-
-    fn ensure_flow(&mut self, key: &BiFlow) -> bool {
-        if self.flows.contains_key(key) {
-            return true;
-        }
-        if self.max_flows == 0 {
+        let Some(id) = self.by_tuple.remove(&key) else {
             return false;
+        };
+        let empty = match self.connections.get_mut(&id) {
+            Some(connection) => {
+                connection.tuples.retain(|held| held != &key);
+                connection.tuples.is_empty()
+            }
+            None => true,
+        };
+        if empty {
+            self.drop_connection(id);
         }
-        self.evict_until_room();
-        self.flows.insert(*key, QuicFlowState::default());
-        self.insertion_order.push_back(*key);
         true
     }
 
-    fn evict_until_room(&mut self) {
-        while self.flows.len() >= self.max_flows {
-            let Some(oldest) = self.insertion_order.pop_front() else {
-                self.flows.clear();
-                self.cid_index.clear();
-                break;
-            };
-            self.flows.remove(&oldest);
-            self.remove_indexed_cids(&oldest);
+    /// Removes all connection state.
+    pub fn clear(&mut self) {
+        self.connections.clear();
+        self.by_tuple.clear();
+        self.by_cid.clear();
+        self.insertion_order.clear();
+    }
+
+    /// Starts a connection on `key`, with `responder` as the end that did not
+    /// initiate. `None` when the tracker is not allowed to hold any.
+    fn open_connection(&mut self, key: BiFlow, responder: Endpoint) -> Option<QuicConnectionId> {
+        if self.max_flows == 0 {
+            return None;
+        }
+        self.evict_until_room();
+        let id = QuicConnectionId(self.next_id);
+        self.next_id = self.next_id.wrapping_add(1);
+        let mut connection = QuicConnectionState::new(responder);
+        connection.tuples.push(key);
+        self.connections.insert(id, connection);
+        self.by_tuple.insert(key, id);
+        self.insertion_order.push_back(id);
+        Some(id)
+    }
+
+    /// Points `key` at `id`, recording a migration when the tuple is new.
+    fn bind_tuple(&mut self, id: QuicConnectionId, key: BiFlow) {
+        if self.by_tuple.get(&key) == Some(&id) {
+            return;
+        }
+        self.by_tuple.insert(key, id);
+        if let Some(connection) = self.connections.get_mut(&id)
+            && !connection.tuples.contains(&key)
+        {
+            connection.tuples.push(key);
         }
     }
 
-    fn remove_indexed_cids(&mut self, key: &BiFlow) {
-        self.cid_index.retain(|_, indexed_flow| indexed_flow != key);
+    fn evict_until_room(&mut self) {
+        while self.connections.len() >= self.max_flows {
+            let Some(oldest) = self.insertion_order.pop_front() else {
+                self.connections.clear();
+                self.by_tuple.clear();
+                self.by_cid.clear();
+                break;
+            };
+            self.drop_connection(oldest);
+        }
+    }
+
+    fn drop_connection(&mut self, id: QuicConnectionId) {
+        self.connections.remove(&id);
+        self.by_tuple.retain(|_, held| held != &id);
+        self.by_cid.retain(|_, held| held != &id);
+        self.insertion_order.retain(|queued| queued != &id);
     }
 }
 
@@ -362,6 +558,134 @@ mod tests {
             "the id goes with the flow"
         );
         assert!(tracker.connection_for_dcid(&[5, 6, 7, 8]).is_some());
+    }
+
+    /// The client moves to an address that sorts on the *other* side of the
+    /// server, so the tuple's own direction ordering flips. Direction is
+    /// anchored on the responder for exactly this reason.
+    #[test]
+    fn packet_number_state_follows_a_connection_that_moved() {
+        let client = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let server = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let moved = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+        let server_cid = [9, 9, 9, 9];
+        let mut tracker = QuicConnectionTracker::new();
+
+        tracker.observe_long_header(client, 5_000, server, 443, &[1, 2, 3, 4]);
+        tracker.observe_long_header(server, 443, client, 5_000, &server_cid);
+        assert_eq!(
+            tracker.reconstruct_packet_number(
+                client,
+                5_000,
+                server,
+                443,
+                QuicPacketNumberSpace::Application,
+                0xa82f_30ea,
+                4
+            ),
+            0xa82f_30ea
+        );
+
+        let (original, original_direction) = normalized_flow(client, 5_000, server, 443);
+        let (relocated, relocated_direction) = normalized_flow(moved, 53_000, server, 443);
+        assert_ne!(
+            original_direction, relocated_direction,
+            "the tuple orders the two addresses differently after the move, \
+             which is what the responder anchor has to absorb"
+        );
+
+        let id = tracker
+            .observe_short_header(moved, 53_000, server, 443, &server_cid)
+            .expect("the server's id names the connection");
+        assert_eq!(
+            tracker.tuples_for_connection(id),
+            &[original, relocated],
+            "both addresses belong to the one connection"
+        );
+
+        assert_eq!(
+            tracker.reconstruct_packet_number(
+                moved,
+                53_000,
+                server,
+                443,
+                QuicPacketNumberSpace::Application,
+                0x9b32,
+                2
+            ),
+            0xa82f_9b32,
+            "a truncated packet number decodes against what the connection \
+             saw before it moved"
+        );
+
+        let stats = tracker.stats();
+        assert_eq!(stats.active_connections, 1);
+        assert_eq!(stats.active_tuples, 2);
+    }
+
+    #[test]
+    fn an_unknown_id_binds_no_tuple() {
+        let client = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let server = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let mut tracker = QuicConnectionTracker::new();
+
+        tracker.observe_long_header(client, 5_000, server, 443, &[1, 2, 3, 4]);
+        assert!(
+            tracker
+                .observe_short_header(client, 6_000, server, 443, &[7, 7, 7, 7])
+                .is_none()
+        );
+        assert_eq!(tracker.stats().active_tuples, 1);
+    }
+
+    /// Removing one address of a migrated connection must not take the
+    /// connection with it.
+    #[test]
+    fn removing_one_tuple_leaves_the_rest_of_the_connection() {
+        let client = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let server = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let moved = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+        let server_cid = [9, 9, 9, 9];
+        let mut tracker = QuicConnectionTracker::new();
+
+        tracker.observe_long_header(server, 443, client, 5_000, &server_cid);
+        tracker.observe_short_header(moved, 53_000, server, 443, &server_cid);
+
+        assert!(tracker.remove_flow(client, 5_000, server, 443));
+        assert_eq!(tracker.stats().active_connections, 1);
+        assert!(
+            tracker.connection_for_dcid(&server_cid).is_some(),
+            "the id still resolves through the address it moved to"
+        );
+
+        assert!(tracker.remove_flow(moved, 53_000, server, 443));
+        assert_eq!(tracker.stats().active_connections, 0);
+        assert!(tracker.connection_for_dcid(&server_cid).is_none());
+    }
+
+    /// A connection that has moved expires once, not once per address.
+    #[test]
+    fn expiry_counts_connections_not_tuples() {
+        let client = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let server = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let moved = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+        let server_cid = [9, 9, 9, 9];
+        let mut tracker = QuicConnectionTracker::new();
+
+        tracker.observe_long_header_at(server, 443, client, 5_000, &server_cid, 1_000);
+        tracker.observe_short_header_at(moved, 53_000, server, 443, &server_cid, 2_000);
+
+        assert_eq!(
+            tracker.expire_before(1_500),
+            0,
+            "the move refreshed the connection"
+        );
+        assert_eq!(tracker.expire_before(3_000), 1);
+        assert_eq!(
+            tracker.stats().active_tuples,
+            0,
+            "both addresses go with it"
+        );
     }
 
     #[test]
@@ -536,13 +860,13 @@ mod tests {
             0xa82f_9b32
         );
 
-        let (key, direction) = normalized_flow(src, 1_000, dst, 443);
+        let (key, _) = normalized_flow(src, 1_000, dst, 443);
+        let id = tracker.by_tuple[&key];
+        let connection = &tracker.connections[&id];
+        let direction = connection.direction_to(Endpoint::new(dst, 443));
         assert_eq!(
-            tracker
-                .flows
-                .get(&key)
-                .and_then(|flow| flow.largest_packet_numbers[direction]
-                    [QuicPacketNumberSpace::Application.index()]),
+            connection.largest_packet_numbers[direction]
+                [QuicPacketNumberSpace::Application.index()],
             Some(0xa82f_9b32)
         );
     }
@@ -600,13 +924,13 @@ mod tests {
                 ),
                 0
             );
-            assert!(tracker.flows.len() <= 2);
+            assert!(tracker.connections.len() <= 2);
         }
 
         let (oldest, _) = normalized_flow(src, 1_000, dst, 443);
         let (newest, _) = normalized_flow(src, 1_003, dst, 443);
-        assert!(!tracker.flows.contains_key(&oldest));
-        assert!(tracker.flows.contains_key(&newest));
+        assert!(!tracker.by_tuple.contains_key(&oldest));
+        assert!(tracker.by_tuple.contains_key(&newest));
     }
 
     #[test]
