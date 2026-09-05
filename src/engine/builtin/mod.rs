@@ -4,7 +4,6 @@ mod transport;
 mod types;
 
 use crate::engine::constants::{ethertype, ip_proto};
-use crate::layer::LayerError;
 pub use crate::layer::application::bgp::{BgpMessage, BgpMessageType};
 pub use crate::layer::application::cdp::CdpHeader;
 use crate::layer::application::cdp::parse_cdp_header;
@@ -47,6 +46,7 @@ pub use crate::layer::application::telnet::TelnetCommand;
 pub use crate::layer::application::tftp::TftpMessage;
 pub use crate::layer::application::vrrp::VrrpHeader;
 use crate::layer::datalink::dot11::{parse_dot11, parse_radiotap};
+use crate::layer::{Layer, LayerError, ParseError};
 
 use self::link::{
     parse_arp_packet, parse_link_with_linktype, parse_mpls_stack, parse_pppoe_minimal,
@@ -67,29 +67,87 @@ pub use self::types::{
 pub struct BuiltinPacketParser;
 
 impl BuiltinPacketParser {
-    pub fn parse(raw: &[u8]) -> Result<ParsedPacket, LayerError> {
+    /// # Errors
+    /// Returns the layer the parse stopped at and why. See [`ParseError`].
+    pub fn parse(raw: &[u8]) -> Result<ParsedPacket, ParseError> {
         Self::parse_with_config(raw, ParseConfig::default())
     }
 
-    pub fn parse_with_config(raw: &[u8], config: ParseConfig) -> Result<ParsedPacket, LayerError> {
+    /// # Errors
+    /// Returns the layer the parse stopped at and why. See [`ParseError`].
+    pub fn parse_with_config(raw: &[u8], config: ParseConfig) -> Result<ParsedPacket, ParseError> {
         Self::parse_with_config_and_linktype(raw, config, None)
     }
 
-    pub fn parse_with_linktype(raw: &[u8], linktype: u16) -> Result<ParsedPacket, LayerError> {
+    /// # Errors
+    /// Returns the layer the parse stopped at and why. See [`ParseError`].
+    pub fn parse_with_linktype(raw: &[u8], linktype: u16) -> Result<ParsedPacket, ParseError> {
         Self::parse_with_config_and_linktype(raw, ParseConfig::default(), Some(linktype))
     }
 
+    /// # Errors
+    /// Returns the layer the parse stopped at and why. See [`ParseError`].
     pub fn parse_with_config_and_linktype(
         raw: &[u8],
         config: ParseConfig,
         linktype: Option<u16>,
-    ) -> Result<ParsedPacket, LayerError> {
+    ) -> Result<ParsedPacket, ParseError> {
         // Built once here and filled in by the chain below, so a packet is
         // moved exactly as many times as the public signature demands: once,
         // on the way out.
         let mut parsed = ParsedPacket::default();
-        Self::parse_l2_with_linktype(raw, config, 0, linktype, &mut parsed)?;
-        Ok(parsed)
+        match Self::parse_l2_with_linktype(raw, config, 0, linktype, &mut parsed) {
+            Ok(()) => Ok(parsed),
+            Err(error) => Err(Self::describe_failure(&error, &parsed)),
+        }
+    }
+
+    /// Says which layer a [`LayerError`] came from, by reading how far the
+    /// parse got before it stopped.
+    ///
+    /// The chain itself carries the smaller [`LayerError`], because widening it
+    /// would put a larger `Result` on the path every well-formed packet takes.
+    /// The context is recovered here instead, on the failure path only.
+    ///
+    /// `offset` is the start of the failing layer where the parse recorded one,
+    /// which today means a transport header and deeper. A failure in the link
+    /// or network header reports 0, since nothing before it was measured.
+    #[cold]
+    #[inline(never)]
+    fn describe_failure(error: &LayerError, parsed: &ParsedPacket) -> ParseError {
+        let reached_link =
+            parsed.ethernet.is_some() || parsed.dot11.is_some() || parsed.radiotap.is_some();
+        if !reached_link {
+            return ParseError::from_layer_error(error, Layer::Link, None, 0);
+        }
+
+        let network = if parsed.ipv4.is_some() {
+            Some("ipv4")
+        } else if parsed.ipv6.is_some() {
+            Some("ipv6")
+        } else if parsed.arp.is_some() {
+            Some("arp")
+        } else {
+            None
+        };
+        let Some(network) = network else {
+            return ParseError::from_layer_error(error, Layer::Network, None, 0);
+        };
+
+        // A tunnel that opened but never produced an inner packet failed as a
+        // tunnel, not as the transport it would have carried.
+        if parsed.gre.is_some() || parsed.vxlan.is_some() || parsed.geneve.is_some() {
+            if parsed.inner.is_none() {
+                return ParseError::from_layer_error(error, Layer::Tunnel, None, 0);
+            }
+            return ParseError::from_layer_error(error, Layer::Application, None, 0);
+        }
+
+        let offset = parsed.transport_segment_offset.unwrap_or(0);
+        if parsed.transport.is_none() {
+            return ParseError::from_layer_error(error, Layer::Transport, Some(network), offset);
+        }
+        ParseError::from_layer_error(error, Layer::Application, None, offset)
     }
 
     /// Parse into a packet the caller owns, moving nothing.
@@ -102,14 +160,20 @@ impl BuiltinPacketParser {
     /// from the packet before it. What the reuse saves is the move and the two
     /// growable vectors; a tunnelled packet still allocates its inner chain.
     /// See [`ParsedPacket::reset`].
+    ///
+    /// # Errors
+    /// Returns the layer the parse stopped at and why. See [`ParseError`].
     pub fn parse_into(
         raw: &[u8],
         config: ParseConfig,
         linktype: Option<u16>,
         out: &mut ParsedPacket,
-    ) -> Result<(), LayerError> {
+    ) -> Result<(), ParseError> {
         out.reset();
-        Self::parse_l2_with_linktype(raw, config, 0, linktype, out)
+        match Self::parse_l2_with_linktype(raw, config, 0, linktype, out) {
+            Ok(()) => Ok(()),
+            Err(error) => Err(Self::describe_failure(&error, out)),
+        }
     }
 
     fn parse_l2(
@@ -374,14 +438,23 @@ impl BuiltinPacketParser {
                     return Ok(());
                 }
 
-                if ipv4.fragment_offset == 0 {
+                // Recorded before the transport parse, not after it. A strict
+                // parse that refuses the transport header returns from inside
+                // the block below, and a header already known good should not
+                // be thrown away on the way out - it is what tells a caller
+                // the failure was the transport's and not the network's.
+                let protocol = ipv4.protocol;
+                let fragment_offset = ipv4.fragment_offset;
+                parsed.ipv4 = Some(ipv4);
+
+                if fragment_offset == 0 {
                     let l4_end = total_len.min(l3_bytes.len());
                     let l4_bytes = &l3_bytes[ip_header_len..l4_end];
                     // One exit, so a transport header that did not survive
                     // takes the same path out as one that did.
                     if Self::apply_transport_or_warn(
                         parsed,
-                        ipv4.protocol,
+                        protocol,
                         l4_bytes,
                         config,
                         l3_offset + ip_header_len,
@@ -389,7 +462,7 @@ impl BuiltinPacketParser {
                         parsed.transport_segment_offset = Some(l3_offset + ip_header_len);
                         recurse_transport_tunnel(
                             parsed,
-                            ipv4.protocol,
+                            protocol,
                             l4_bytes,
                             config,
                             depth,
@@ -397,7 +470,6 @@ impl BuiltinPacketParser {
                         );
                     }
                 }
-                parsed.ipv4 = Some(ipv4);
                 Ok(())
             }
             ethertype::IPV6 => {
@@ -474,6 +546,10 @@ impl BuiltinPacketParser {
                     });
                 }
 
+                // Recorded before the transport parse, for the reason given in
+                // the IPv4 branch above.
+                parsed.ipv6 = Some(ipv6);
+
                 if !state.non_initial_fragment && !state.depth_limit_hit {
                     let l4_bytes = &ipv6_payload[state.l4_offset..];
                     if Self::apply_transport_or_warn(
@@ -495,7 +571,6 @@ impl BuiltinPacketParser {
                     }
                 }
 
-                parsed.ipv6 = Some(ipv6);
                 Ok(())
             }
             ethertype::PPPOE_DISCOVERY => {
@@ -1122,7 +1197,15 @@ mod tests {
         )
         .expect_err("strict mode should reject unsupported ethertype");
 
-        assert!(matches!(err, crate::layer::LayerError::ValidationError(_)));
+        // An unhandled ethertype arrives as ValidationError, which maps to
+        // InvalidValue. Unsupported would read better, but LayerError's
+        // UnsupportedProtocol carries a u8 and an ethertype is a u16.
+        assert_eq!(err.kind, crate::layer::ParseErrorKind::InvalidValue);
+        assert_eq!(
+            err.layer,
+            crate::layer::Layer::Network,
+            "the ethernet header parsed, so the ethertype is a network-layer refusal"
+        );
     }
 
     #[test]
@@ -1143,7 +1226,8 @@ mod tests {
         )
         .expect_err("strict mode should reject truncated IPv4");
 
-        assert!(matches!(err, crate::layer::LayerError::InvalidLength));
+        assert_eq!(err.kind, crate::layer::ParseErrorKind::InvalidLength);
+        assert_eq!(err.layer, crate::layer::Layer::Network);
     }
 
     #[test]
@@ -1160,6 +1244,63 @@ mod tests {
         assert!(matches!(parsed.transport, Some(TransportSegment::Udp(_))));
     }
 
+    /// An IPv4 header whose total_length is honest, followed by only half a
+    /// UDP header. Nothing overruns, so the network layer is satisfied and the
+    /// transport header is the one that cannot be read.
+    fn ipv4_with_half_a_udp_header() -> Vec<u8> {
+        vec![
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0x08, 0x00, // ethernet
+            0x45, 0x00, 0x00, 0x18, 0x00, 0x01, 0x00, 0x00, 64, 17, 0, 0, // ipv4, total 24
+            192, 168, 1, 1, 192, 168, 1, 2, 0x04, 0xd2, 0x00, 0x35, // 4 of udp's 8 bytes
+        ]
+    }
+
+    #[test]
+    fn a_failure_names_the_layer_that_actually_failed() {
+        let err = BuiltinPacketParser::parse_with_config(
+            &ipv4_with_half_a_udp_header(),
+            ParseConfig {
+                mode: ParseMode::Strict,
+                ..ParseConfig::default()
+            },
+        )
+        .expect_err("half a udp header cannot be parsed strictly");
+
+        assert_eq!(
+            err.layer,
+            crate::layer::Layer::Transport,
+            "the ipv4 header is complete and consistent, so the failure is the transport's"
+        );
+        assert_eq!(err.protocol, Some("ipv4"));
+        assert_eq!(err.kind, crate::layer::ParseErrorKind::InvalidLength);
+    }
+
+    #[test]
+    fn a_frame_too_short_for_a_link_header_fails_at_the_link_layer() {
+        let err =
+            BuiltinPacketParser::parse(&[0, 1, 2, 3]).expect_err("four bytes are not a frame");
+
+        assert_eq!(err.layer, crate::layer::Layer::Link);
+        assert_eq!(err.protocol, None);
+        assert_eq!(err.offset, 0);
+    }
+
+    /// The same bytes are kept by a permissive parse, which is what makes the
+    /// strict refusal above a choice rather than the only outcome.
+    #[test]
+    fn permissive_keeps_the_addresses_when_the_transport_header_is_cut() {
+        let parsed = BuiltinPacketParser::parse(&ipv4_with_half_a_udp_header())
+            .expect("permissive keeps what survived");
+
+        assert!(parsed.ipv4.is_some(), "the addresses are still good");
+        assert!(parsed.transport.is_none(), "nothing is invented");
+        assert_eq!(
+            parsed.ports(),
+            Some((1234, 53)),
+            "the ports were in the four bytes that did survive"
+        );
+    }
+
     #[test]
     fn strict_mode_rejects_truncated_ipv4_udp() {
         let err = BuiltinPacketParser::parse_with_config(
@@ -1171,7 +1312,12 @@ mod tests {
         )
         .expect_err("strict mode should reject truncated IPv4 UDP");
 
-        assert!(matches!(err, crate::layer::LayerError::InvalidLength));
+        // The UDP header is entirely present; it is the IPv4 total_length of
+        // 40 that overruns the 28 captured bytes. So this is the network
+        // header failing, not the transport one, whatever the fixture's name
+        // suggests.
+        assert_eq!(err.kind, crate::layer::ParseErrorKind::InvalidLength);
+        assert_eq!(err.layer, crate::layer::Layer::Network);
     }
 
     #[test]
@@ -1199,7 +1345,10 @@ mod tests {
         )
         .expect_err("strict mode should reject truncated IPv6 UDP");
 
-        assert!(matches!(err, crate::layer::LayerError::InvalidLength));
+        // As with IPv4 above: the declared payload length overruns the
+        // capture, so the refusal belongs to the network layer.
+        assert_eq!(err.kind, crate::layer::ParseErrorKind::InvalidLength);
+        assert_eq!(err.layer, crate::layer::Layer::Network);
     }
 
     #[test]
