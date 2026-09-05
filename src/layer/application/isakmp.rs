@@ -1,4 +1,4 @@
-use crate::layer::LayerError;
+use crate::layer::{Layer, LayerError, ParseError, ProbeResult};
 
 const HEADER_LEN: usize = 28;
 
@@ -44,6 +44,38 @@ pub fn parse_isakmp_header(payload: &[u8]) -> Result<IsakmpHeader, LayerError> {
         message_id: u32::from_be_bytes([header[20], header[21], header[22], header[23]]),
         length: u32::from_be_bytes([header[24], header[25], header[26], header[27]]),
     })
+}
+
+/// Probes an ISAKMP header by its version nibble.
+///
+/// RFC 7296 sec 3.1: the major version is 1 or 2. The length field must also
+/// cover the header, which is what separates ISAKMP from arbitrary UDP on port
+/// 500.
+#[must_use]
+pub fn probe_isakmp(payload: &[u8]) -> ProbeResult<IsakmpHeader> {
+    let Some(header) = payload.get(..HEADER_LEN) else {
+        return ProbeResult::Incomplete {
+            needed: Some(HEADER_LEN),
+            available: payload.len(),
+        };
+    };
+    if !matches!(header[17] >> 4, 1 | 2) {
+        return ProbeResult::NoMatch;
+    }
+    let length = u32::from_be_bytes([header[24], header[25], header[26], header[27]]);
+    if (length as usize) < HEADER_LEN {
+        return ProbeResult::NoMatch;
+    }
+
+    match parse_isakmp_header(payload) {
+        Ok(header) => ProbeResult::Match(header),
+        Err(error) => ProbeResult::Malformed(ParseError::from_layer_error(
+            &error,
+            Layer::Application,
+            Some("isakmp"),
+            0,
+        )),
+    }
 }
 
 #[cfg(test)]

@@ -1,4 +1,4 @@
-use crate::layer::LayerError;
+use crate::layer::{Layer, LayerError, ParseError, ProbeResult};
 
 const FIXED_HEADER_LEN: usize = 12;
 
@@ -72,6 +72,44 @@ fn skip_extension(payload: &[u8], extension_offset: usize) -> Result<usize, Laye
         return Err(LayerError::InvalidLength);
     }
     Ok(header_len)
+}
+
+/// Probes an RTP packet by version, rejecting payload types that belong to
+/// RTCP.
+///
+/// RFC 5761 sec 4: when the two share a port, a payload type of 72 to 76 is
+/// reserved so that an RTCP packet type of 200 to 204 - the same byte with the
+/// marker bit set - is never read as RTP.
+#[must_use]
+pub fn probe_rtp(payload: &[u8]) -> ProbeResult<RtpHeader> {
+    let Some(head) = payload.get(..2) else {
+        return ProbeResult::Incomplete {
+            needed: Some(FIXED_HEADER_LEN),
+            available: payload.len(),
+        };
+    };
+    if head[0] >> 6 != 2 {
+        return ProbeResult::NoMatch;
+    }
+    if matches!(head[1] & 0x7f, 72..=76) {
+        return ProbeResult::NoMatch;
+    }
+    if payload.len() < FIXED_HEADER_LEN {
+        return ProbeResult::Incomplete {
+            needed: Some(FIXED_HEADER_LEN),
+            available: payload.len(),
+        };
+    }
+
+    match parse_rtp(payload) {
+        Ok(header) => ProbeResult::Match(header),
+        Err(error) => ProbeResult::Malformed(ParseError::from_layer_error(
+            &error,
+            Layer::Application,
+            Some("rtp"),
+            0,
+        )),
+    }
 }
 
 #[cfg(test)]

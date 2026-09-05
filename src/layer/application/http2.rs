@@ -1,3 +1,5 @@
+use crate::layer::ProbeResult;
+
 pub const CONNECTION_PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
 
 pub const FRAME_TYPE_DATA: u8 = 0x0;
@@ -76,6 +78,46 @@ pub fn looks_like_http2(payload: &[u8]) -> bool {
         || parse_http2_frames(payload)
             .first()
             .is_some_and(|frame| frame.frame_type == FRAME_TYPE_SETTINGS && frame.stream_id == 0)
+}
+
+/// Probes HTTP/2 by the client connection preface, or by a server's opening
+/// SETTINGS frame when the capture joined after the preface.
+///
+/// RFC 9113 sec 3.4: the preface is fixed bytes, and both peers must open with
+/// a SETTINGS frame on stream 0. A payload that is a prefix of the preface is
+/// incomplete, not a mismatch - the rest may be in the next segment.
+#[must_use]
+pub fn probe_http2(payload: &[u8]) -> ProbeResult<Vec<Http2FrameHeader>> {
+    if let Some(rest) = payload.strip_prefix(CONNECTION_PREFACE) {
+        let frames = parse_http2_frames(rest);
+        if frames.is_empty() {
+            return ProbeResult::Incomplete {
+                needed: Some(CONNECTION_PREFACE.len() + FRAME_HEADER_LENGTH),
+                available: payload.len(),
+            };
+        }
+        return ProbeResult::Match(frames);
+    }
+    if payload.len() < CONNECTION_PREFACE.len() && CONNECTION_PREFACE.starts_with(payload) {
+        return ProbeResult::Incomplete {
+            needed: Some(CONNECTION_PREFACE.len()),
+            available: payload.len(),
+        };
+    }
+
+    if payload.len() < FRAME_HEADER_LENGTH {
+        return ProbeResult::Incomplete {
+            needed: Some(FRAME_HEADER_LENGTH),
+            available: payload.len(),
+        };
+    }
+    let frames = parse_http2_frames(payload);
+    match frames.first() {
+        Some(frame) if frame.frame_type == FRAME_TYPE_SETTINGS && frame.stream_id == 0 => {
+            ProbeResult::Match(frames)
+        }
+        _ => ProbeResult::NoMatch,
+    }
 }
 
 #[cfg(test)]

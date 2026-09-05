@@ -1,6 +1,6 @@
 use std::net::Ipv4Addr;
 
-use crate::layer::LayerError;
+use crate::layer::{Layer, LayerError, ParseError, ProbeResult};
 
 const DHCP_FIXED_MESSAGE_LEN: usize = 240;
 const DHCP_MAGIC_COOKIE_OFFSET: usize = 236;
@@ -89,4 +89,38 @@ pub fn parse_dhcp_message(payload: &[u8]) -> Result<DhcpMessage, LayerError> {
         message_type,
         options,
     })
+}
+
+/// Probes a DHCP message by its magic cookie.
+///
+/// RFC 2131 sec 3: the cookie sits 236 bytes in, past the fixed BOOTP fields,
+/// so a short capture is incomplete rather than a mismatch.
+#[must_use]
+pub fn probe_dhcp(payload: &[u8]) -> ProbeResult<DhcpMessage> {
+    let cookie_end = DHCP_MAGIC_COOKIE_OFFSET + DHCP_MAGIC_COOKIE.len();
+    let Some(cookie) = payload.get(DHCP_MAGIC_COOKIE_OFFSET..cookie_end) else {
+        return ProbeResult::Incomplete {
+            needed: Some(cookie_end),
+            available: payload.len(),
+        };
+    };
+    if cookie != DHCP_MAGIC_COOKIE {
+        return ProbeResult::NoMatch;
+    }
+    if payload.len() < DHCP_FIXED_MESSAGE_LEN {
+        return ProbeResult::Incomplete {
+            needed: Some(DHCP_FIXED_MESSAGE_LEN),
+            available: payload.len(),
+        };
+    }
+
+    match parse_dhcp_message(payload) {
+        Ok(message) => ProbeResult::Match(message),
+        Err(error) => ProbeResult::Malformed(ParseError::from_layer_error(
+            &error,
+            Layer::Application,
+            Some("dhcp"),
+            0,
+        )),
+    }
 }

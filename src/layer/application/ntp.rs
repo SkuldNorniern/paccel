@@ -1,4 +1,4 @@
-use crate::layer::LayerError;
+use crate::layer::{Layer, LayerError, ParseError, ProbeResult};
 
 const NTP_HEADER_LEN: usize = 48;
 
@@ -40,4 +40,37 @@ pub fn parse_ntp_message(payload: &[u8]) -> Result<NtpMessage, LayerError> {
         receive_ts: u64::from_be_bytes(payload[32..40].try_into().expect("fixed NTP field")),
         transmit_ts: u64::from_be_bytes(payload[40..48].try_into().expect("fixed NTP field")),
     })
+}
+
+/// Probes an NTP message by version and stratum.
+///
+/// RFC 5905 sec 7.3: versions 1 to 4 are defined and the stratum stops at 16.
+/// Every mode value is legal, so it carries no signal here.
+#[must_use]
+pub fn probe_ntp(payload: &[u8]) -> ProbeResult<NtpMessage> {
+    let Some(head) = payload.get(..2) else {
+        return ProbeResult::Incomplete {
+            needed: Some(NTP_HEADER_LEN),
+            available: payload.len(),
+        };
+    };
+    if !matches!((head[0] >> 3) & 0x07, 1..=4) || head[1] > 16 {
+        return ProbeResult::NoMatch;
+    }
+    if payload.len() < NTP_HEADER_LEN {
+        return ProbeResult::Incomplete {
+            needed: Some(NTP_HEADER_LEN),
+            available: payload.len(),
+        };
+    }
+
+    match parse_ntp_message(payload) {
+        Ok(message) => ProbeResult::Match(message),
+        Err(error) => ProbeResult::Malformed(ParseError::from_layer_error(
+            &error,
+            Layer::Application,
+            Some("ntp"),
+            0,
+        )),
+    }
 }
