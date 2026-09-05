@@ -1,4 +1,4 @@
-use crate::layer::LayerError;
+use crate::layer::{Layer, LayerError, ParseError, ProbeResult};
 
 const HEADER_LEN: usize = 4;
 
@@ -56,6 +56,40 @@ pub fn parse_coap_message(payload: &[u8]) -> Result<CoapMessage, LayerError> {
         code_detail,
         message_id,
     })
+}
+
+/// Probes a CoAP message by version and token length.
+///
+/// RFC 7252 sec 3: the version is always 1 and a token longer than 8 bytes is
+/// not a CoAP message.
+#[must_use]
+pub fn probe_coap(payload: &[u8]) -> ProbeResult<CoapMessage> {
+    let Some(first) = payload.first() else {
+        return ProbeResult::Incomplete {
+            needed: Some(HEADER_LEN),
+            available: 0,
+        };
+    };
+    if first >> 6 != 1 || first & 0x0f > 8 {
+        return ProbeResult::NoMatch;
+    }
+    let message_len = HEADER_LEN + usize::from(first & 0x0f);
+    if payload.len() < message_len {
+        return ProbeResult::Incomplete {
+            needed: Some(message_len),
+            available: payload.len(),
+        };
+    }
+
+    match parse_coap_message(payload) {
+        Ok(message) => ProbeResult::Match(message),
+        Err(error) => ProbeResult::Malformed(ParseError::from_layer_error(
+            &error,
+            Layer::Application,
+            Some("coap"),
+            0,
+        )),
+    }
 }
 
 #[cfg(test)]

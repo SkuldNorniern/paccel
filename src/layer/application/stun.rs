@@ -1,4 +1,4 @@
-use crate::layer::LayerError;
+use crate::layer::{Layer, LayerError, ParseError, ProbeResult};
 
 const HEADER_LEN: usize = 20;
 const MAGIC_COOKIE: u32 = 0x2112_a442;
@@ -37,4 +37,42 @@ pub fn parse_stun_message(payload: &[u8]) -> Result<StunMessage, LayerError> {
         magic_cookie,
         transaction_id,
     })
+}
+
+/// Probes a STUN message by its magic cookie.
+///
+/// RFC 5389 sec 6: the two most significant bits are zero and bytes 4..8 hold a
+/// fixed cookie. Together those are what let STUN share a port with RTP, RTCP
+/// and QUIC without guessing.
+#[must_use]
+pub fn probe_stun(payload: &[u8]) -> ProbeResult<StunMessage> {
+    const COOKIE_END: usize = 8;
+    let Some(head) = payload.get(..COOKIE_END) else {
+        return ProbeResult::Incomplete {
+            needed: Some(COOKIE_END),
+            available: payload.len(),
+        };
+    };
+    if head[0] >> 6 != 0 {
+        return ProbeResult::NoMatch;
+    }
+    if u32::from_be_bytes([head[4], head[5], head[6], head[7]]) != MAGIC_COOKIE {
+        return ProbeResult::NoMatch;
+    }
+    if payload.len() < HEADER_LEN {
+        return ProbeResult::Incomplete {
+            needed: Some(HEADER_LEN),
+            available: payload.len(),
+        };
+    }
+
+    match parse_stun_message(payload) {
+        Ok(message) => ProbeResult::Match(message),
+        Err(error) => ProbeResult::Malformed(ParseError::from_layer_error(
+            &error,
+            Layer::Application,
+            Some("stun"),
+            0,
+        )),
+    }
 }
