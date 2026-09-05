@@ -1,4 +1,4 @@
-use crate::layer::LayerError;
+use crate::layer::{Layer, LayerError, ParseError, ProbeResult};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NatPmpMessage {
@@ -18,6 +18,33 @@ pub fn parse_nat_pmp(payload: &[u8]) -> Result<NatPmpMessage, LayerError> {
     }
 
     Ok(NatPmpMessage { version, opcode })
+}
+
+/// Probes a NAT-PMP message by version and opcode.
+///
+/// RFC 6886 sec 3: the version is 0. PCP shares port 5351 and uses version 2,
+/// so the first byte is what separates them.
+#[must_use]
+pub fn probe_nat_pmp(payload: &[u8]) -> ProbeResult<NatPmpMessage> {
+    let Some(head) = payload.get(..2) else {
+        return ProbeResult::Incomplete {
+            needed: Some(2),
+            available: payload.len(),
+        };
+    };
+    if head[0] != 0 || !matches!(head[1], 0 | 1 | 2 | 128 | 129 | 130) {
+        return ProbeResult::NoMatch;
+    }
+
+    match parse_nat_pmp(payload) {
+        Ok(message) => ProbeResult::Match(message),
+        Err(error) => ProbeResult::Malformed(ParseError::from_layer_error(
+            &error,
+            Layer::Application,
+            Some("nat-pmp"),
+            0,
+        )),
+    }
 }
 
 #[cfg(test)]

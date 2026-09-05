@@ -1,4 +1,4 @@
-use crate::layer::LayerError;
+use crate::layer::{Layer, LayerError, ParseError, ProbeResult};
 
 const PCP_HEADER_LEN: usize = 24;
 
@@ -28,6 +28,39 @@ pub fn parse_pcp_header(payload: &[u8]) -> Result<PcpHeader, LayerError> {
         opcode,
         lifetime: u32::from_be_bytes([payload[4], payload[5], payload[6], payload[7]]),
     })
+}
+
+/// Probes a PCP header by version and opcode.
+///
+/// RFC 6887 sec 7.1: the version is 2, which is how PCP is told apart from
+/// NAT-PMP on the port they share.
+#[must_use]
+pub fn probe_pcp(payload: &[u8]) -> ProbeResult<PcpHeader> {
+    let Some(head) = payload.get(..2) else {
+        return ProbeResult::Incomplete {
+            needed: Some(PCP_HEADER_LEN),
+            available: payload.len(),
+        };
+    };
+    if head[0] != 2 || !matches!(head[1] & 0x7f, 0..=2) {
+        return ProbeResult::NoMatch;
+    }
+    if payload.len() < PCP_HEADER_LEN {
+        return ProbeResult::Incomplete {
+            needed: Some(PCP_HEADER_LEN),
+            available: payload.len(),
+        };
+    }
+
+    match parse_pcp_header(payload) {
+        Ok(header) => ProbeResult::Match(header),
+        Err(error) => ProbeResult::Malformed(ParseError::from_layer_error(
+            &error,
+            Layer::Application,
+            Some("pcp"),
+            0,
+        )),
+    }
 }
 
 #[cfg(test)]

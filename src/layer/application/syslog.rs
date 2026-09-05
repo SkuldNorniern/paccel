@@ -1,4 +1,4 @@
-use crate::layer::LayerError;
+use crate::layer::{Layer, LayerError, ParseError, ProbeResult};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyslogMessage {
@@ -33,6 +33,48 @@ pub fn parse_syslog_message(payload: &[u8]) -> Result<SyslogMessage, LayerError>
         facility: pri / 8,
         severity: pri % 8,
     })
+}
+
+/// Probes a syslog message by its priority field.
+///
+/// RFC 5424 sec 6.2.1: the message opens with `<`, one to three digits, then
+/// `>`, and the value never exceeds 191.
+#[must_use]
+pub fn probe_syslog(payload: &[u8]) -> ProbeResult<SyslogMessage> {
+    if payload.is_empty() {
+        return ProbeResult::Incomplete {
+            needed: Some(3),
+            available: 0,
+        };
+    }
+    if payload[0] != b'<' {
+        return ProbeResult::NoMatch;
+    }
+    let Some(closing) = payload.iter().take(5).position(|byte| *byte == b'>') else {
+        // Still inside the digits, so the message may yet be well formed.
+        return if payload.len() < 5 {
+            ProbeResult::Incomplete {
+                needed: Some(5),
+                available: payload.len(),
+            }
+        } else {
+            ProbeResult::NoMatch
+        };
+    };
+    let digits = &payload[1..closing];
+    if digits.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
+        return ProbeResult::NoMatch;
+    }
+
+    match parse_syslog_message(payload) {
+        Ok(message) => ProbeResult::Match(message),
+        Err(error) => ProbeResult::Malformed(ParseError::from_layer_error(
+            &error,
+            Layer::Application,
+            Some("syslog"),
+            0,
+        )),
+    }
 }
 
 #[cfg(test)]

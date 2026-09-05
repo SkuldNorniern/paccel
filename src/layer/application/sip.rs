@@ -1,4 +1,4 @@
-use crate::layer::LayerError;
+use crate::layer::{Layer, LayerError, ParseError, ProbeResult};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SipMessage {
@@ -125,6 +125,37 @@ fn find_call_id(headers: &[(String, String)]) -> Option<String> {
 
 fn find_crlf(data: &[u8]) -> Option<usize> {
     data.windows(2).position(|window| window == b"\r\n")
+}
+
+/// Probes a SIP message by its start line.
+///
+/// RFC 3261 sec 7: a response opens with `SIP/2.0` and a request ends its start
+/// line with it. Requiring the version keeps SIP apart from the other
+/// HTTP-shaped text protocols.
+#[must_use]
+pub fn probe_sip(payload: &[u8]) -> ProbeResult<SipMessage> {
+    let Some(start_line_end) = find_crlf(payload) else {
+        return ProbeResult::Incomplete {
+            needed: None,
+            available: payload.len(),
+        };
+    };
+    let start_line = &payload[..start_line_end];
+    let is_response = start_line.starts_with(b"SIP/2.0");
+    let is_request = start_line.ends_with(b"SIP/2.0");
+    if !is_response && !is_request {
+        return ProbeResult::NoMatch;
+    }
+
+    match parse_sip(payload) {
+        Ok(message) => ProbeResult::Match(message),
+        Err(error) => ProbeResult::Malformed(ParseError::from_layer_error(
+            &error,
+            Layer::Application,
+            Some("sip"),
+            0,
+        )),
+    }
 }
 
 #[cfg(test)]

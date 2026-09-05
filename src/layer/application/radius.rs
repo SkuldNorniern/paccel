@@ -1,4 +1,4 @@
-use crate::layer::LayerError;
+use crate::layer::{Layer, LayerError, ParseError, ProbeResult};
 
 const RADIUS_FIXED_MESSAGE_LEN: usize = 20;
 
@@ -64,6 +64,43 @@ pub fn parse_radius_message(payload: &[u8]) -> Result<RadiusMessage, LayerError>
         authenticator,
         attributes,
     })
+}
+
+/// Probes a RADIUS message by code and length.
+///
+/// RFC 2865 sec 3: the length field covers the whole message and is at least
+/// 20, which is a far stronger check than the port alone.
+#[must_use]
+pub fn probe_radius(payload: &[u8]) -> ProbeResult<RadiusMessage> {
+    let Some(head) = payload.get(..4) else {
+        return ProbeResult::Incomplete {
+            needed: Some(RADIUS_FIXED_MESSAGE_LEN),
+            available: payload.len(),
+        };
+    };
+    if !matches!(head[0], 1..=13 | 40..=45) {
+        return ProbeResult::NoMatch;
+    }
+    let length = usize::from(u16::from_be_bytes([head[2], head[3]]));
+    if length < RADIUS_FIXED_MESSAGE_LEN {
+        return ProbeResult::NoMatch;
+    }
+    if payload.len() < length {
+        return ProbeResult::Incomplete {
+            needed: Some(length),
+            available: payload.len(),
+        };
+    }
+
+    match parse_radius_message(payload) {
+        Ok(message) => ProbeResult::Match(message),
+        Err(error) => ProbeResult::Malformed(ParseError::from_layer_error(
+            &error,
+            Layer::Application,
+            Some("radius"),
+            0,
+        )),
+    }
 }
 
 #[cfg(test)]

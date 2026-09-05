@@ -1,4 +1,4 @@
-use crate::layer::LayerError;
+use crate::layer::{Layer, LayerError, ParseError, ProbeResult};
 
 const TAG_INTEGER: u8 = 0x02;
 const TAG_OCTET_STRING: u8 = 0x04;
@@ -264,6 +264,49 @@ pub fn parse_snmp_message(payload: &[u8]) -> Result<SnmpMessage, LayerError> {
         1 => Ok(parse_v2c(remaining)),
         3 => Ok(parse_v3(remaining)),
         _ => Err(LayerError::InvalidHeader),
+    }
+}
+
+/// Probes an SNMP message by its BER framing and version.
+///
+/// RFC 3416 sec 3: the message is a SEQUENCE whose first element is the
+/// version, one of 0, 1 or 3.
+#[must_use]
+pub fn probe_snmp(payload: &[u8]) -> ProbeResult<SnmpMessage> {
+    match payload.first() {
+        None => {
+            return ProbeResult::Incomplete {
+                needed: Some(2),
+                available: 0,
+            };
+        }
+        Some(&TAG_SEQUENCE) => {}
+        Some(_) => return ProbeResult::NoMatch,
+    }
+    let Some(outer) = read_ber_tlv(payload) else {
+        return ProbeResult::Incomplete {
+            needed: None,
+            available: payload.len(),
+        };
+    };
+    let Some(version) = read_ber_tlv(outer.content) else {
+        return ProbeResult::Incomplete {
+            needed: None,
+            available: payload.len(),
+        };
+    };
+    if version.tag != TAG_INTEGER || !matches!(decode_ber_u64(version.content), 0 | 1 | 3) {
+        return ProbeResult::NoMatch;
+    }
+
+    match parse_snmp_message(payload) {
+        Ok(message) => ProbeResult::Match(message),
+        Err(error) => ProbeResult::Malformed(ParseError::from_layer_error(
+            &error,
+            Layer::Application,
+            Some("snmp"),
+            0,
+        )),
     }
 }
 

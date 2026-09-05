@@ -7,10 +7,18 @@ use paccel::layer::application::coap::probe_coap;
 use paccel::layer::application::dhcp::probe_dhcp;
 use paccel::layer::application::http2::probe_http2;
 use paccel::layer::application::isakmp::probe_isakmp;
+use paccel::layer::application::nat_pmp::probe_nat_pmp;
 use paccel::layer::application::ntp::probe_ntp;
+use paccel::layer::application::pcp::probe_pcp;
+use paccel::layer::application::radius::probe_radius;
 use paccel::layer::application::rtcp::probe_rtcp;
 use paccel::layer::application::rtp::probe_rtp;
+use paccel::layer::application::sip::probe_sip;
+use paccel::layer::application::snmp::probe_snmp;
+use paccel::layer::application::ssdp::probe_ssdp;
 use paccel::layer::application::stun::probe_stun;
+use paccel::layer::application::syslog::probe_syslog;
+use paccel::layer::application::tftp::probe_tftp;
 
 /// A STUN binding request: type, length, magic cookie, transaction id.
 fn stun() -> Vec<u8> {
@@ -174,4 +182,129 @@ fn no_probe_matches_an_empty_payload() {
     assert!(!probe_isakmp(&[]).is_match());
     assert!(!probe_dhcp(&[]).is_match());
     assert!(!probe_http2(&[]).is_match());
+}
+
+/// An Access-Request whose length field covers the message.
+fn radius() -> Vec<u8> {
+    let mut message = vec![0u8; 20];
+    message[0] = 1;
+    message[1] = 42;
+    message[3] = 20;
+    message
+}
+
+/// A TFTP read request for "f" in octet mode.
+fn tftp() -> Vec<u8> {
+    let mut message = vec![0x00, 0x01];
+    message.extend(b"f\0octet\0");
+    message
+}
+
+/// A NAT-PMP external address request.
+fn nat_pmp() -> Vec<u8> {
+    vec![0x00, 0x00]
+}
+
+/// A PCP MAP request.
+fn pcp() -> Vec<u8> {
+    let mut header = vec![0u8; 24];
+    header[0] = 2;
+    header[1] = 1;
+    header
+}
+
+fn syslog() -> Vec<u8> {
+    b"<34>Oct 11 22:14:15 host su: failed".to_vec()
+}
+
+fn sip() -> Vec<u8> {
+    b"INVITE sip:bob@example.com SIP/2.0\r\nCall-ID: 1@host\r\n\r\n".to_vec()
+}
+
+fn ssdp() -> Vec<u8> {
+    b"M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\n\r\n".to_vec()
+}
+
+/// An SNMPv2c get-request with community "public".
+fn snmp() -> Vec<u8> {
+    vec![
+        0x30, 0x19, 0x02, 0x01, 0x01, 0x04, 0x06, b'p', b'u', b'b', b'l', b'i', b'c', 0xa0, 0x0c,
+        0x02, 0x04, 0x00, 0x00, 0x00, 0x01, 0x02, 0x01, 0x00, 0x02, 0x01, 0x00, 0x30, 0x00,
+    ]
+}
+
+#[test]
+fn the_second_batch_matches_its_own_protocols() {
+    assert!(probe_radius(&radius()).is_match());
+    assert!(probe_tftp(&tftp()).is_match());
+    assert!(probe_nat_pmp(&nat_pmp()).is_match());
+    assert!(probe_pcp(&pcp()).is_match());
+    assert!(probe_syslog(&syslog()).is_match());
+    assert!(probe_sip(&sip()).is_match());
+    assert!(probe_ssdp(&ssdp()).is_match());
+    assert!(probe_snmp(&snmp()).is_match());
+}
+
+/// RFC 6887 sec 7.1: PCP and NAT-PMP share port 5351 and are told apart by the
+/// version byte alone.
+#[test]
+fn nat_pmp_and_pcp_do_not_claim_each_other() {
+    assert!(matches!(probe_nat_pmp(&pcp()), ProbeResult::NoMatch));
+    assert!(matches!(probe_pcp(&nat_pmp()), ProbeResult::NoMatch));
+}
+
+/// Both are HTTP-shaped text, and a SIP request start line ends with the
+/// version rather than beginning with it.
+#[test]
+fn sip_and_ssdp_do_not_claim_each_other() {
+    assert!(matches!(probe_sip(&ssdp()), ProbeResult::NoMatch));
+    assert!(matches!(probe_ssdp(&sip()), ProbeResult::NoMatch));
+    assert!(matches!(
+        probe_sip(b"GET / HTTP/1.1\r\n\r\n"),
+        ProbeResult::NoMatch
+    ));
+}
+
+/// RFC 2865 sec 3: a length below the 20-byte header cannot be RADIUS, however
+/// plausible the code byte is.
+#[test]
+fn radius_rejects_a_length_that_cannot_cover_the_header() {
+    let mut message = radius();
+    message[3] = 19;
+    assert!(matches!(probe_radius(&message), ProbeResult::NoMatch));
+
+    let mut short = radius();
+    short[3] = 60;
+    assert!(
+        probe_radius(&short).is_incomplete(),
+        "a length beyond the payload means more is coming, not a mismatch"
+    );
+}
+
+/// The text protocols cannot decide anything before the first line ends.
+#[test]
+fn a_text_protocol_without_a_line_ending_is_incomplete() {
+    assert!(probe_sip(b"INVITE sip:bob@example.com SIP/2.0").is_incomplete());
+    assert!(probe_ssdp(b"M-SEARCH * HTTP/1.1").is_incomplete());
+}
+
+#[test]
+fn the_second_batch_declines_each_other() {
+    assert!(matches!(probe_snmp(&syslog()), ProbeResult::NoMatch));
+    assert!(matches!(probe_syslog(&snmp()), ProbeResult::NoMatch));
+    assert!(matches!(probe_tftp(&pcp()), ProbeResult::NoMatch));
+    // A PCP header opens with 2, a legal RADIUS code, so the length field is
+    // what rejects it.
+    assert!(matches!(probe_radius(&pcp()), ProbeResult::NoMatch));
+}
+
+/// Too few bytes to decide is not the same answer as the wrong protocol, and a
+/// probe that conflates them is worse than no probe.
+#[test]
+fn too_short_to_decide_is_not_a_mismatch() {
+    assert!(
+        probe_radius(&nat_pmp()).is_incomplete(),
+        "two bytes cannot decide a 20-byte header"
+    );
+    assert!(matches!(probe_nat_pmp(&nat_pmp()), ProbeResult::Match(_)));
 }
