@@ -1,6 +1,7 @@
 //! Opt-in QUIC connection-ID and packet-number state tracking.
 
 use std::collections::{HashMap, VecDeque};
+use std::mem;
 use std::net::IpAddr;
 
 use crate::engine::flow::{BiFlow, Endpoint, LastSeen, Timestamp};
@@ -55,6 +56,13 @@ struct QuicConnectionState {
     tuples: Vec<BiFlow>,
     /// Indexed by direction: 0 toward the responder, 1 away from it.
     expected_dcids: [Option<Vec<u8>>; 2],
+    /// Connection IDs announced for this connection, with the sequence number
+    /// that named each. Ordered by sequence number.
+    ///
+    /// RFC 9000 sec 5.1.1: an endpoint may issue several at once and retire
+    /// them out of order, so the sequence number, not arrival, decides what is
+    /// still live.
+    issued_cids: Vec<(u64, Vec<u8>)>,
     last_seen: LastSeen,
     largest_packet_numbers: [[Option<u64>; 3]; 2],
 }
@@ -65,6 +73,7 @@ impl QuicConnectionState {
             responder,
             tuples: Vec::new(),
             expected_dcids: [None, None],
+            issued_cids: Vec::new(),
             last_seen: LastSeen::default(),
             largest_packet_numbers: [[None; 3]; 2],
         }
@@ -321,6 +330,103 @@ impl QuicConnectionTracker {
         self.connections
             .get(&id)
             .map_or(&[][..], |connection| &connection.tuples)
+    }
+
+    /// Records a NEW_CONNECTION_ID frame: `cid` becomes another way to reach
+    /// `id`, and everything below `retire_prior_to` stops resolving.
+    ///
+    /// RFC 9000 sec 19.15. Re-announcing a sequence number with different bytes
+    /// is a protocol violation; the newer bytes win here rather than the frame
+    /// being dropped, since a capture cannot make the peer behave.
+    ///
+    /// A connection ID longer than 20 bytes is refused, as RFC 9000 sec 5.1.1
+    /// does not allow it. Returns whether the ID was recorded.
+    pub fn observe_new_connection_id(
+        &mut self,
+        id: QuicConnectionId,
+        sequence_number: u64,
+        cid: &[u8],
+        retire_prior_to: u64,
+    ) -> bool {
+        if cid.is_empty() || cid.len() > MAX_CID_LEN {
+            return false;
+        }
+        let Some(connection) = self.connections.get_mut(&id) else {
+            return false;
+        };
+
+        // Everything the peer just retired, before adding the new one: a frame
+        // is allowed to announce a sequence number and retire earlier ones at
+        // the same time.
+        let mut dropped = Vec::new();
+        connection.issued_cids.retain(|(sequence, held)| {
+            let live = *sequence >= retire_prior_to;
+            if !live {
+                dropped.push(held.clone());
+            }
+            live
+        });
+
+        match connection
+            .issued_cids
+            .binary_search_by_key(&sequence_number, |(sequence, _)| *sequence)
+        {
+            Ok(position) => {
+                let previous = mem::replace(&mut connection.issued_cids[position].1, cid.to_vec());
+                if previous != cid {
+                    dropped.push(previous);
+                }
+            }
+            Err(position) => connection
+                .issued_cids
+                .insert(position, (sequence_number, cid.to_vec())),
+        }
+
+        for stale in dropped {
+            self.by_cid.remove(&stale);
+        }
+        self.cid_lengths |= 1 << cid.len();
+        self.by_cid.insert(cid.to_vec(), id);
+        true
+    }
+
+    /// Records a RETIRE_CONNECTION_ID frame: the ID at `sequence_number` stops
+    /// resolving to `id`. Returns whether there was one to retire.
+    ///
+    /// RFC 9000 sec 19.16. The connection itself survives - retiring one of its
+    /// identifiers is routine, and other identifiers and its address pairs
+    /// still reach it.
+    pub fn observe_retire_connection_id(
+        &mut self,
+        id: QuicConnectionId,
+        sequence_number: u64,
+    ) -> bool {
+        let Some(connection) = self.connections.get_mut(&id) else {
+            return false;
+        };
+        let Ok(position) = connection
+            .issued_cids
+            .binary_search_by_key(&sequence_number, |(sequence, _)| *sequence)
+        else {
+            return false;
+        };
+        let (_, retired) = connection.issued_cids.remove(position);
+        self.by_cid.remove(&retired);
+        true
+    }
+
+    /// The connection IDs currently live for a connection, by sequence number.
+    #[must_use]
+    pub fn issued_connection_ids(&self, id: QuicConnectionId) -> Vec<(u64, &[u8])> {
+        self.connections
+            .get(&id)
+            .map_or_else(Vec::new, |connection| {
+                connection
+                    .issued_cids
+                    .iter()
+                    .map(|(sequence, cid)| (*sequence, cid.as_slice()))
+                    .collect()
+            })
     }
 
     /// What this tracker is holding.
@@ -621,6 +727,130 @@ mod tests {
         let stats = tracker.stats();
         assert_eq!(stats.active_connections, 1);
         assert_eq!(stats.active_tuples, 2);
+    }
+
+    fn opened(tracker: &mut QuicConnectionTracker) -> QuicConnectionId {
+        let client = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let server = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        tracker.observe_long_header(server, 443, client, 5_000, &[9, 9, 9, 9]);
+        tracker
+            .connection_id_for_dcid(&[9, 9, 9, 9])
+            .expect("the long header opened one")
+    }
+
+    #[test]
+    fn an_announced_connection_id_reaches_the_same_connection() {
+        let mut tracker = QuicConnectionTracker::new();
+        let id = opened(&mut tracker);
+
+        assert!(tracker.observe_new_connection_id(id, 1, &[0xaa; 8], 0));
+        assert_eq!(tracker.connection_id_for_dcid(&[0xaa; 8]), Some(id));
+        assert_eq!(
+            tracker.connection_id_for_dcid(&[9, 9, 9, 9]),
+            Some(id),
+            "announcing another id does not retire the first"
+        );
+        assert_eq!(tracker.stats().active_connections, 1);
+    }
+
+    #[test]
+    fn a_retired_connection_id_stops_resolving() {
+        let mut tracker = QuicConnectionTracker::new();
+        let id = opened(&mut tracker);
+        tracker.observe_new_connection_id(id, 1, &[0xaa; 8], 0);
+
+        assert!(tracker.observe_retire_connection_id(id, 1));
+        assert!(tracker.connection_id_for_dcid(&[0xaa; 8]).is_none());
+        assert_eq!(
+            tracker.stats().active_connections,
+            1,
+            "retiring one identifier does not end the connection"
+        );
+        assert!(
+            !tracker.observe_retire_connection_id(id, 1),
+            "retiring it twice reports nothing to retire"
+        );
+    }
+
+    /// RFC 9000 sec 19.15: the frame can announce and retire in one step.
+    #[test]
+    fn retire_prior_to_drops_the_ids_it_names() {
+        let mut tracker = QuicConnectionTracker::new();
+        let id = opened(&mut tracker);
+        tracker.observe_new_connection_id(id, 1, &[0xaa; 8], 0);
+        tracker.observe_new_connection_id(id, 2, &[0xbb; 8], 0);
+
+        tracker.observe_new_connection_id(id, 3, &[0xcc; 8], 2);
+        assert!(tracker.connection_id_for_dcid(&[0xaa; 8]).is_none());
+        assert_eq!(tracker.connection_id_for_dcid(&[0xbb; 8]), Some(id));
+        assert_eq!(tracker.connection_id_for_dcid(&[0xcc; 8]), Some(id));
+        assert_eq!(
+            tracker.issued_connection_ids(id),
+            vec![(2, &[0xbb; 8][..]), (3, &[0xcc; 8][..])]
+        );
+    }
+
+    #[test]
+    fn a_connection_id_that_breaks_the_length_rule_is_refused() {
+        let mut tracker = QuicConnectionTracker::new();
+        let id = opened(&mut tracker);
+
+        assert!(!tracker.observe_new_connection_id(id, 1, &[], 0));
+        assert!(!tracker.observe_new_connection_id(id, 2, &[0xdd; 21], 0));
+        assert!(tracker.issued_connection_ids(id).is_empty());
+    }
+
+    /// Re-announcing a sequence number is a protocol violation, but a capture
+    /// has to hold some answer. The newer bytes win and the older stop
+    /// resolving, so one sequence number never names two live ids.
+    #[test]
+    fn re_announcing_a_sequence_number_replaces_the_id() {
+        let mut tracker = QuicConnectionTracker::new();
+        let id = opened(&mut tracker);
+        tracker.observe_new_connection_id(id, 1, &[0xaa; 8], 0);
+
+        tracker.observe_new_connection_id(id, 1, &[0xee; 8], 0);
+        assert!(tracker.connection_id_for_dcid(&[0xaa; 8]).is_none());
+        assert_eq!(tracker.connection_id_for_dcid(&[0xee; 8]), Some(id));
+        assert_eq!(tracker.issued_connection_ids(id).len(), 1);
+    }
+
+    #[test]
+    fn a_connection_id_announced_for_no_connection_is_refused() {
+        let mut tracker = QuicConnectionTracker::new();
+        assert!(!tracker.observe_new_connection_id(QuicConnectionId(99), 1, &[0xaa; 8], 0));
+    }
+
+    /// An announced id must be usable to follow a move, which is the whole
+    /// point of the peer issuing spares.
+    #[test]
+    fn a_connection_moves_onto_an_announced_id() {
+        let server = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let moved = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+        let mut tracker = QuicConnectionTracker::new();
+        let id = opened(&mut tracker);
+        tracker.observe_new_connection_id(id, 1, &[0xaa; 8], 0);
+
+        assert_eq!(
+            tracker.observe_short_header(moved, 53_000, server, 443, &[0xaa; 8]),
+            Some(id)
+        );
+        assert_eq!(tracker.stats().active_tuples, 2);
+        assert_eq!(tracker.stats().active_connections, 1);
+    }
+
+    #[test]
+    fn expiring_a_connection_drops_the_ids_it_announced() {
+        let client = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let server = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let mut tracker = QuicConnectionTracker::new();
+        tracker.observe_long_header_at(server, 443, client, 5_000, &[9, 9, 9, 9], 1_000);
+        let id = tracker.connection_id_for_dcid(&[9, 9, 9, 9]).expect("open");
+        tracker.observe_new_connection_id(id, 1, &[0xaa; 8], 0);
+
+        assert_eq!(tracker.expire_before(2_000), 1);
+        assert!(tracker.connection_id_for_dcid(&[0xaa; 8]).is_none());
+        assert_eq!(tracker.stats().active_cids, 0);
     }
 
     #[test]
