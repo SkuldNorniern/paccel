@@ -1,4 +1,4 @@
-use crate::layer::LayerError;
+use crate::layer::{Layer, LayerError, ParseError, ProbeResult};
 
 const HEADER_LEN: usize = 8;
 const ADVERTISEMENT_TYPE: u8 = 1;
@@ -32,6 +32,38 @@ pub fn parse_vrrp_header(payload: &[u8]) -> Result<VrrpHeader, LayerError> {
         priority: header[2],
         address_count: header[3],
     })
+}
+
+/// Probes a VRRP header by version and packet type.
+///
+/// RFC 5798 sec 5.1: versions 2 and 3, and advertisement is the only type.
+#[must_use]
+pub fn probe_vrrp(payload: &[u8]) -> ProbeResult<VrrpHeader> {
+    let Some(head) = payload.get(..1) else {
+        return ProbeResult::Incomplete {
+            needed: Some(HEADER_LEN),
+            available: payload.len(),
+        };
+    };
+    if !matches!(head[0] >> 4, 2 | 3) || head[0] & 0x0f != ADVERTISEMENT_TYPE {
+        return ProbeResult::NoMatch;
+    }
+    if payload.len() < HEADER_LEN {
+        return ProbeResult::Incomplete {
+            needed: Some(HEADER_LEN),
+            available: payload.len(),
+        };
+    }
+
+    match parse_vrrp_header(payload) {
+        Ok(value) => ProbeResult::Match(value),
+        Err(error) => ProbeResult::Malformed(ParseError::from_layer_error(
+            &error,
+            Layer::Application,
+            Some("vrrp"),
+            0,
+        )),
+    }
 }
 
 #[cfg(test)]

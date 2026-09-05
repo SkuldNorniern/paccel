@@ -1,4 +1,4 @@
-use crate::layer::LayerError;
+use crate::layer::{Layer, LayerError, ParseError, ProbeResult};
 
 const COMMON_HEADER_LEN: usize = 8;
 const CALL_HEADER_LEN: usize = 24;
@@ -47,6 +47,40 @@ fn parse_rpc_call(payload: &[u8], xid: u32) -> Result<RpcMessage, LayerError> {
         program_version: u32::from_be_bytes([header[16], header[17], header[18], header[19]]),
         procedure: u32::from_be_bytes([header[20], header[21], header[22], header[23]]),
     })
+}
+
+/// Probes an ONC RPC message by its message type.
+///
+/// RFC 5531 sec 9: the type following the xid is 0 for a call and 1 for a
+/// reply, which is the only fixed field the common header has.
+#[must_use]
+pub fn probe_rpc(payload: &[u8]) -> ProbeResult<RpcMessage> {
+    let Some(header) = payload.get(..COMMON_HEADER_LEN) else {
+        return ProbeResult::Incomplete {
+            needed: Some(COMMON_HEADER_LEN),
+            available: payload.len(),
+        };
+    };
+    let message_type = u32::from_be_bytes([header[4], header[5], header[6], header[7]]);
+    if !matches!(message_type, 0 | 1) {
+        return ProbeResult::NoMatch;
+    }
+    if message_type == 0 && payload.len() < CALL_HEADER_LEN {
+        return ProbeResult::Incomplete {
+            needed: Some(CALL_HEADER_LEN),
+            available: payload.len(),
+        };
+    }
+
+    match parse_rpc_message(payload) {
+        Ok(message) => ProbeResult::Match(message),
+        Err(error) => ProbeResult::Malformed(ParseError::from_layer_error(
+            &error,
+            Layer::Application,
+            Some("rpc"),
+            0,
+        )),
+    }
 }
 
 #[cfg(test)]

@@ -1,4 +1,4 @@
-use crate::layer::LayerError;
+use crate::layer::{Layer, LayerError, ParseError, ProbeResult};
 
 const TCP_LENGTH_PREFIX_LEN: usize = 4;
 const APPLICATION_TAG_CLASS_MASK: u8 = 0xe0;
@@ -57,6 +57,59 @@ fn classify_tag(tag: u8) -> Result<KerberosMessage, LayerError> {
     };
 
     Ok(KerberosMessage { message_type })
+}
+
+/// Probes a Kerberos message over UDP by its ASN.1 application tag.
+///
+/// RFC 4120 sec 5.4.1: every message is an ASN.1 APPLICATION-tagged type, so
+/// the top three bits of the first byte are fixed.
+#[must_use]
+pub fn probe_kerberos_udp(payload: &[u8]) -> ProbeResult<KerberosMessage> {
+    let Some(&tag) = payload.first() else {
+        return ProbeResult::Incomplete {
+            needed: Some(1),
+            available: 0,
+        };
+    };
+    if tag & APPLICATION_TAG_CLASS_MASK != APPLICATION_TAG_CLASS {
+        return ProbeResult::NoMatch;
+    }
+
+    match parse_kerberos_udp(payload) {
+        Ok(message) => ProbeResult::Match(message),
+        Err(error) => ProbeResult::Malformed(ParseError::from_layer_error(
+            &error,
+            Layer::Application,
+            Some("kerberos"),
+            0,
+        )),
+    }
+}
+
+/// Probes a Kerberos message over TCP, past the four-byte length prefix.
+///
+/// RFC 4120 sec 7.2.2: TCP carries each message behind its length.
+#[must_use]
+pub fn probe_kerberos_tcp(payload: &[u8]) -> ProbeResult<KerberosMessage> {
+    let Some(&tag) = payload.get(TCP_LENGTH_PREFIX_LEN) else {
+        return ProbeResult::Incomplete {
+            needed: Some(TCP_LENGTH_PREFIX_LEN + 1),
+            available: payload.len(),
+        };
+    };
+    if tag & APPLICATION_TAG_CLASS_MASK != APPLICATION_TAG_CLASS {
+        return ProbeResult::NoMatch;
+    }
+
+    match parse_kerberos_tcp(payload) {
+        Ok(message) => ProbeResult::Match(message),
+        Err(error) => ProbeResult::Malformed(ParseError::from_layer_error(
+            &error,
+            Layer::Application,
+            Some("kerberos"),
+            0,
+        )),
+    }
 }
 
 #[cfg(test)]

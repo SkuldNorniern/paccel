@@ -1,4 +1,4 @@
-use crate::layer::LayerError;
+use crate::layer::{Layer, LayerError, ParseError, ProbeResult};
 
 const HEADER_LEN: usize = 20;
 
@@ -26,6 +26,36 @@ pub fn parse_hsrp_header(payload: &[u8]) -> Result<HsrpHeader, LayerError> {
         group: header[6],
         priority: header[5],
     })
+}
+
+/// Probes an HSRP header by version and opcode.
+#[must_use]
+pub fn probe_hsrp(payload: &[u8]) -> ProbeResult<HsrpHeader> {
+    let Some(head) = payload.get(..2) else {
+        return ProbeResult::Incomplete {
+            needed: Some(HEADER_LEN),
+            available: payload.len(),
+        };
+    };
+    if head[0] != 0 || !matches!(head[1], 0..=2) {
+        return ProbeResult::NoMatch;
+    }
+    if payload.len() < HEADER_LEN {
+        return ProbeResult::Incomplete {
+            needed: Some(HEADER_LEN),
+            available: payload.len(),
+        };
+    }
+
+    match parse_hsrp_header(payload) {
+        Ok(value) => ProbeResult::Match(value),
+        Err(error) => ProbeResult::Malformed(ParseError::from_layer_error(
+            &error,
+            Layer::Application,
+            Some("hsrp"),
+            0,
+        )),
+    }
 }
 
 #[cfg(test)]

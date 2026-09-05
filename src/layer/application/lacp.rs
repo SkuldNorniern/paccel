@@ -1,4 +1,4 @@
-use crate::layer::LayerError;
+use crate::layer::{Layer, LayerError, ParseError, ProbeResult};
 
 const HEADER_LEN: usize = 18;
 
@@ -22,6 +22,38 @@ pub fn parse_lacp_header(payload: &[u8]) -> Result<LacpHeader, LayerError> {
         version: header[1],
         actor_port: u16::from_be_bytes([header[16], header[17]]),
     })
+}
+
+/// Probes a LACP header by subtype and version.
+///
+/// IEEE 802.1AX sec 6.4.2: the subtype and version are both 1.
+#[must_use]
+pub fn probe_lacp(payload: &[u8]) -> ProbeResult<LacpHeader> {
+    let Some(head) = payload.get(..2) else {
+        return ProbeResult::Incomplete {
+            needed: Some(HEADER_LEN),
+            available: payload.len(),
+        };
+    };
+    if head[0] != 1 || head[1] != 1 {
+        return ProbeResult::NoMatch;
+    }
+    if payload.len() < HEADER_LEN {
+        return ProbeResult::Incomplete {
+            needed: Some(HEADER_LEN),
+            available: payload.len(),
+        };
+    }
+
+    match parse_lacp_header(payload) {
+        Ok(value) => ProbeResult::Match(value),
+        Err(error) => ProbeResult::Malformed(ParseError::from_layer_error(
+            &error,
+            Layer::Application,
+            Some("lacp"),
+            0,
+        )),
+    }
 }
 
 #[cfg(test)]
