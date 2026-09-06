@@ -5,7 +5,7 @@ use std::str;
 use crate::layer::{Layer, LayerError, ParseError, ProbeResult};
 
 /// DNS header (the first 12 message bytes).
-#[derive(Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DnsHeader {
     pub transaction_id: u16,
     pub flags: u16,
@@ -17,7 +17,7 @@ pub struct DnsHeader {
 
 /// A DNS question: queried name, query type, query class. `qname` is owned
 /// since DNS labels are non-contiguous in the wire format.
-#[derive(Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DnsQuestion {
     // TODO: borrow `qname` instead of allocating a `String`.
     pub qname: String,
@@ -26,7 +26,7 @@ pub struct DnsQuestion {
 }
 
 /// DNS resource record.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DnsRecord {
     pub name: String,
     pub rtype: u16,
@@ -36,7 +36,7 @@ pub struct DnsRecord {
 }
 
 /// Decoded data from a DNS resource record.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DnsData {
     A(Ipv4Addr),
     Aaaa(Ipv6Addr),
@@ -80,7 +80,7 @@ pub type DnsRdata = DnsData;
 
 /// A parsed DNS message: header, questions, answers, authority and
 /// additional records.
-#[derive(Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DnsMessage {
     pub header: DnsHeader,
     pub questions: Vec<DnsQuestion>,
@@ -184,6 +184,37 @@ pub fn probe_dns(packet: &[u8]) -> ProbeResult<DnsMessage> {
             0,
         )),
     }
+}
+
+/// Probes DNS carried over TCP, which frames each message behind a two-byte
+/// length.
+///
+/// RFC 1035 sec 4.2.2. The prefix is what makes DNS-over-TCP recognisable in a
+/// reassembled stream at all: a bare [`probe_dns`] would read the length as the
+/// start of a header. A prefix that overruns what has arrived is incomplete,
+/// since TCP will deliver the rest.
+#[must_use]
+pub fn probe_dns_over_tcp(stream: &[u8]) -> ProbeResult<DnsMessage> {
+    let Some(prefix) = stream.get(..2) else {
+        return ProbeResult::Incomplete {
+            needed: Some(2),
+            available: stream.len(),
+        };
+    };
+    let length = usize::from(u16::from_be_bytes([prefix[0], prefix[1]]));
+    // RFC 1035 sec 4.1.1: a header is twelve bytes, so a shorter frame is not
+    // a DNS message however the rest of the stream reads.
+    if length < 12 {
+        return ProbeResult::NoMatch;
+    }
+    let Some(message) = stream.get(2..2 + length) else {
+        return ProbeResult::Incomplete {
+            needed: Some(2 + length),
+            available: stream.len(),
+        };
+    };
+
+    probe_dns(message)
 }
 
 fn dns_minimum_message_length(packet: &[u8]) -> Option<usize> {
