@@ -602,11 +602,32 @@ impl QuicConnectionTracker {
     }
 
     /// Points `key` at `id`, recording a migration when the tuple is new.
+    ///
+    /// An address pair can be reused by a new connection - a port comes back
+    /// round, or a NAT rebinds - so binding it here may take it from whoever
+    /// held it. The previous holder is told, because a connection left with a
+    /// tuple it no longer owns reports addresses that reach a different
+    /// connection, and can never be removed through that address again.
     fn bind_tuple(&mut self, id: QuicConnectionId, key: BiFlow) {
-        if self.by_tuple.get(&key) == Some(&id) {
-            return;
+        match self.by_tuple.insert(key, id) {
+            Some(previous) if previous == id => return,
+            Some(previous) => {
+                let emptied = self
+                    .connections
+                    .get_mut(&previous)
+                    .is_some_and(|connection| {
+                        connection.tuples.retain(|held| held != &key);
+                        connection.tuples.is_empty()
+                    });
+                if emptied {
+                    // Its last address is gone. Its connection IDs would
+                    // otherwise resolve to a connection reachable by nothing.
+                    self.drop_connection(previous);
+                }
+            }
+            None => {}
         }
-        self.by_tuple.insert(key, id);
+
         if let Some(connection) = self.connections.get_mut(&id)
             && !connection.tuples.contains(&key)
         {
@@ -851,6 +872,49 @@ mod tests {
         assert_eq!(tracker.expire_before(2_000), 1);
         assert!(tracker.connection_id_for_dcid(&[0xaa; 8]).is_none());
         assert_eq!(tracker.stats().active_cids, 0);
+    }
+
+    /// An address pair can come back round to a different connection. When it
+    /// does, the connection that held it must lose it: one left holding a
+    /// tuple that now reaches someone else reports addresses that are not its
+    /// own, and can never be removed through that address again.
+    #[test]
+    fn reusing_an_address_pair_takes_it_from_the_connection_that_held_it() {
+        let client = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let server = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let other = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+        let mut tracker = QuicConnectionTracker::new();
+
+        // One connection on the shared tuple, and a second one elsewhere.
+        tracker.observe_long_header(server, 443, client, 5_000, &[1, 1, 1, 1]);
+        tracker.observe_long_header(server, 443, other, 6_000, &[2, 2, 2, 2]);
+        let first = tracker
+            .connection_id_for_dcid(&[1, 1, 1, 1])
+            .expect("the first connection");
+        let second = tracker
+            .connection_id_for_dcid(&[2, 2, 2, 2])
+            .expect("the second connection");
+        assert_ne!(first, second);
+
+        // The second connection now appears on the first one's address pair.
+        tracker.observe_short_header(client, 5_000, server, 443, &[2, 2, 2, 2]);
+
+        let stats = tracker.stats();
+        assert!(
+            stats.active_connections <= stats.active_tuples,
+            "{} connections holding only {} addresses means one is unreachable",
+            stats.active_connections,
+            stats.active_tuples
+        );
+        assert_eq!(
+            tracker.tuples_for_connection(first).len(),
+            0,
+            "the first connection no longer holds an address it does not own"
+        );
+        assert!(
+            tracker.connection_id_for_dcid(&[1, 1, 1, 1]).is_none(),
+            "a connection with no addresses left keeps no ids either"
+        );
     }
 
     #[test]

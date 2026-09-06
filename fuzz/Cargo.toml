@@ -68,3 +68,17 @@ path = "fuzz_targets/fuzz_tcp_reassembly.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_quic_tracker"
+path = "fuzz_targets/fuzz_quic_tracker.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_http2_frames"
+path = "fuzz_targets/fuzz_http2_frames.rs"
+test = false
+doc = false
+bench = false
