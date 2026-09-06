@@ -7,7 +7,13 @@ use crate::engine::flow::{BiFlow, LastSeen, Timestamp};
 use crate::engine::reassembly::TcpReassemblyStats;
 use crate::engine::{BuiltinPacketParser, ParsedPacket, TcpStreamReassembler, TransportSegment};
 use crate::layer::ProbeResult;
+use crate::layer::application::bgp::{BgpMessage, probe_bgp};
+use crate::layer::application::dns::{DnsMessage, probe_dns_over_tcp};
 use crate::layer::application::http::{HttpMessage, probe_http};
+use crate::layer::application::ldap::{LdapMessage, probe_ldap};
+use crate::layer::application::mqtt::{MqttMessage, probe_mqtt};
+use crate::layer::application::smb1::{Smb1Header, probe_smb1};
+use crate::layer::application::smb2::{Smb2Header, probe_smb2};
 use crate::layer::application::tls::{TlsClientHello, probe_tls_client_hello};
 use crate::layer::transport::tcp::TcpHeader;
 
@@ -16,12 +22,28 @@ const DEFAULT_MAX_PROBE_FLOWS: usize = 65_536;
 const DEFAULT_MAX_TOTAL_PROBE_BYTES: usize = 64 * 1_048_576;
 
 /// Application message recognized in a reassembled TCP stream.
+///
+/// Non-exhaustive: a protocol added here should not break a caller that
+/// matches on the ones it knows.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum StreamL7 {
     /// An HTTP/1.x request or response.
     Http(HttpMessage),
     /// A TLS ClientHello.
     Tls(TlsClientHello),
+    /// A BGP message, identified by its marker.
+    Bgp(BgpMessage),
+    /// An SMB2 header, past the direct-TCP length prefix.
+    Smb2(Smb2Header),
+    /// An SMB1 header, past the direct-TCP length prefix.
+    Smb1(Smb1Header),
+    /// An LDAP message.
+    Ldap(LdapMessage),
+    /// A DNS message carried over TCP, past its two-byte length prefix.
+    Dns(DnsMessage),
+    /// An MQTT control packet.
+    Mqtt(MqttMessage),
 }
 
 /// Message recognized in one TCP flow direction.
@@ -362,17 +384,38 @@ fn tcp_payload<'a>(raw: &'a [u8], parsed: &ParsedPacket, tcp: &TcpHeader) -> Opt
 /// means the stream may still become this protocol and the caller keeps
 /// buffering; `Malformed` means it claimed to be and was not, so nothing else
 /// is tried.
+/// Tries each protocol against the bytes reassembled so far.
+///
+/// Ordered strongest signature first. TLS, BGP and SMB carry fixed bytes; HTTP
+/// is recognisable text; LDAP and DNS are checked structurally; MQTT is last
+/// because a control packet is little more than a type nibble and a length,
+/// and would otherwise claim streams belonging to the others.
+///
+/// A probe reporting `Incomplete` stops the walk and returns nothing, because
+/// the bytes that would decide it have not arrived: trying a weaker protocol on
+/// the same prefix is how a stream gets misidentified. `NoMatch` moves on, and
+/// `Malformed` stops - the protocol was recognised and its own message is
+/// broken, so no other protocol should claim it.
 fn probe_l7(bytes: &[u8]) -> Option<StreamL7> {
-    match probe_http(bytes) {
-        ProbeResult::Match(http) => return Some(StreamL7::Http(http)),
-        ProbeResult::Incomplete { .. } | ProbeResult::Malformed(_) => return None,
-        ProbeResult::NoMatch => {}
+    macro_rules! try_probe {
+        ($probe:expr, $variant:expr) => {
+            match $probe {
+                ProbeResult::Match(value) => return Some($variant(value)),
+                ProbeResult::Incomplete { .. } | ProbeResult::Malformed(_) => return None,
+                ProbeResult::NoMatch => {}
+            }
+        };
     }
 
-    match probe_tls_client_hello(bytes) {
-        ProbeResult::Match(tls) => Some(StreamL7::Tls(tls)),
-        _ => None,
-    }
+    try_probe!(probe_tls_client_hello(bytes), StreamL7::Tls);
+    try_probe!(probe_http(bytes), StreamL7::Http);
+    try_probe!(probe_bgp(bytes), StreamL7::Bgp);
+    try_probe!(probe_smb2(bytes), StreamL7::Smb2);
+    try_probe!(probe_smb1(bytes), StreamL7::Smb1);
+    try_probe!(probe_ldap(bytes), StreamL7::Ldap);
+    try_probe!(probe_dns_over_tcp(bytes), StreamL7::Dns);
+    try_probe!(probe_mqtt(bytes), StreamL7::Mqtt);
+    None
 }
 
 fn direction_key(src: IpAddr, src_port: u16, dst: IpAddr, dst_port: u16) -> DirectionKey {
@@ -661,8 +704,130 @@ mod tests {
             StreamL7::Tls(hello) => {
                 assert_eq!(hello.server_name.as_deref(), Some("example.com"));
             }
-            StreamL7::Http(_) => panic!("expected TLS ClientHello"),
+            other => panic!("expected a TLS ClientHello, got {other:?}"),
         }
+    }
+
+    /// A BGP keepalive: sixteen marker bytes, then the length and type.
+    fn bgp_keepalive() -> Vec<u8> {
+        let mut message = vec![0xff; 16];
+        message.extend(19u16.to_be_bytes());
+        message.push(4);
+        message
+    }
+
+    /// A DNS-over-TCP query for "a", behind its two-byte length prefix.
+    fn dns_over_tcp_query() -> Vec<u8> {
+        let mut message = vec![0x12, 0x34, 0x01, 0x00];
+        message.extend(1u16.to_be_bytes()); // one question
+        message.extend([0, 0, 0, 0, 0, 0]); // no answers, authorities, extras
+        message.extend([0x01, b'a', 0x00]); // qname "a"
+        message.extend([0x00, 0x01, 0x00, 0x01]); // A, IN
+        let mut framed = Vec::new();
+        framed.extend(
+            u16::try_from(message.len())
+                .expect("short message")
+                .to_be_bytes(),
+        );
+        framed.extend(message);
+        framed
+    }
+
+    #[test]
+    fn recognises_bgp_in_a_reassembled_stream() {
+        let mut tracker = SessionTracker::new();
+        tracker.offer_frame(&tcp_frame(SRC_PORT, 100, true, &[]));
+
+        let event = tracker
+            .offer_frame(&tcp_frame(SRC_PORT, 101, false, &bgp_keepalive()))
+            .expect("a bgp keepalive is a stream event");
+        match event.l7 {
+            StreamL7::Bgp(message) => assert_eq!(message.length, 19),
+            other => panic!("expected bgp, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn recognises_dns_over_tcp_in_a_reassembled_stream() {
+        let mut tracker = SessionTracker::new();
+        tracker.offer_frame(&tcp_frame(SRC_PORT, 100, true, &[]));
+
+        let event = tracker
+            .offer_frame(&tcp_frame(SRC_PORT, 101, false, &dns_over_tcp_query()))
+            .expect("a dns query is a stream event");
+        match event.l7 {
+            StreamL7::Dns(message) => {
+                assert_eq!(message.questions.len(), 1);
+                assert_eq!(message.header.transaction_id, 0x1234);
+            }
+            other => panic!("expected dns, got {other:?}"),
+        }
+    }
+
+    /// The length prefix arrives in one segment and the message in the next,
+    /// which is the ordinary case for anything length-framed over TCP.
+    #[test]
+    fn a_dns_message_split_across_segments_is_recognised_once_whole() {
+        let framed = dns_over_tcp_query();
+        let mut tracker = SessionTracker::new();
+        tracker.offer_frame(&tcp_frame(SRC_PORT, 100, true, &[]));
+
+        assert!(
+            tracker
+                .offer_frame(&tcp_frame(SRC_PORT, 101, false, &framed[..6]))
+                .is_none(),
+            "an incomplete message must not be claimed by a weaker protocol"
+        );
+        let event = tracker
+            .offer_frame(&tcp_frame(SRC_PORT, 101 + 6, false, &framed[6..]))
+            .expect("the rest of the message completes it");
+        assert!(matches!(event.l7, StreamL7::Dns(_)));
+    }
+
+    /// The first five bytes of a TLS record are also a well formed MQTT
+    /// control packet: 0x16 is a PUBREL type nibble and 0x03 a remaining
+    /// length. TLS reports `Incomplete` on them and MQTT reports `Match`, so
+    /// the walk has to stop at the first `Incomplete` rather than carry on to
+    /// a weaker protocol. Without that rule a ClientHello split across
+    /// segments is reported as MQTT.
+    #[test]
+    fn an_incomplete_probe_stops_the_walk_before_a_weaker_one() {
+        let partial_tls_record = [0x16u8, 0x03, 0x01, 0x02, 0x00];
+
+        assert!(
+            matches!(
+                probe_tls_client_hello(&partial_tls_record),
+                ProbeResult::Incomplete { .. }
+            ),
+            "the fixture must be an incomplete tls record for this to test anything"
+        );
+        assert!(
+            matches!(probe_mqtt(&partial_tls_record), ProbeResult::Match(_)),
+            "the fixture must also be a valid mqtt packet for this to test anything"
+        );
+
+        assert!(
+            probe_l7(&partial_tls_record).is_none(),
+            "a half-arrived tls record must not be reported as mqtt"
+        );
+    }
+
+    /// MQTT is probed last precisely because its header is weak. HTTP text
+    /// must never come back as an MQTT control packet.
+    #[test]
+    fn http_is_not_claimed_by_a_weaker_protocol() {
+        let mut tracker = SessionTracker::new();
+        tracker.offer_frame(&tcp_frame(SRC_PORT, 100, true, &[]));
+
+        let event = tracker
+            .offer_frame(&tcp_frame(
+                SRC_PORT,
+                101,
+                false,
+                b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n",
+            ))
+            .expect("an http request is a stream event");
+        assert!(matches!(event.l7, StreamL7::Http(_)), "got {:?}", event.l7);
     }
 
     #[test]
