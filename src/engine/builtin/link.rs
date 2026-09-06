@@ -89,10 +89,17 @@ fn is_common_ethertype(value: u16) -> bool {
     )
 }
 
+/// Four constrained fields, not one: the packet type, the address length, and
+/// the protocol all have to agree. The protocol check matters because the SLL
+/// address field is eight bytes holding a six-byte MAC, and the two bytes of
+/// padding sit exactly where an ethernet frame carries its ethertype. Captures
+/// exist whose padding reads as 0x0800, and without checking offset 14 those
+/// frames are taken for ethernet and mis-parsed.
 fn looks_like_sll(raw: &[u8]) -> bool {
     raw.len() >= SLL_HEADER_LEN
         && matches!(read_u16_be_at(raw, SLL_PACKET_TYPE_OFFSET), Some(packet_type) if packet_type <= 4)
         && read_u16_be_at(raw, SLL_ADDR_LEN_OFFSET) == Some(u16::from(ARP_ETH_HW_LEN))
+        && matches!(read_u16_be_at(raw, SLL_PROTOCOL_OFFSET), Some(protocol) if is_common_ethertype(protocol))
 }
 
 fn looks_like_sll2(raw: &[u8]) -> bool {
@@ -131,12 +138,11 @@ fn is_vlan_ethertype(value: u16) -> bool {
 }
 
 pub(super) fn parse_link(raw: &[u8]) -> Result<(EthernetFrame, usize), LayerError> {
-    if let Some(et) = ethertype_at_offset_12(raw)
-        && is_common_ethertype(et)
-    {
-        return parse_ethernet(raw);
-    }
-
+    // The cooked-capture checks come first because they are the specific ones.
+    // Reading bytes 12 and 13 as an ethertype is a single weak signal, and an
+    // SLL frame has its address padding in exactly those two bytes, so letting
+    // it decide first takes cooked frames for ethernet whenever that padding
+    // happens to look like a protocol number.
     if looks_like_sll(raw) {
         return parse_sll(raw);
     }
@@ -145,7 +151,55 @@ pub(super) fn parse_link(raw: &[u8]) -> Result<(EthernetFrame, usize), LayerErro
         return parse_sll2(raw);
     }
 
+    if let Some(et) = ethertype_at_offset_12(raw)
+        && is_common_ethertype(et)
+    {
+        return parse_ethernet(raw);
+    }
+
+    // Nothing above recognised a link header, so the frame may have none at
+    // all. A capture written with LINKTYPE_RAW that reaches here without its
+    // linktype - a caller who has the bytes but not the file header - would
+    // otherwise have every packet read as a short ethernet frame and fail.
+    if let Some(protocol) = looks_like_bare_ip(raw) {
+        return Ok(synthetic_link_frame(protocol, 0));
+    }
+
     parse_ethernet(raw)
+}
+
+/// Whether `raw` begins with an IP header and nothing before it.
+///
+/// Deliberately strict: this runs only as a last resort, but a frame wrongly
+/// read as bare IP is silently mis-parsed rather than refused, which is worse
+/// than not detecting it. So the declared length must account for the frame
+/// exactly. A MAC address beginning 0x45 is common; one whose next two bytes
+/// also happen to equal the frame's own length is not.
+///
+/// The cost is that a raw capture cut short by a snaplen is not detected,
+/// since its declared length no longer matches what was kept. Callers that
+/// know the linktype should pass it and never reach here.
+pub(super) fn looks_like_bare_ip(raw: &[u8]) -> Option<u16> {
+    const IPV4_MIN_HEADER_LEN: usize = 20;
+    const IPV6_HEADER_LEN: usize = 40;
+
+    match raw.first()? >> 4 {
+        4 => {
+            let header = raw.get(..IPV4_MIN_HEADER_LEN)?;
+            let header_len = usize::from(header[0] & 0x0f) * 4;
+            if header_len < IPV4_MIN_HEADER_LEN || header_len > raw.len() {
+                return None;
+            }
+            let total_length = usize::from(u16::from_be_bytes([header[2], header[3]]));
+            (total_length == raw.len() && total_length >= header_len).then_some(ethertype::IPV4)
+        }
+        6 => {
+            let header = raw.get(..IPV6_HEADER_LEN)?;
+            let payload_length = usize::from(u16::from_be_bytes([header[4], header[5]]));
+            (payload_length.checked_add(IPV6_HEADER_LEN)? == raw.len()).then_some(ethertype::IPV6)
+        }
+        _ => None,
+    }
 }
 
 pub(super) fn parse_link_with_linktype(
@@ -361,8 +415,100 @@ fn parse_mpls_label_entry(entry: u32) -> MplsLabel {
 }
 
 #[cfg(test)]
+#[allow(clippy::panic)]
 mod tests {
     use crate::engine::builtin::{BuiltinPacketParser, ParseWarningCode, TransportSegment};
+
+    /// An IPv4/UDP datagram with no link header at all, as a LINKTYPE_RAW
+    /// capture carries it.
+    fn bare_ipv4_udp() -> Vec<u8> {
+        vec![
+            0x45, 0x00, 0x00, 0x1c, 0x00, 0x01, 0x40, 0x00, 64, 17, 0, 0, 10, 0, 0, 1, 10, 0, 0, 2,
+            0x04, 0xd2, 0x00, 0x35, 0x00, 0x08, 0x00, 0x00,
+        ]
+    }
+
+    /// A Linux cooked frame whose eight-byte address field holds a six-byte
+    /// MAC and two bytes of padding that read as 0x0800 - the same position an
+    /// ethernet frame carries its ethertype. Real captures contain these.
+    fn sll_ipv4_udp_with_ethertype_shaped_padding() -> Vec<u8> {
+        let mut frame = vec![0x00, 0x00];
+        frame.extend([0x03, 0x04]);
+        frame.extend([0x00, 0x06]);
+        frame.extend([0x00, 0x0c, 0x29, 0xfe, 0x8c, 0x99]);
+        frame.extend([0x08, 0x00]);
+        frame.extend([0x08, 0x00]);
+        frame.extend(&bare_ipv4_udp());
+        frame
+    }
+
+    /// A caller with the packet bytes but not the capture's file header gets
+    /// no linktype. Assuming ethernet then fails every packet of a raw
+    /// capture, so a frame that is exactly an IP packet is read as one.
+    #[test]
+    fn a_bare_ip_packet_parses_without_a_linktype() {
+        let parsed = BuiltinPacketParser::parse(&bare_ipv4_udp())
+            .expect("a raw ip packet is not a short ethernet frame");
+
+        let ipv4 = parsed.ipv4.expect("the addresses");
+        assert_eq!(ipv4.source.to_string(), "10.0.0.1");
+        let Some(TransportSegment::Udp(udp)) = &parsed.transport else {
+            panic!("expected udp, got {:?}", parsed.transport);
+        };
+        assert_eq!((udp.source_port, udp.destination_port), (1234, 53));
+    }
+
+    /// The detection is a last resort and must stay strict: a frame whose
+    /// declared length does not account for it exactly is not read as bare IP,
+    /// because a mis-parse is worse than a refusal.
+    #[test]
+    fn a_length_that_does_not_match_is_not_taken_for_bare_ip() {
+        let mut padded = bare_ipv4_udp();
+        padded.extend([0u8; 8]);
+        assert!(
+            super::looks_like_bare_ip(&padded).is_none(),
+            "a total_length that does not account for the frame was accepted"
+        );
+
+        let mut short = bare_ipv4_udp();
+        short[3] = 0xff;
+        assert!(super::looks_like_bare_ip(&short).is_none());
+    }
+
+    /// Reading bytes 12 and 13 as an ethertype is one weak signal; a cooked
+    /// frame satisfies four. The specific check has to win, or these frames
+    /// are silently parsed as ethernet.
+    #[test]
+    fn cooked_padding_shaped_like_an_ethertype_is_still_cooked() {
+        let parsed = BuiltinPacketParser::parse(&sll_ipv4_udp_with_ethertype_shaped_padding())
+            .expect("a cooked frame parses");
+
+        let ipv4 = parsed.ipv4.expect("the addresses survived the link layer");
+        assert_eq!(
+            ipv4.source.to_string(),
+            "10.0.0.1",
+            "reading the frame as ethernet would put the ip header 14 bytes in"
+        );
+        let Some(TransportSegment::Udp(udp)) = &parsed.transport else {
+            panic!("expected udp, got {:?}", parsed.transport);
+        };
+        assert_eq!((udp.source_port, udp.destination_port), (1234, 53));
+    }
+
+    /// The reorder must not cost ethernet: this frame's own MAC begins with
+    /// bytes that satisfy the cooked packet-type and address-length checks, so
+    /// only the protocol field keeps it ethernet.
+    #[test]
+    fn an_ethernet_frame_is_not_taken_for_a_cooked_one() {
+        let parsed = BuiltinPacketParser::parse(&ethernet_ipv4_udp_frame()).expect("ethernet");
+
+        let ethernet = parsed.ethernet.expect("an ethernet header");
+        assert_eq!(ethernet.source, [6, 7, 8, 9, 10, 11]);
+        assert_eq!(
+            parsed.ipv4.expect("addresses").source.to_string(),
+            "10.0.0.1"
+        );
+    }
 
     fn ethernet_ipv4_udp_frame() -> Vec<u8> {
         vec![
