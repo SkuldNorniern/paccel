@@ -87,6 +87,12 @@ pub struct DnsMessage {
     pub answers: Vec<DnsRecord>,
     pub authorities: Vec<DnsRecord>,
     pub additionals: Vec<DnsRecord>,
+    /// A record section stopped before the count in the header, because a
+    /// record did not fit the message.
+    ///
+    /// The records present are whole; compare a section's length against its
+    /// header count to see how many are missing.
+    pub truncated: bool,
 }
 
 /// Parses a DNS message. Used by the engine path.
@@ -145,11 +151,14 @@ pub fn parse_dns_message(packet: &[u8]) -> Result<DnsMessage, LayerError> {
         offset = new_offset;
     }
 
-    let (answers, new_offset) = parse_records(packet, offset, header.answers)?;
-    offset = new_offset;
-    let (authorities, new_offset) = parse_records(packet, offset, header.authorities)?;
-    offset = new_offset;
-    let (additionals, _) = parse_records(packet, offset, header.additionals)?;
+    // The question section still has to parse in full: it is what tells a
+    // DNS message apart from arbitrary bytes, and a probe that accepted a
+    // header alone would claim streams belonging to other protocols. The
+    // record sections are allowed to stop short.
+    let (answers, offset, answers_whole) = parse_records(packet, offset, header.answers);
+    let (authorities, offset, authorities_whole) =
+        parse_records(packet, offset, header.authorities);
+    let (additionals, _, additionals_whole) = parse_records(packet, offset, header.additionals);
 
     Ok(DnsMessage {
         header,
@@ -157,6 +166,7 @@ pub fn parse_dns_message(packet: &[u8]) -> Result<DnsMessage, LayerError> {
         answers,
         authorities,
         additionals,
+        truncated: !(answers_whole && authorities_whole && additionals_whole),
     })
 }
 
@@ -361,22 +371,27 @@ fn parse_question(packet: &[u8], pos: usize) -> Result<(DnsQuestion, usize), Lay
     ))
 }
 
-fn parse_records(
-    packet: &[u8],
-    mut offset: usize,
-    count: u16,
-) -> Result<(Vec<DnsRecord>, usize), LayerError> {
+/// Reads up to `count` records, stopping at the first one that does not fit.
+///
+/// Returns the records read and whether the section was complete. A record
+/// whose rdata runs past the end of the message is common in the wild - a
+/// truncated capture, or a deliberately malformed amplification response - and
+/// the records before it are still whole. Discarding them loses the question
+/// and every answer that did arrive, which is the part worth having.
+fn parse_records(packet: &[u8], mut offset: usize, count: u16) -> (Vec<DnsRecord>, usize, bool) {
     let remaining = packet.len().saturating_sub(offset);
     let capacity = (count as usize).min(remaining / 11);
     let mut records = Vec::with_capacity(capacity);
 
     for _ in 0..count {
-        let (record, new_offset) = parse_record(packet, offset)?;
+        let Ok((record, new_offset)) = parse_record(packet, offset) else {
+            return (records, offset, false);
+        };
         records.push(record);
         offset = new_offset;
     }
 
-    Ok((records, offset))
+    (records, offset, true)
 }
 
 /// Parses a DNS resource record at `pos`.
@@ -849,10 +864,37 @@ mod tests {
         let rdlength = packet.len() - 6;
         packet[rdlength..rdlength + 2].copy_from_slice(&5_u16.to_be_bytes());
 
-        assert!(matches!(
-            parse_dns_message(&packet),
-            Err(LayerError::InvalidLength)
-        ));
+        // The record's rdata runs past the message, so it is dropped - but the
+        // question and every whole record before it are kept, and the header
+        // count still says how many were promised.
+        let message = parse_dns_message(&packet).expect("what parsed is kept");
+        assert!(message.truncated, "and the shortfall is recorded");
+        assert_eq!(message.questions.len(), 1, "the question is unaffected");
+        assert!(
+            message.answers.len() < usize::from(message.header.answers),
+            "fewer answers than the header promised"
+        );
+    }
+
+    /// A DNS amplification response is deliberately malformed at the end.
+    /// Discarding the whole message loses the question and every answer that
+    /// did arrive, which is exactly the part a flow analyser wants.
+    #[test]
+    fn a_record_that_overruns_does_not_cost_the_ones_before_it() {
+        let mut packet = create_test_dns_response();
+        let answers = usize::from(u16::from_be_bytes([packet[6], packet[7]]));
+        // Promise one more answer than the message carries.
+        let inflated = u16::try_from(answers + 1).expect("small count");
+        packet[6..8].copy_from_slice(&inflated.to_be_bytes());
+
+        let message = parse_dns_message(&packet).expect("what parsed is kept");
+        assert!(message.truncated);
+        assert_eq!(
+            message.answers.len(),
+            answers,
+            "every record that fits is still returned"
+        );
+        assert_eq!(usize::from(message.header.answers), answers + 1);
     }
 
     #[test]
