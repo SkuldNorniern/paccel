@@ -796,18 +796,42 @@ impl QuicConnectionTracker {
     /// tracker grows without bound while its connection count looks healthy.
     fn remember_cid(&mut self, cid: &[u8], id: QuicConnectionId) {
         while self.by_cid.len() >= self.max_cids && !self.by_cid.contains_key(cid) {
-            let Some(victim) = self.insertion_order.front().copied() else {
-                break;
-            };
-            self.insertion_order.pop_front();
-            if victim == id {
-                // Never evict the connection this id belongs to.
-                self.insertion_order.push_back(victim);
+            // Another connection first: this one is the reason for the insert.
+            if let Some(position) = self.insertion_order.iter().position(|queued| *queued != id)
+                && let Some(victim) = self.insertion_order.remove(position)
+            {
+                self.drop_connection(victim);
+                continue;
+            }
+            // Nothing else left to give, so this connection gives up its own
+            // oldest id rather than the cap being exceeded.
+            if !self.drop_oldest_cid(id) {
                 break;
             }
-            self.drop_connection(victim);
         }
         self.by_cid.insert(cid.to_vec(), id);
+    }
+
+    /// Drops the lowest-numbered id `id` still holds, in either pool. Returns
+    /// whether there was one.
+    fn drop_oldest_cid(&mut self, id: QuicConnectionId) -> bool {
+        let Some(connection) = self.connections.get_mut(&id) else {
+            return false;
+        };
+        let oldest = connection
+            .issued_cids
+            .iter()
+            .enumerate()
+            .filter_map(|(pool, ids)| ids.ids.keys().next().map(|sequence| (*sequence, pool)))
+            .min();
+        let Some((sequence, pool)) = oldest else {
+            return false;
+        };
+        let Some(stale) = connection.issued_cids[pool].ids.remove(&sequence) else {
+            return false;
+        };
+        self.by_cid.remove(&stale);
+        true
     }
 
     fn evict_until_room(&mut self) {
@@ -1273,6 +1297,27 @@ mod tests {
             to_server, to_client,
             "both ways must not collapse onto one direction"
         );
+    }
+
+    /// When one connection's own pool is allowed more ids than the tracker
+    /// holds in total, it has to give up its oldest rather than push the total
+    /// past the cap. There is no other connection to evict.
+    #[test]
+    fn one_connection_cannot_push_the_id_total_past_the_cap() {
+        let mut tracker = QuicConnectionTracker::new()
+            .with_max_cids(4)
+            .with_max_cids_per_pool(16);
+        let id = opened(&mut tracker);
+
+        for sequence in 1..12u64 {
+            let cid = sequence.to_be_bytes();
+            tracker.observe_new_connection_id(id, server_endpoint(), sequence, &cid, 0);
+            assert!(
+                tracker.stats().active_cids <= 4,
+                "{} ids held past the cap after sequence {sequence}",
+                tracker.stats().active_cids
+            );
+        }
     }
 
     #[test]
