@@ -283,14 +283,40 @@ impl<'a> DhcpPacket<'a> {
 #[derive(Debug, Clone, Copy)]
 pub struct GrePacket<'a> {
     data: &'a [u8],
+    header_len: usize,
 }
 
 impl<'a> GrePacket<'a> {
+    /// `None` when the header is short, or when it sets the routing bit.
+    ///
+    /// RFC 1701 sec 4.1 follows the fixed fields with a variable-length
+    /// source-route list, so the payload cannot be located from the flags. This
+    /// view refuses that rather than pointing at routing data, which is what
+    /// the engine does too.
     pub fn new(data: &'a [u8]) -> Option<Self> {
         if data.len() < 4 {
             return None;
         }
-        Some(Self { data })
+        let flags = data[0];
+        if flags & 0x40 != 0 {
+            return None;
+        }
+        // RFC 1701 sec 4.1: checksum and offset are present together, and the
+        // key and sequence fields each add four more bytes.
+        let mut header_len = 4;
+        if flags & 0x80 != 0 {
+            header_len += 4;
+        }
+        if flags & 0x20 != 0 {
+            header_len += 4;
+        }
+        if flags & 0x10 != 0 {
+            header_len += 4;
+        }
+        if data.len() < header_len {
+            return None;
+        }
+        Some(Self { data, header_len })
     }
 
     pub fn flags_version(&self) -> u16 {
@@ -301,8 +327,40 @@ impl<'a> GrePacket<'a> {
         u16::from_be_bytes([self.data[2], self.data[3]])
     }
 
+    /// The whole header, optional fields included.
+    pub fn header_len(&self) -> usize {
+        self.header_len
+    }
+
+    pub fn checksum(&self) -> Option<u16> {
+        (self.data[0] & 0x80 != 0).then(|| u16::from_be_bytes([self.data[4], self.data[5]]))
+    }
+
+    pub fn key(&self) -> Option<u32> {
+        if self.data[0] & 0x20 == 0 {
+            return None;
+        }
+        let offset = 4 + usize::from(self.data[0] & 0x80 != 0) * 4;
+        self.read_u32(offset)
+    }
+
+    pub fn sequence_number(&self) -> Option<u32> {
+        if self.data[0] & 0x10 == 0 {
+            return None;
+        }
+        let offset = 4
+            + usize::from(self.data[0] & 0x80 != 0) * 4
+            + usize::from(self.data[0] & 0x20 != 0) * 4;
+        self.read_u32(offset)
+    }
+
+    fn read_u32(&self, offset: usize) -> Option<u32> {
+        let bytes = self.data.get(offset..offset + 4)?;
+        Some(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+    }
+
     pub fn payload(&self) -> &'a [u8] {
-        &self.data[4..]
+        &self.data[self.header_len..]
     }
 }
 
@@ -620,6 +678,50 @@ mod tests {
         Ipv4Packet, Ipv6Packet, Sll2Packet, SllPacket, TcpPacket, UdpPacket, VlanTagView,
         VxlanPacket,
     };
+
+    /// The optional checksum, key and sequence fields move the payload. A view
+    /// that assumes a four-byte header points at header bytes and calls them
+    /// data, and disagrees with the engine about where the inner packet is.
+    #[test]
+    fn gre_optional_fields_move_the_payload() {
+        // Checksum, key and sequence all present: 4 + 4 + 4 + 4 = 16.
+        let mut header = vec![0xb0, 0x00, 0x08, 0x00];
+        header.extend([0xaa, 0xbb, 0x00, 0x00]); // checksum + offset
+        header.extend([0x00, 0x00, 0x00, 0x07]); // key
+        header.extend([0x00, 0x00, 0x00, 0x2a]); // sequence
+        header.extend(b"payload");
+
+        let gre = GrePacket::new(&header).expect("a well formed gre header");
+        assert_eq!(gre.header_len(), 16);
+        assert_eq!(gre.payload(), b"payload");
+        assert_eq!(gre.checksum(), Some(0xaabb));
+        assert_eq!(gre.key(), Some(7));
+        assert_eq!(gre.sequence_number(), Some(42));
+
+        // A base header still starts its payload at four.
+        let base = [0x00, 0x00, 0x08, 0x00, b'h', b'i'];
+        let gre = GrePacket::new(&base).expect("a base gre header");
+        assert_eq!(gre.header_len(), 4);
+        assert_eq!(gre.payload(), b"hi");
+        assert_eq!(gre.key(), None);
+    }
+
+    /// RFC 2784 sec 2.3.1 deprecates source routing and the payload cannot be
+    /// located when it is set, so the view refuses rather than guessing. The
+    /// engine declines the same packets.
+    #[test]
+    fn gre_with_source_routing_is_refused() {
+        let routing = [0x40, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x28];
+        assert!(GrePacket::new(&routing).is_none());
+    }
+
+    /// A header that declares optional fields it does not carry is refused
+    /// rather than slicing past the end.
+    #[test]
+    fn gre_shorter_than_its_declared_fields_is_refused() {
+        let truncated = [0xb0, 0x00, 0x08, 0x00, 0xaa, 0xbb];
+        assert!(GrePacket::new(&truncated).is_none());
+    }
 
     #[test]
     fn ethernet_ipv4_udp_views_work() {
