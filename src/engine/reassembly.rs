@@ -718,7 +718,11 @@ impl TcpStreamReassembler {
         Self::consume_contiguous(state, &mut self.total_buffered_bytes, &mut output);
         let finished = Self::consume_fin(state);
 
-        let event = tcp_event(&output, placed, finished || fin);
+        // `finished` only, not `finished || fin`. An out-of-order FIN has been
+        // seen but not reached in sequence, and reporting it as the outcome
+        // hides the placement result - a conflict, a gap or a limit - and skips
+        // the counter for it.
+        let event = tcp_event(&output, placed, finished);
         match event {
             ReassemblyEvent::Conflict => {
                 self.stats.overlap_conflicts = self.stats.overlap_conflicts.saturating_add(1);
@@ -1847,6 +1851,11 @@ fn quic_event(
     if !output.is_empty() {
         return ReassemblyEvent::Data;
     }
+    // Before the empty-frame check: a zero-length frame carrying FIN closes the
+    // stream, and reporting it as ignored contradicts `is_finished`.
+    if state.closed {
+        return ReassemblyEvent::Closed;
+    }
     if data_empty {
         return ReassemblyEvent::Ignored;
     }
@@ -1939,6 +1948,60 @@ mod tests {
             options: None,
             options_truncated: false,
         }
+    }
+
+    /// A zero-length STREAM frame with FIN closes the stream, so the event has
+    /// to agree with `is_finished` rather than calling the frame ignored.
+    #[test]
+    fn a_zero_length_quic_fin_reports_closed() {
+        let src = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let dst = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let mut reassembler = QuicStreamReassembler::new();
+
+        let closed = reassembler.offer_detailed(src, 40_000, dst, 443, 0, 0, true, &[]);
+        assert_eq!(closed.event, ReassemblyEvent::Closed);
+        assert!(
+            reassembler.is_finished(src, 40_000, dst, 443, 0),
+            "and the two agree"
+        );
+    }
+
+    /// A FIN riding on a segment that was refused must not be reported as the
+    /// outcome: the segment was dropped, and the counter for why has to move.
+    #[test]
+    fn a_fin_does_not_mask_why_a_segment_was_refused() {
+        let src = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let dst = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let mut reassembler = TcpStreamReassembler::with_limits(4_096, 16);
+        reassembler.offer(src, 40_000, dst, 443, 0, true, false, false, &[]);
+
+        // Far past the gap limit, and carrying a FIN.
+        let refused =
+            reassembler.offer_detailed(src, 40_000, dst, 443, 10_000, false, true, false, b"late");
+
+        assert_eq!(
+            refused.event,
+            ReassemblyEvent::GapLimit,
+            "the segment was dropped for the gap, not completed by the fin"
+        );
+        assert_eq!(
+            reassembler.stats().gap_rejections,
+            1,
+            "and the rejection is counted"
+        );
+    }
+
+    /// A FIN that is reached in sequence still reports as one.
+    #[test]
+    fn a_fin_in_sequence_is_still_reported() {
+        let src = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let dst = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let mut reassembler = TcpStreamReassembler::new();
+        reassembler.offer(src, 40_000, dst, 443, 0, true, false, false, &[]);
+
+        let finished =
+            reassembler.offer_detailed(src, 40_000, dst, 443, 1, false, true, false, &[]);
+        assert_eq!(finished.event, ReassemblyEvent::Fin);
     }
 
     #[test]
