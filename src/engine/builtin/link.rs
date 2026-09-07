@@ -84,6 +84,7 @@ fn is_common_ethertype(value: u16) -> bool {
             | ethertype::IPV6
             | ethertype::VLAN_8021Q
             | ethertype::QINQ_8021AD
+            | ethertype::QINQ_LEGACY
             | ethertype::MPLS_UNICAST
             | ethertype::MPLS_MULTICAST
     )
@@ -131,7 +132,10 @@ fn parse_sll2(raw: &[u8]) -> Result<(EthernetFrame, usize), LayerError> {
 }
 
 fn is_vlan_ethertype(value: u16) -> bool {
-    matches!(value, ethertype::VLAN_8021Q | ethertype::QINQ_8021AD)
+    matches!(
+        value,
+        ethertype::VLAN_8021Q | ethertype::QINQ_8021AD | ethertype::QINQ_LEGACY
+    )
 }
 
 pub(super) fn parse_link(raw: &[u8]) -> Result<(EthernetFrame, usize), LayerError> {
@@ -425,6 +429,35 @@ mod tests {
         frame.extend([0x08, 0x00]);
         frame.extend(&bare_ipv4_udp());
         frame
+    }
+
+    /// 802.1ad settled on 0x88A8, but the gear that shipped before it uses
+    /// 0x9100 and much of it still does. An unstripped tag hides the inner IP.
+    #[test]
+    fn a_legacy_qinq_tag_is_stripped() {
+        let mut frame = vec![0x00; 12];
+        frame.extend([0x91, 0x00]);
+        frame.extend([0x00, 0x64]);
+        frame.extend([0x81, 0x00]);
+        frame.extend([0x00, 0xc8]);
+        frame.extend([0x08, 0x00]);
+        frame.extend(&bare_ipv4_udp());
+
+        let parsed = BuiltinPacketParser::parse(&frame).expect("a tagged frame parses");
+        let ethernet = parsed.ethernet.expect("the link header");
+        assert_eq!(
+            ethernet
+                .vlan_tags
+                .iter()
+                .map(|tag| tag & 0x0fff)
+                .collect::<Vec<_>>(),
+            vec![100, 200],
+            "both tags come off"
+        );
+        assert_eq!(
+            parsed.ipv4.expect("the inner addresses").source.to_string(),
+            "10.0.0.1"
+        );
     }
 
     /// A caller with the packet bytes but not the capture's file header gets

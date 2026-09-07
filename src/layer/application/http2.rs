@@ -295,10 +295,34 @@ fn strip_padding(body: &[u8], padded: bool) -> Result<&[u8], Http2FrameBody<'sta
     Ok(&rest[..rest.len() - pad_length])
 }
 
+/// RFC 9113 sec 6: each frame type is either connection-wide or belongs to a
+/// stream, and a frame on the wrong one is a protocol error.
+fn stream_id_in_scope(header: Http2FrameHeader) -> bool {
+    match header.frame_type {
+        FRAME_TYPE_DATA
+        | FRAME_TYPE_HEADERS
+        | FRAME_TYPE_PRIORITY
+        | FRAME_TYPE_RST_STREAM
+        | FRAME_TYPE_PUSH_PROMISE
+        | FRAME_TYPE_CONTINUATION => header.stream_id != 0,
+        FRAME_TYPE_SETTINGS | FRAME_TYPE_PING | FRAME_TYPE_GOAWAY => header.stream_id == 0,
+        // WINDOW_UPDATE is valid on either, per sec 6.9. An unknown type is
+        // ignored per sec 4.1, so it has no scope to be wrong about.
+        _ => true,
+    }
+}
+
 fn decode_body(header: Http2FrameHeader, body: &[u8]) -> Http2FrameBody<'_> {
+    if !stream_id_in_scope(header) {
+        return malformed(ParseErrorKind::InvalidValue);
+    }
     match header.frame_type {
         FRAME_TYPE_DATA => decode_data(header, body),
         FRAME_TYPE_HEADERS => decode_headers(header, body),
+        // RFC 9113 sec 6.3: the payload is exactly five bytes.
+        FRAME_TYPE_PRIORITY if body.len() != PRIORITY_LEN => {
+            malformed(ParseErrorKind::InvalidLength)
+        }
         FRAME_TYPE_PRIORITY => Http2Priority::parse(body).map_or_else(
             || malformed(ParseErrorKind::InvalidLength),
             Http2FrameBody::Priority,
@@ -473,8 +497,9 @@ mod tests {
     use super::{
         CONNECTION_PREFACE, FLAG_ACK, FLAG_END_HEADERS, FLAG_END_STREAM, FLAG_PADDED,
         FLAG_PRIORITY, FRAME_HEADER_LENGTH, FRAME_TYPE_DATA, FRAME_TYPE_GOAWAY, FRAME_TYPE_HEADERS,
-        FRAME_TYPE_PING, FRAME_TYPE_SETTINGS, FRAME_TYPE_WINDOW_UPDATE, Http2FrameBody,
-        Http2FrameHeader, Http2Priority, iter_http2_frames, looks_like_http2, parse_http2_frames,
+        FRAME_TYPE_PING, FRAME_TYPE_PRIORITY, FRAME_TYPE_RST_STREAM, FRAME_TYPE_SETTINGS,
+        FRAME_TYPE_WINDOW_UPDATE, Http2FrameBody, Http2FrameHeader, Http2Priority,
+        iter_http2_frames, looks_like_http2, parse_http2_frames,
     };
 
     const CLIENT_PREFACE_AND_FRAMES: &str = "505249202a20485454502f322e300d0a0d0a534d0d0a0d0a0000120400000000000003000000640004000100000002000000000000040800000000003e7f00010000250105000000018286418b089d5c0b8170dc0bc0781f04856272d141ff7a8825b650c3cb882b8353032a2f2a";
@@ -498,6 +523,65 @@ mod tests {
         bytes.extend(stream_id.to_be_bytes());
         bytes.extend(body);
         bytes
+    }
+
+    /// RFC 9113 sec 6.3: a PRIORITY payload is exactly five bytes. Taking the
+    /// first five of a longer one accepts a frame the peer must reject.
+    #[test]
+    fn a_priority_frame_is_exactly_five_bytes() {
+        let five = frame(FRAME_TYPE_PRIORITY, 0, 1, &[0, 0, 0, 7, 201]);
+        assert!(matches!(
+            iter_http2_frames(&five).next().expect("one frame").body,
+            Http2FrameBody::Priority(_)
+        ));
+
+        for length in [4usize, 6, 10] {
+            let odd = frame(FRAME_TYPE_PRIORITY, 0, 1, &vec![0u8; length]);
+            assert!(
+                matches!(
+                    iter_http2_frames(&odd).next().expect("one frame").body,
+                    Http2FrameBody::Malformed(_)
+                ),
+                "a {length}-byte priority payload was accepted"
+            );
+        }
+    }
+
+    /// RFC 9113 sec 6: connection-wide frames belong on stream 0 and
+    /// stream frames do not.
+    #[test]
+    fn a_frame_on_the_wrong_stream_is_malformed() {
+        let wrong: [(u8, u32, &[u8]); 6] = [
+            (FRAME_TYPE_DATA, 0, b"x"),
+            (FRAME_TYPE_HEADERS, 0, b"x"),
+            (FRAME_TYPE_RST_STREAM, 0, &[0, 0, 0, 0]),
+            (FRAME_TYPE_SETTINGS, 1, &[]),
+            (FRAME_TYPE_PING, 1, &[0; 8]),
+            (FRAME_TYPE_GOAWAY, 1, &[0; 8]),
+        ];
+        for (frame_type, stream_id, body) in wrong {
+            let stream = frame(frame_type, 0, stream_id, body);
+            assert!(
+                matches!(
+                    iter_http2_frames(&stream).next().expect("one frame").body,
+                    Http2FrameBody::Malformed(_)
+                ),
+                "type {frame_type:#x} on stream {stream_id} was accepted"
+            );
+        }
+    }
+
+    /// RFC 9113 sec 6.9: WINDOW_UPDATE is valid on the connection and on a
+    /// stream, so neither is a scope error.
+    #[test]
+    fn a_window_update_is_valid_on_either_scope() {
+        for stream_id in [0u32, 1] {
+            let stream = frame(FRAME_TYPE_WINDOW_UPDATE, 0, stream_id, &7u32.to_be_bytes());
+            assert_eq!(
+                iter_http2_frames(&stream).next().expect("one frame").body,
+                Http2FrameBody::WindowUpdate { increment: 7 }
+            );
+        }
     }
 
     #[test]
