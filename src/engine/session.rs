@@ -77,6 +77,10 @@ pub struct SessionStats {
     pub active_probes: usize,
     /// Bytes held across every probe.
     pub probe_bytes: usize,
+    /// Unfinished probes dropped to make room under the global byte cap.
+    pub probe_evictions: u64,
+    /// Directions retired because they reached a cap while still undecided.
+    pub probe_resource_limits: u64,
     /// The TCP reassembly underneath.
     pub tcp: TcpReassemblyStats,
 }
@@ -91,6 +95,8 @@ pub struct SessionTracker {
     max_probe_flows: usize,
     max_total_probe_bytes: usize,
     total_probe_bytes: usize,
+    probe_evictions: u64,
+    probe_resource_limits: u64,
     insertion_order: VecDeque<DirectionKey>,
 }
 
@@ -112,6 +118,8 @@ impl SessionTracker {
             max_probe_flows: DEFAULT_MAX_PROBE_FLOWS,
             max_total_probe_bytes: DEFAULT_MAX_TOTAL_PROBE_BYTES,
             total_probe_bytes: 0,
+            probe_evictions: 0,
+            probe_resource_limits: 0,
             insertion_order: VecDeque::new(),
         }
     }
@@ -144,6 +152,8 @@ impl SessionTracker {
         SessionStats {
             active_probes: self.probes.len(),
             probe_bytes: self.total_probe_bytes,
+            probe_evictions: self.probe_evictions,
+            probe_resource_limits: self.probe_resource_limits,
             tcp: self.tcp.stats(),
         }
     }
@@ -262,24 +272,38 @@ impl SessionTracker {
         if state.done {
             return None;
         }
+        let wanted = contiguous.len();
+        // Make room globally before appending, so one direction sitting on the
+        // budget cannot stop every later stream from being classified.
+        self.make_room_for(&key, wanted);
+        let state = self.probes.get_mut(&key)?;
+
         let per_direction_remaining = self.max_probe_bytes.saturating_sub(state.bytes.len());
         let total_remaining = self
             .max_total_probe_bytes
             .saturating_sub(self.total_probe_bytes);
-        let append_len = per_direction_remaining
-            .min(total_remaining)
-            .min(contiguous.len());
+        let append_len = per_direction_remaining.min(total_remaining).min(wanted);
         if let Some(bytes) = contiguous.get(..append_len) {
             state.bytes.extend_from_slice(bytes);
             self.total_probe_bytes = self.total_probe_bytes.saturating_add(bytes.len());
         }
+        let at_direction_cap = state.bytes.len() >= self.max_probe_bytes;
 
         // A direction that is finished with, matched or not, gives its buffer
         // back. Holding bytes for a stream no protocol can ever claim is how
         // the global probe budget fills up and stops classifying everything
         // else.
         let l7 = match classify_stream(&state.bytes) {
-            StreamProbeState::NeedMore => return None,
+            StreamProbeState::NeedMore => {
+                // Still undecided with no room left to decide in. Retiring it
+                // is the honest outcome: a cap should degrade predictably, not
+                // leave a direction buffering forever.
+                if at_direction_cap {
+                    Self::retire_probe(state, &mut self.total_probe_bytes);
+                    self.probe_resource_limits = self.probe_resource_limits.saturating_add(1);
+                }
+                return None;
+            }
             StreamProbeState::Terminal => {
                 Self::retire_probe(state, &mut self.total_probe_bytes);
                 return None;
@@ -294,6 +318,27 @@ impl SessionTracker {
             dst_port,
             l7,
         })
+    }
+
+    /// Drops the oldest unfinished probes until `wanted` bytes fit under the
+    /// global cap, leaving `keep` alone.
+    fn make_room_for(&mut self, keep: &DirectionKey, wanted: usize) {
+        while self.total_probe_bytes.saturating_add(wanted) > self.max_total_probe_bytes {
+            let Some(position) = self
+                .insertion_order
+                .iter()
+                .position(|queued| queued != keep && self.probes.contains_key(queued))
+            else {
+                break;
+            };
+            let Some(victim) = self.insertion_order.remove(position) else {
+                break;
+            };
+            if let Some(state) = self.probes.remove(&victim) {
+                self.total_probe_bytes = self.total_probe_bytes.saturating_sub(state.bytes.len());
+                self.probe_evictions = self.probe_evictions.saturating_add(1);
+            }
+        }
     }
 
     /// Marks a direction done and releases the bytes it was holding.
@@ -765,11 +810,13 @@ mod tests {
         }
     }
 
+    /// The global cap is shared, so pressure evicts the oldest unfinished
+    /// probe rather than truncating the newest. Truncating leaves a direction
+    /// that can never decide.
     #[test]
-    fn total_probe_bytes_cap_applies_across_flows() {
+    fn global_pressure_evicts_the_oldest_probe() {
         let mut tracker = SessionTracker::new().with_max_total_probe_bytes(10);
 
-        // Incomplete request (no \r\n\r\n yet): 6 bytes held, under budget.
         assert!(
             tracker
                 .offer_frame(&tcp_frame(SRC_PORT, 1_000, false, b"GET /a"))
@@ -777,15 +824,64 @@ mod tests {
         );
         assert_eq!(tracker.probe_bytes(), 6);
 
-        // A different flow's incomplete probe pushes the combined total to
-        // the 10-byte cap - only the remaining budget (4 bytes) is accepted,
-        // even though this flow alone is well under any per-direction limit.
+        // A second flow needs room the first is holding.
         assert!(
             tracker
                 .offer_frame(&tcp_frame(2_000, 1_000, false, b"GET /b"))
                 .is_none()
         );
-        assert_eq!(tracker.probe_bytes(), 10);
+        assert_eq!(
+            tracker.probe_bytes(),
+            6,
+            "the newest probe holds its bytes whole"
+        );
+        assert_eq!(tracker.stats().probe_evictions, 1);
+    }
+
+    /// The case that matters: a flow sitting on the budget must not stop a
+    /// later, immediately recognisable stream from being classified.
+    #[test]
+    fn pressure_does_not_stop_a_later_stream_from_classifying() {
+        let request = b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n";
+        // Exactly enough for the request, so without eviction the four bytes
+        // the first flow holds would truncate it out of recognition.
+        let mut tracker = SessionTracker::new().with_max_total_probe_bytes(request.len());
+
+        // A flow that will never decide, holding most of the budget.
+        assert!(
+            tracker
+                .offer_frame(&tcp_frame(SRC_PORT, 1_000, false, b"GET "))
+                .is_none()
+        );
+
+        let event = tracker.offer_frame(&tcp_frame(2_000, 1_000, false, request));
+        assert!(
+            event.is_some(),
+            "a recognisable stream must still classify under pressure"
+        );
+    }
+
+    /// A direction that reaches its own cap while still undecided is retired,
+    /// not left buffering forever.
+    #[test]
+    fn a_direction_that_cannot_decide_within_its_cap_is_retired() {
+        let mut tracker = SessionTracker::with_limits(16);
+
+        // A TLS record header promising far more than the cap allows.
+        let mut record = vec![0x16, 0x03, 0x01, 0xff, 0x00];
+        record.extend([0x42; 32]);
+        assert!(
+            tracker
+                .offer_frame(&tcp_frame(SRC_PORT, 1_000, false, &record))
+                .is_none()
+        );
+
+        assert_eq!(
+            tracker.probe_bytes(),
+            0,
+            "the direction gave its buffer back rather than pinning it"
+        );
+        assert_eq!(tracker.stats().probe_resource_limits, 1);
     }
 
     #[test]
