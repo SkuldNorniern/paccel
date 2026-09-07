@@ -3,10 +3,13 @@
 use std::net::{IpAddr, Ipv4Addr};
 
 use libfuzzer_sys::fuzz_target;
-use paccel::engine::QuicConnectionTracker;
+use paccel::engine::{Endpoint, QuicConnectionTracker};
 
 // Drives the tracker as a state machine: the bugs are in the indices, not in
 // any one parse. After every step, no index may outlive what it points at.
+//
+// Both endpoints issue connection IDs, because each numbers its own from zero
+// and a one-sided driver cannot reach the collision between the two pools.
 fuzz_target!(|data: &[u8]| {
     let src = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     let dst = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
@@ -32,6 +35,12 @@ fuzz_target!(|data: &[u8]| {
         let (cid, rest) = cursor.split_at(take);
         cursor = rest;
         let now = u64::from(port_byte);
+        // Alternate which end issues, so both sequence spaces are exercised.
+        let issuer = if op & 0x40 == 0 {
+            Endpoint::new(src, port)
+        } else {
+            Endpoint::new(dst, 443)
+        };
 
         match op % 6 {
             0 => {
@@ -48,7 +57,13 @@ fuzz_target!(|data: &[u8]| {
                     .first()
                     .and_then(|first| tracker.connection_id_for_dcid(first))
                 {
-                    tracker.observe_new_connection_id(id, u64::from(len_byte), cid, u64::from(op));
+                    tracker.observe_new_connection_id(
+                        id,
+                        issuer,
+                        u64::from(len_byte),
+                        cid,
+                        u64::from(op % 4),
+                    );
                     if !cid.is_empty() && cid.len() <= 20 {
                         announced.push(cid.to_vec());
                     }
@@ -59,7 +74,7 @@ fuzz_target!(|data: &[u8]| {
                     .first()
                     .and_then(|first| tracker.connection_id_for_dcid(first))
                 {
-                    tracker.observe_retire_connection_id(id, u64::from(len_byte));
+                    tracker.observe_retire_connection_id(id, issuer, u64::from(len_byte));
                 }
             }
             4 => {
