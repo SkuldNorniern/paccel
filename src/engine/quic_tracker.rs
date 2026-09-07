@@ -44,24 +44,18 @@ pub struct QuicConnectionId(u64);
 
 #[derive(Debug)]
 struct QuicConnectionState {
-    /// The endpoint that did not initiate. Direction is measured against it, so
-    /// that a client changing address keeps the same two directions.
-    ///
-    /// Taken from the destination of the first long header seen, which in a
-    /// capture that starts at the handshake is the server. A capture joined
-    /// mid-connection, or one where the server's packet is seen first, can
-    /// anchor on the wrong end; directions are then consistent but swapped.
+    /// The endpoint that did not initiate, taken from the destination of the
+    /// first long header. Direction is measured against it so a client that
+    /// changes address keeps the same two directions. A capture joined
+    /// mid-connection can anchor on the wrong end and swap them.
     responder: Endpoint,
     /// Every tuple this connection has been seen on, most recent last.
     tuples: Vec<BiFlow>,
     /// Indexed by direction: 0 toward the responder, 1 away from it.
     expected_dcids: [Option<Vec<u8>>; 2],
-    /// Connection IDs announced for this connection, with the sequence number
-    /// that named each. Ordered by sequence number.
-    ///
-    /// RFC 9000 sec 5.1.1: an endpoint may issue several at once and retire
-    /// them out of order, so the sequence number, not arrival, decides what is
-    /// still live.
+    /// Announced connection IDs, ordered by sequence number. RFC 9000 sec
+    /// 5.1.1 lets an endpoint issue several at once and retire them out of
+    /// order, so the sequence number decides what is live, not arrival.
     issued_cids: Vec<(u64, Vec<u8>)>,
     last_seen: LastSeen,
     largest_packet_numbers: [[Option<u64>; 3]; 2],
@@ -103,34 +97,18 @@ pub struct QuicTrackerStats {
 
 /// Tracks connection IDs and packet numbers for each direction of a connection.
 ///
-/// State lives on the connection, not on the address pair carrying it. Tuples
-/// and connection IDs are both indices into it:
+/// State lives on the connection, not the address pair carrying it; tuples and
+/// connection IDs are both indices into it, so a move keeps its state.
 ///
-/// ```text
-/// 5-tuple ────┐
-/// CID ────────┼──> QuicConnectionId ──> packet numbers, expected DCIDs
-/// old tuple ──┘
-/// ```
-///
-/// So a connection that changes address keeps its packet-number state.
-/// [`Self::classify_short_header`] recognises the moved packet by its ID, and
-/// [`Self::observe_short_header`] binds the new tuple to the connection it
-/// names.
-///
-/// Direction is measured against the responder, the end that did not initiate,
-/// rather than against the tuple, because the tuple's own ordering is not
-/// stable across a move. The responder is taken to be the destination of the
-/// first packet seen, which in a capture that starts at the handshake is the
-/// server. A capture joined mid-connection can anchor on the wrong end;
-/// directions are then consistent with each other but swapped.
+/// [`Self::classify_short_header`] recognises a moved packet by its ID, and
+/// [`Self::observe_short_header`] binds the new tuple. Direction is measured
+/// against the responder, since the tuple's ordering is not stable across a
+/// move.
 #[derive(Debug)]
 pub struct QuicConnectionTracker {
-    /// Every connection-ID length seen, as a bit per length.
-    ///
-    /// A short header carries no length field, so one has to be assumed before
-    /// the ID can be read. The tuple's own learned length is tried first; this
-    /// is what lets a packet from a tuple that has never been seen - the shape
-    /// of a migration - still be matched by its ID.
+    /// Every connection-ID length seen, as a bit per length. A short header
+    /// carries no length field, so one has to be assumed; trying the lengths
+    /// other connections used is what matches a packet from a moved tuple.
     cid_lengths: u32,
     max_flows: usize,
     connections: HashMap<QuicConnectionId, QuicConnectionState>,
@@ -190,12 +168,10 @@ impl QuicConnectionTracker {
         self.observe_long_header_inner(src, src_port, dst, dst_port, scid, Some(now));
     }
 
-    /// Drop every dated connection last seen before `cutoff`, along with the
-    /// tuples and connection IDs that pointed at it. Undated connections are
-    /// left to the capacity limit.
+    /// Drop every dated connection last seen before `cutoff`, and the tuples
+    /// and IDs pointing at it. Undated ones are left to the capacity limit.
     ///
-    /// Returns the number of connections dropped, not tuples: a migrated
-    /// connection expires once however many addresses it used.
+    /// Counts connections, not tuples: a migrated one expires once.
     pub fn expire_before(&mut self, cutoff: Timestamp) -> usize {
         let before = self.connections.len();
         self.connections
@@ -264,12 +240,9 @@ impl QuicConnectionTracker {
         self.by_cid.insert(scid.to_vec(), id);
     }
 
-    /// Binds the arrival tuple of a short-header packet to the connection its
-    /// DCID names, so that packet-number state follows a connection that moved.
-    /// Returns the connection, or `None` when the DCID is not known.
-    ///
-    /// [`Self::classify_short_header`] only reads; this is what records the
-    /// move.
+    /// Binds a short header's arrival tuple to the connection its DCID names,
+    /// so packet-number state follows a move. `None` if the DCID is unknown.
+    /// [`Self::classify_short_header`] only reads; this records the move.
     pub fn observe_short_header(
         &mut self,
         src: IpAddr,
@@ -335,12 +308,9 @@ impl QuicConnectionTracker {
     /// Records a NEW_CONNECTION_ID frame: `cid` becomes another way to reach
     /// `id`, and everything below `retire_prior_to` stops resolving.
     ///
-    /// RFC 9000 sec 19.15. Re-announcing a sequence number with different bytes
-    /// is a protocol violation; the newer bytes win here rather than the frame
-    /// being dropped, since a capture cannot make the peer behave.
-    ///
-    /// A connection ID longer than 20 bytes is refused, as RFC 9000 sec 5.1.1
-    /// does not allow it. Returns whether the ID was recorded.
+    /// RFC 9000 sec 19.15. Re-announcing a sequence number is a violation; the
+    /// newer bytes win, since a capture cannot make the peer behave. An ID over
+    /// 20 bytes is refused. Returns whether the ID was recorded.
     pub fn observe_new_connection_id(
         &mut self,
         id: QuicConnectionId,
@@ -393,9 +363,8 @@ impl QuicConnectionTracker {
     /// Records a RETIRE_CONNECTION_ID frame: the ID at `sequence_number` stops
     /// resolving to `id`. Returns whether there was one to retire.
     ///
-    /// RFC 9000 sec 19.16. The connection itself survives - retiring one of its
-    /// identifiers is routine, and other identifiers and its address pairs
-    /// still reach it.
+    /// RFC 9000 sec 19.16. The connection survives; its other IDs and address
+    /// pairs still reach it.
     pub fn observe_retire_connection_id(
         &mut self,
         id: QuicConnectionId,
@@ -603,11 +572,9 @@ impl QuicConnectionTracker {
 
     /// Points `key` at `id`, recording a migration when the tuple is new.
     ///
-    /// An address pair can be reused by a new connection - a port comes back
-    /// round, or a NAT rebinds - so binding it here may take it from whoever
-    /// held it. The previous holder is told, because a connection left with a
-    /// tuple it no longer owns reports addresses that reach a different
-    /// connection, and can never be removed through that address again.
+    /// An address pair can be reused - a port comes round, a NAT rebinds - so
+    /// this may take it from whoever held it. The previous holder is told, or
+    /// it reports an address that now reaches someone else.
     fn bind_tuple(&mut self, id: QuicConnectionId, key: BiFlow) {
         match self.by_tuple.insert(key, id) {
             Some(previous) if previous == id => return,

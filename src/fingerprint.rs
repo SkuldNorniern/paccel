@@ -228,6 +228,7 @@ mod tests {
 
     fn hello() -> TlsClientHello {
         TlsClientHello {
+            truncated: false,
             record_version: 0,
             handshake_version: 0,
             client_random: [0u8; 32],

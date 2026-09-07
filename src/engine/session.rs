@@ -384,18 +384,13 @@ fn tcp_payload<'a>(raw: &'a [u8], parsed: &ParsedPacket, tcp: &TcpHeader) -> Opt
 /// means the stream may still become this protocol and the caller keeps
 /// buffering; `Malformed` means it claimed to be and was not, so nothing else
 /// is tried.
-/// Tries each protocol against the bytes reassembled so far.
+/// Tries each protocol against the bytes reassembled so far, strongest
+/// signature first. MQTT is last: a control packet is little more than a type
+/// nibble and a length.
 ///
-/// Ordered strongest signature first. TLS, BGP and SMB carry fixed bytes; HTTP
-/// is recognisable text; LDAP and DNS are checked structurally; MQTT is last
-/// because a control packet is little more than a type nibble and a length,
-/// and would otherwise claim streams belonging to the others.
-///
-/// A probe reporting `Incomplete` stops the walk and returns nothing, because
-/// the bytes that would decide it have not arrived: trying a weaker protocol on
-/// the same prefix is how a stream gets misidentified. `NoMatch` moves on, and
-/// `Malformed` stops - the protocol was recognised and its own message is
-/// broken, so no other protocol should claim it.
+/// `Incomplete` stops the walk - the deciding bytes have not arrived, and
+/// trying a weaker protocol on the same prefix is how a stream gets
+/// misidentified. `NoMatch` moves on; `Malformed` stops.
 fn probe_l7(bytes: &[u8]) -> Option<StreamL7> {
     macro_rules! try_probe {
         ($probe:expr, $variant:expr) => {

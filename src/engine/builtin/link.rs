@@ -89,12 +89,9 @@ fn is_common_ethertype(value: u16) -> bool {
     )
 }
 
-/// Four constrained fields, not one: the packet type, the address length, and
-/// the protocol all have to agree. The protocol check matters because the SLL
-/// address field is eight bytes holding a six-byte MAC, and the two bytes of
-/// padding sit exactly where an ethernet frame carries its ethertype. Captures
-/// exist whose padding reads as 0x0800, and without checking offset 14 those
-/// frames are taken for ethernet and mis-parsed.
+/// The SLL address field pads a six-byte MAC to eight, so its last two bytes
+/// sit where ethernet keeps its ethertype. Captures exist whose padding reads
+/// 0x0800, so the protocol at offset 14 has to be checked too.
 fn looks_like_sll(raw: &[u8]) -> bool {
     raw.len() >= SLL_HEADER_LEN
         && matches!(read_u16_be_at(raw, SLL_PACKET_TYPE_OFFSET), Some(packet_type) if packet_type <= 4)
@@ -138,11 +135,8 @@ fn is_vlan_ethertype(value: u16) -> bool {
 }
 
 pub(super) fn parse_link(raw: &[u8]) -> Result<(EthernetFrame, usize), LayerError> {
-    // The cooked-capture checks come first because they are the specific ones.
-    // Reading bytes 12 and 13 as an ethertype is a single weak signal, and an
-    // SLL frame has its address padding in exactly those two bytes, so letting
-    // it decide first takes cooked frames for ethernet whenever that padding
-    // happens to look like a protocol number.
+    // Cooked first: it checks four fields, the ethertype guess below checks
+    // one, and they read the same two bytes.
     if looks_like_sll(raw) {
         return parse_sll(raw);
     }
@@ -157,10 +151,8 @@ pub(super) fn parse_link(raw: &[u8]) -> Result<(EthernetFrame, usize), LayerErro
         return parse_ethernet(raw);
     }
 
-    // Nothing above recognised a link header, so the frame may have none at
-    // all. A capture written with LINKTYPE_RAW that reaches here without its
-    // linktype - a caller who has the bytes but not the file header - would
-    // otherwise have every packet read as a short ethernet frame and fail.
+    // Nothing recognised a link header, so there may be none. A LINKTYPE_RAW
+    // capture reaching here without its linktype fails every packet otherwise.
     if let Some(protocol) = looks_like_bare_ip(raw) {
         return Ok(synthetic_link_frame(protocol, 0));
     }
@@ -170,15 +162,8 @@ pub(super) fn parse_link(raw: &[u8]) -> Result<(EthernetFrame, usize), LayerErro
 
 /// Whether `raw` begins with an IP header and nothing before it.
 ///
-/// Deliberately strict: this runs only as a last resort, but a frame wrongly
-/// read as bare IP is silently mis-parsed rather than refused, which is worse
-/// than not detecting it. So the declared length must account for the frame
-/// exactly. A MAC address beginning 0x45 is common; one whose next two bytes
-/// also happen to equal the frame's own length is not.
-///
-/// The cost is that a raw capture cut short by a snaplen is not detected,
-/// since its declared length no longer matches what was kept. Callers that
-/// know the linktype should pass it and never reach here.
+/// The declared length must account for the frame exactly, because a wrong
+/// guess mis-parses silently. Pass the linktype and never reach here.
 pub(super) fn looks_like_bare_ip(raw: &[u8]) -> Option<u16> {
     const IPV4_MIN_HEADER_LEN: usize = 20;
     const IPV6_HEADER_LEN: usize = 40;
