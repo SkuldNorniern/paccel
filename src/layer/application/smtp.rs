@@ -1,6 +1,4 @@
-use std::str::from_utf8;
-
-use crate::layer::{Layer, LayerError, ParseError, ProbeResult};
+use crate::layer::{Layer, LayerError, ParseError, ProbeResult, looks_like_text_line};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SmtpMessage {
@@ -13,7 +11,10 @@ pub fn parse_smtp(payload: &[u8]) -> Result<SmtpMessage, LayerError> {
     if line_end == 0 {
         return Err(LayerError::InvalidLength);
     }
-    let line = from_utf8(&payload[..line_end]).map_err(|_| LayerError::InvalidHeader)?;
+    // Lossy, not refused: the encoding of the free-text part of a line says
+    // nothing about whether this is the protocol. See
+    // [`crate::layer::looks_like_text_line`].
+    let line = &String::from_utf8_lossy(&payload[..line_end]);
 
     if let Some(code) = parse_response_code(line) {
         let text = line.get(4..).unwrap_or("").trim_start().to_string();
@@ -47,7 +48,7 @@ pub fn probe_smtp(payload: &[u8]) -> ProbeResult<SmtpMessage> {
         };
     }
     let line_end = find_line_end(payload).unwrap_or(payload.len());
-    if line_end > 0 && from_utf8(&payload[..line_end]).is_err() {
+    if line_end > 0 && !looks_like_text_line(&payload[..line_end]) {
         return ProbeResult::NoMatch;
     }
     match parse_smtp(payload) {

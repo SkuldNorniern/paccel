@@ -7,12 +7,15 @@ use paccel::layer::application::cdp::probe_cdp;
 use paccel::layer::application::coap::probe_coap;
 use paccel::layer::application::dhcp::probe_dhcp;
 use paccel::layer::application::eigrp::probe_eigrp;
+use paccel::layer::application::ftp::probe_ftp;
 use paccel::layer::application::hsrp::probe_hsrp;
 use paccel::layer::application::http2::probe_http2;
+use paccel::layer::application::imap::probe_imap;
 use paccel::layer::application::isakmp::probe_isakmp;
 use paccel::layer::application::kerberos::{probe_kerberos_tcp, probe_kerberos_udp};
 use paccel::layer::application::lacp::probe_lacp;
 use paccel::layer::application::nat_pmp::probe_nat_pmp;
+use paccel::layer::application::nntp::probe_nntp;
 use paccel::layer::application::ntp::probe_ntp;
 use paccel::layer::application::ospf::probe_ospf;
 use paccel::layer::application::pcp::probe_pcp;
@@ -24,8 +27,10 @@ use paccel::layer::application::rpc::probe_rpc;
 use paccel::layer::application::rtcp::probe_rtcp;
 use paccel::layer::application::rtp::probe_rtp;
 use paccel::layer::application::sip::probe_sip;
+use paccel::layer::application::smtp::probe_smtp;
 use paccel::layer::application::snmp::probe_snmp;
 use paccel::layer::application::ssdp::probe_ssdp;
+use paccel::layer::application::ssh::probe_ssh_banner;
 use paccel::layer::application::stun::probe_stun;
 use paccel::layer::application::syslog::probe_syslog;
 use paccel::layer::application::telnet::probe_telnet;
@@ -572,4 +577,55 @@ fn a_truncated_quic_long_header_is_incomplete() {
         );
     }
     assert!(probe_quic_long_header(&full[..10]).is_incomplete());
+}
+
+/// A line holding a byte no UTF-8 decoder likes is still a protocol line.
+/// RFC 2640 sec 2 (FTP), RFC 6531 (SMTP) and RFC 3977 sec 3.1 (NNTP) all admit
+/// non-ASCII, and older servers send Latin-1 regardless. Reporting `NoMatch`
+/// on one accented filename does not merely lose the line: the probe walk
+/// falls through and a weaker protocol claims the stream.
+#[test]
+fn a_text_protocol_survives_a_byte_that_is_not_utf8() {
+    fn with_latin1(prefix: &[u8], suffix: &[u8]) -> Vec<u8> {
+        let mut line = prefix.to_vec();
+        line.push(0xe9);
+        line.extend(suffix);
+        line.extend(b"\r\n");
+        line
+    }
+
+    assert!(probe_ftp(&with_latin1(b"257 \"/home/caf", b"\" is current")).is_match());
+    assert!(probe_smtp(&with_latin1(b"250 Bonjour caf", b"")).is_match());
+    assert!(probe_imap(&with_latin1(b"* OK caf", b" ready")).is_match());
+    assert!(probe_nntp(&with_latin1(b"200 news.caf", b".com ready")).is_match());
+    assert!(probe_ssh_banner(&with_latin1(b"SSH-2.0-OpenSSH_9.6 caf", b"")).is_match());
+}
+
+/// The signal that a stream is not a text protocol is a control character, not
+/// the encoding. Loosening the encoding check must not loosen that.
+#[test]
+fn a_line_holding_control_characters_is_still_not_text() {
+    let mut binary = b"250 ".to_vec();
+    binary.extend([0x00, 0x01, 0x02, 0x1b, 0x7f]);
+    binary.extend(b"\r\n");
+
+    // A TLS record must not be claimed by any of them either.
+    let tls = vec![0x16u8, 0x03, 0x01, 0x02, 0x00, 0x01, 0x00, 0x01, 0xfc];
+
+    let claimed: Vec<&str> = [
+        ("ftp/binary", probe_ftp(&binary).is_match()),
+        ("smtp/binary", probe_smtp(&binary).is_match()),
+        ("imap/binary", probe_imap(&binary).is_match()),
+        ("nntp/binary", probe_nntp(&binary).is_match()),
+        ("ftp/tls", probe_ftp(&tls).is_match()),
+        ("smtp/tls", probe_smtp(&tls).is_match()),
+    ]
+    .into_iter()
+    .filter(|(_, matched)| *matched)
+    .map(|(name, _)| name)
+    .collect();
+    assert!(
+        claimed.is_empty(),
+        "these probes claimed a binary stream: {claimed:?}"
+    );
 }
