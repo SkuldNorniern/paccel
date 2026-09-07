@@ -5,14 +5,8 @@ use std::net::{IpAddr, Ipv4Addr};
 use libfuzzer_sys::fuzz_target;
 use paccel::engine::QuicConnectionTracker;
 
-// Drives the connection tracker as a state machine rather than feeding it one
-// packet, because its bugs live in the indices rather than in any single
-// parse. Tuples and connection IDs both point at connections, and every
-// operation below can invalidate one without the other: a migration binds a
-// second tuple, RETIRE_CONNECTION_ID drops an id, remove_flow drops a tuple,
-// and expiry drops whole connections. The invariant checked after each step is
-// that no index outlives what it points at, which is what stops a lookup
-// returning another connection's packet numbers.
+// Drives the tracker as a state machine: the bugs are in the indices, not in
+// any one parse. After every step, no index may outlive what it points at.
 fuzz_target!(|data: &[u8]| {
     let src = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     let dst = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));

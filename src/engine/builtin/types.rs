@@ -206,12 +206,9 @@ pub struct TcpOptionsParsed {
 pub struct GreInfo {
     pub protocol_type: u16,
     pub checksum_present: bool,
-    /// RFC 1701 sec 4.1. Deprecated by RFC 2784 sec 2.3.1, which requires a
-    /// receiver to discard packets that set it.
-    ///
-    /// When set, a variable-length source-route list follows the fixed fields,
-    /// so the payload cannot be located from the flags alone. paccel keeps the
-    /// header it read and declines to decode a payload it cannot find.
+    /// RFC 1701 sec 4.1, deprecated by RFC 2784 sec 2.3.1. When set, a
+    /// source-route list follows the fixed fields and the payload cannot be
+    /// located from the flags alone, so no inner packet is decoded.
     pub routing_present: bool,
     pub key_present: bool,
     pub sequence_present: bool,

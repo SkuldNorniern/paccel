@@ -102,16 +102,10 @@ impl BuiltinPacketParser {
         }
     }
 
-    /// Says which layer a [`LayerError`] came from, by reading how far the
-    /// parse got before it stopped.
+    /// Which layer a [`LayerError`] came from, read off how far the parse got.
     ///
-    /// The chain itself carries the smaller [`LayerError`], because widening it
-    /// would put a larger `Result` on the path every well-formed packet takes.
-    /// The context is recovered here instead, on the failure path only.
-    ///
-    /// `offset` is the start of the failing layer where the parse recorded one,
-    /// which today means a transport header and deeper. A failure in the link
-    /// or network header reports 0, since nothing before it was measured.
+    /// The chain keeps the smaller [`LayerError`]; context is recovered here so
+    /// the well-formed path pays nothing. `offset` reads 0 above the transport.
     #[cold]
     #[inline(never)]
     fn describe_failure(error: &LayerError, parsed: &ParsedPacket) -> ParseError {
@@ -287,11 +281,9 @@ impl BuiltinPacketParser {
         parsed.ethernet = Some(eth.clone());
 
         if l3_offset >= raw.len() {
-            // The link header parsed and there is nothing behind it. Strict
-            // refuses, but permissive already keeps a truncated IPv4 option
-            // list, IPv6 chain or transport header and says so, and the link
-            // header is no different: the addresses and any VLAN tags are
-            // good, and throwing them away loses the only thing the frame had.
+            // Addresses and VLAN tags are good; there is just nothing after
+            // them. Permissive keeps them, as it does a truncated IPv4 or
+            // transport header.
             if config.mode == ParseMode::Strict {
                 return Err(LayerError::InvalidLength);
             }
@@ -324,11 +316,8 @@ impl BuiltinPacketParser {
             parsed,
         );
 
-        // Permissive already keeps a truncated IPv4 option list, IPv6 chain or
-        // transport header and warns. A network header too short to parse at
-        // all was the one case that still threw the whole frame away, taking
-        // the addresses and VLAN tags with it. Whatever the network layer did
-        // manage to fill in stays, since the parse writes as it goes.
+        // A network header too short to parse was the one failure that still
+        // discarded the link addresses and VLAN tags with it.
         match result {
             Err(_) if config.mode == ParseMode::Permissive => {
                 parsed.warnings.push(ParseWarning {
@@ -472,11 +461,9 @@ impl BuiltinPacketParser {
                     return Ok(());
                 }
 
-                // Recorded before the transport parse, not after it. A strict
-                // parse that refuses the transport header returns from inside
-                // the block below, and a header already known good should not
-                // be thrown away on the way out - it is what tells a caller
-                // the failure was the transport's and not the network's.
+                // Before the transport parse: a strict refusal returns from
+                // inside the block below, and this header is what says the
+                // failure was the transport's.
                 let protocol = ipv4.protocol;
                 let fragment_offset = ipv4.fragment_offset;
                 parsed.ipv4 = Some(ipv4);
@@ -809,14 +796,11 @@ fn decode_pppoe_session(
     Ok(())
 }
 
-/// Where a GRE header's payload starts, or `None` when it cannot be located.
+/// Where a GRE payload starts, or `None` when it cannot be located.
 ///
-/// RFC 1701 sec 4.1 puts a variable-length source-route list after the fixed
-/// fields, terminated by a null entry, so with the routing bit set the payload
-/// does not begin at `header_len`. Decoding from there reads routing data as an
-/// inner packet. RFC 2784 sec 2.3.1 deprecates routing outright and tells
-/// receivers to discard, so the outer header is kept and nothing is invented
-/// for the inside.
+/// With the routing bit set, RFC 1701 sec 4.1 puts a source-route list after
+/// the fixed fields, so the payload is not at `header_len`. RFC 2784 sec 2.3.1
+/// deprecates routing and says discard.
 type GreInnerCandidate<'a> = (
     Option<&'a [u8]>,
     u16,
@@ -1372,10 +1356,8 @@ mod tests {
         )
         .expect_err("strict mode should reject truncated IPv4 UDP");
 
-        // The UDP header is entirely present; it is the IPv4 total_length of
-        // 40 that overruns the 28 captured bytes. So this is the network
-        // header failing, not the transport one, whatever the fixture's name
-        // suggests.
+        // The UDP header is whole; the IPv4 total_length of 40 overruns the 28
+        // captured bytes. Network failing, not transport, despite the name.
         assert_eq!(err.kind, crate::layer::ParseErrorKind::InvalidLength);
         assert_eq!(err.layer, crate::layer::Layer::Network);
     }

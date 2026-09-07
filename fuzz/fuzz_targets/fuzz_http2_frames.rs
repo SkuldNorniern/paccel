@@ -3,10 +3,8 @@
 use libfuzzer_sys::fuzz_target;
 use paccel::layer::application::http2::{iter_http2_frames, parse_http2_frames};
 
-// The typed iterator decodes frame bodies, which means padding arithmetic and
-// per-type length rules on attacker-controlled lengths - the shape of bug that
-// underflows a subtraction. It also has to agree with the header-only walk
-// about where each frame ends, or one of the two is reading the stream wrongly.
+// Padding arithmetic on attacker-controlled lengths, and the typed walk has to
+// agree with the header-only one about where each frame ends.
 fuzz_target!(|data: &[u8]| {
     let mut iter = iter_http2_frames(data);
     let mut previous_remainder = iter.remainder().len();
@@ -29,10 +27,8 @@ fuzz_target!(|data: &[u8]| {
         );
     }
 
-    // A full nine-byte header does not mean a consumable frame: the header
-    // declares a body length, and a stream cut before that body has arrived
-    // legitimately leaves the whole header in the remainder. That is what
-    // remainder() is for, so there is nothing to assert about its size here.
+    // A whole header can sit in the remainder: the body it declares may not
+    // have arrived. Nothing to assert about the remainder's size.
 
     let headers = parse_http2_frames(data);
     assert_eq!(

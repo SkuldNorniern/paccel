@@ -11,6 +11,8 @@ pub struct TlsClientHello {
     pub client_random: [u8; 32],
     pub cipher_suites: Vec<u16>,
     pub server_name: Option<String>,
+    /// An extension did not fit, so the ones after it are missing.
+    pub truncated: bool,
     pub alpn: Vec<String>,
     pub supported_versions: Vec<u16>,
     pub supported_groups: Vec<u16>,
@@ -104,6 +106,7 @@ pub fn parse_tls_client_hello(payload: &[u8]) -> Result<TlsClientHello, LayerErr
         client_random,
         cipher_suites,
         server_name: None,
+        truncated: false,
         alpn: Vec::new(),
         supported_versions: Vec::new(),
         supported_groups: Vec::new(),
@@ -111,9 +114,7 @@ pub fn parse_tls_client_hello(payload: &[u8]) -> Result<TlsClientHello, LayerErr
         signature_algorithms: Vec::new(),
         extension_types: Vec::new(),
     };
-    if !parse_extensions(extensions, &mut parsed) {
-        return Err(LayerError::InsufficientData);
-    }
+    parsed.truncated = !parse_extensions(extensions, &mut parsed);
     Ok(parsed)
 }
 
@@ -496,6 +497,7 @@ mod tests {
 
     fn client_hello() -> TlsClientHello {
         TlsClientHello {
+            truncated: false,
             record_version: 0,
             handshake_version: 0,
             client_random: [0u8; 32],
@@ -605,18 +607,42 @@ mod tests {
     }
 
     #[test]
-    fn rejects_incompletely_parsed_tls_extensions() {
+    fn an_extension_that_does_not_fit_is_reported_not_fatal() {
         let client = client_hello_record(&[0, 0, 0, 2, 0, 1]);
-        assert!(matches!(
-            parse_tls_client_hello(&client),
-            Err(LayerError::InsufficientData)
-        ));
+        let hello = parse_tls_client_hello(&client).expect("what parsed is kept");
+        assert!(hello.truncated);
 
         let server = server_hello_record(&[0, 0]);
         assert!(matches!(
             parse_tls_server_hello(&server),
             Err(LayerError::InsufficientData)
         ));
+    }
+
+    /// A ClientHello cut by a snaplen loses its trailing extensions. The name
+    /// is usually the first one, and is the field worth keeping.
+    #[test]
+    fn a_later_extension_that_does_not_fit_keeps_the_server_name() {
+        let mut extensions = Vec::new();
+        let host = b"example.com";
+        let list_len = u16::try_from(host.len() + 3).expect("short host");
+        extensions.extend([0x00, 0x00]);
+        extensions.extend(
+            u16::try_from(host.len() + 5)
+                .expect("short host")
+                .to_be_bytes(),
+        );
+        extensions.extend(list_len.to_be_bytes());
+        extensions.push(0);
+        extensions.extend(u16::try_from(host.len()).expect("short host").to_be_bytes());
+        extensions.extend(host);
+        // supported_groups claiming far more than it carries
+        extensions.extend([0x00, 0x0a, 0x00, 0xff, 0x00, 0x02, 0x00, 0x17]);
+
+        let hello =
+            parse_tls_client_hello(&client_hello_record(&extensions)).expect("the name survives");
+        assert_eq!(hello.server_name.as_deref(), Some("example.com"));
+        assert!(hello.truncated);
     }
 
     #[test]

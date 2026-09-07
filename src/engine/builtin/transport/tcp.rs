@@ -198,12 +198,8 @@ pub(super) fn parse_tcp_header(
         return Err(LayerError::InvalidHeader);
     }
 
-    // A data offset past what the capture kept leaves the twenty fixed bytes
-    // intact and only the options short, so the header is kept and the
-    // shortfall recorded. Refusing it here would discard a sequence number,
-    // flags and window that are all fully present - and paccel already keeps a
-    // truncated IPv4 option list on the same reasoning. The caller decides
-    // what to do about it: Strict refuses, Permissive warns.
+    // Only the options are short; the twenty fixed bytes are all there. Keep
+    // them and record the shortfall, as a truncated IPv4 option list does.
     let header_length = (data_offset as usize) * 4;
     let options_truncated = l4_bytes.len() < header_length;
     let available_header = header_length.min(l4_bytes.len());

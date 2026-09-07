@@ -1,9 +1,7 @@
 //! Endpoints and the bidirectional key the stateful engines share.
 //!
-//! TCP reassembly, session tracking and QUIC all group the two directions of a
-//! conversation under one key, and all three had their own copy of the type and
-//! of the normalisation. One copy means they cannot disagree about which side
-//! is `first`.
+//! TCP reassembly, session tracking and QUIC each had their own copy of this.
+//! One copy means they cannot disagree about which side is `first`.
 
 use std::net::IpAddr;
 
@@ -135,16 +133,14 @@ mod tests {
 
 /// Capture time in nanoseconds, supplied by the caller.
 ///
-/// Paccel never reads a clock. Live capture passes a monotonic reading, a pcap
-/// replay passes the packet's own timestamp, and a test passes whatever integer
-/// it likes; all three then age state the same way.
+/// Paccel never reads a clock, so a live capture, a pcap replay and a test all
+/// age state the same way.
 pub type Timestamp = u64;
 
 /// When an entry was last touched, for callers that age their state.
 ///
-/// `None` means nothing has been dated: entries fed through the untimed methods
-/// are never expired by [`Self::is_before`], so mixing the two is safe rather
-/// than quietly dropping everything.
+/// `None` means undated, and [`Self::is_before`] never expires those, so
+/// mixing the timed and untimed methods is safe.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct LastSeen(Option<Timestamp>);
 
@@ -170,11 +166,9 @@ impl LastSeen {
 
 /// What a reassembler did with one offered segment or frame.
 ///
-/// [`crate::engine::TcpStreamReassembler::offer`] and its QUIC counterpart
-/// return only the bytes that became contiguous, so an empty result covers
-/// several different outcomes: buffered behind a gap, a duplicate, a refused
-/// overlap, a flow that hit a limit. A consumer deciding whether traffic is
-/// suspicious needs to tell those apart.
+/// `offer` returns only the bytes that became contiguous, so an empty result
+/// covers buffered, duplicate, refused overlap and limit alike. This tells
+/// them apart.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum ReassemblyEvent {
