@@ -66,7 +66,10 @@ pub fn probe_dhcp6(payload: &[u8]) -> ProbeResult<Dhcp6Message> {
             available: 0,
         };
     };
-    if !matches!(message_type, 1..=13) {
+    // RFC 8415 sec 7.3 defines 1 to 13; IANA carries the registry on to 35
+    // with leasequery (RFC 5007), DHCPv4-over-DHCPv6 (RFC 7341) and failover
+    // (RFC 8156).
+    if !matches!(message_type, 1..=35) {
         return ProbeResult::NoMatch;
     }
     if payload.len() < DHCP6_FIXED_MESSAGE_LEN {
@@ -89,8 +92,23 @@ pub fn probe_dhcp6(payload: &[u8]) -> ProbeResult<Dhcp6Message> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Dhcp6Option, parse_dhcp6_message};
+    use super::{Dhcp6Option, parse_dhcp6_message, probe_dhcp6};
     use crate::layer::LayerError;
+    use crate::layer::ProbeResult;
+
+    /// The registry runs past RFC 8415's thirteen: leasequery (RFC 5007) and
+    /// DHCPv4-over-DHCPv6 (RFC 7341) are both in use.
+    #[test]
+    fn probes_the_message_types_added_after_rfc_8415() {
+        for message_type in [14u8, 20, 35] {
+            let message = [message_type, 0x00, 0x00, 0x01];
+            assert!(
+                probe_dhcp6(&message).is_match(),
+                "type {message_type} was refused"
+            );
+        }
+        assert!(matches!(probe_dhcp6(&[36, 0, 0, 1]), ProbeResult::NoMatch));
+    }
 
     #[test]
     fn parses_minimal_solicit() {

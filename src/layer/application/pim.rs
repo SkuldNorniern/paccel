@@ -1,6 +1,8 @@
 use crate::layer::{Layer, LayerError, ParseError, ProbeResult};
 
 const HEADER_LEN: usize = 4;
+/// The highest type IANA assigns; the field itself is four bits.
+const MAX_MESSAGE_TYPE: u8 = 12;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PimHeader {
@@ -16,8 +18,10 @@ pub fn parse_pim_header(payload: &[u8]) -> Result<PimHeader, LayerError> {
     if version != 2 {
         return Err(LayerError::InvalidHeader);
     }
+    // IANA assigns 0 to 12: RFC 7761 defines 0-8, RFC 3973 adds State Refresh,
+    // RFC 5015 DF Election, RFC 6754 ECMP Redirect and RFC 8364 PFM.
     let message_type = header[0] & 0x0f;
-    if message_type > 8 {
+    if message_type > MAX_MESSAGE_TYPE {
         return Err(LayerError::InvalidHeader);
     }
 
@@ -38,7 +42,7 @@ pub fn probe_pim(payload: &[u8]) -> ProbeResult<PimHeader> {
             available: payload.len(),
         };
     };
-    if head[0] >> 4 != 2 || head[0] & 0x0f > 8 {
+    if head[0] >> 4 != 2 || head[0] & 0x0f > MAX_MESSAGE_TYPE {
         return ProbeResult::NoMatch;
     }
     if payload.len() < HEADER_LEN {
@@ -63,6 +67,23 @@ pub fn probe_pim(payload: &[u8]) -> ProbeResult<PimHeader> {
 mod tests {
     use super::parse_pim_header;
     use crate::layer::LayerError;
+
+    /// IANA assigns PIM types past the eight of RFC 7761: State Refresh
+    /// (RFC 3973), DF Election (RFC 5015 BIDIR-PIM), ECMP Redirect (RFC 6754)
+    /// and PFM (RFC 8364) are all deployed.
+    #[test]
+    fn parses_the_types_added_after_rfc_7761() {
+        for message_type in 9..=12u8 {
+            let header = [0x20 | message_type, 0x00, 0x00, 0x00];
+            let parsed = parse_pim_header(&header);
+            assert!(parsed.is_ok(), "type {message_type} was refused");
+            assert_eq!(parsed.expect("checked").message_type, message_type);
+        }
+        assert!(
+            parse_pim_header(&[0x2d, 0, 0, 0]).is_err(),
+            "13 is unassigned"
+        );
+    }
 
     #[test]
     fn parses_pim_hello_header() {
