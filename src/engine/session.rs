@@ -274,11 +274,19 @@ impl SessionTracker {
             self.total_probe_bytes = self.total_probe_bytes.saturating_add(bytes.len());
         }
 
-        let l7 = probe_l7(&state.bytes)?;
-        state.done = true;
-        self.total_probe_bytes = self.total_probe_bytes.saturating_sub(state.bytes.len());
-        state.bytes.clear();
-        state.bytes.shrink_to_fit();
+        // A direction that is finished with, matched or not, gives its buffer
+        // back. Holding bytes for a stream no protocol can ever claim is how
+        // the global probe budget fills up and stops classifying everything
+        // else.
+        let l7 = match classify_stream(&state.bytes) {
+            StreamProbeState::NeedMore => return None,
+            StreamProbeState::Terminal => {
+                Self::retire_probe(state, &mut self.total_probe_bytes);
+                return None;
+            }
+            StreamProbeState::Match(l7) => *l7,
+        };
+        Self::retire_probe(state, &mut self.total_probe_bytes);
         Some(StreamEvent {
             src,
             src_port,
@@ -286,6 +294,14 @@ impl SessionTracker {
             dst_port,
             l7,
         })
+    }
+
+    /// Marks a direction done and releases the bytes it was holding.
+    fn retire_probe(state: &mut ProbeState, total_probe_bytes: &mut usize) {
+        state.done = true;
+        *total_probe_bytes = total_probe_bytes.saturating_sub(state.bytes.len());
+        state.bytes.clear();
+        state.bytes.shrink_to_fit();
     }
 
     /// Removes both directions of a flow, returning whether any state existed.
@@ -394,33 +410,110 @@ fn tcp_payload<'a>(raw: &'a [u8], parsed: &ParsedPacket, tcp: &TcpHeader) -> Opt
 /// means the stream may still become this protocol and the caller keeps
 /// buffering; `Malformed` means it claimed to be and was not, so nothing else
 /// is tried.
+/// What the classifier concluded about a direction's bytes so far.
+enum StreamProbeState {
+    Match(Box<StreamL7>),
+    /// A protocol is identified but its message is not complete, or nothing has
+    /// ruled the remaining candidates out yet. Keep buffering.
+    NeedMore,
+    /// No protocol can ever match these bytes. The buffer can go.
+    Terminal,
+}
+
+/// Whether an `Incomplete` from this probe means "this is mine, but short".
+///
+/// A probe that has matched a signature owns the stream, and trying a weaker
+/// protocol on the same prefix is how a stream gets misidentified. A probe that
+/// has only read a length field owns nothing: DNS-over-TCP reads MQTT's
+/// `10 0c` as a 4108-byte message and would otherwise shadow it, and LDAP's
+/// lone `0x30` tag is also MQTT PUBLISH's first byte.
+type Committed = fn(&[u8]) -> bool;
+
+fn tls_committed(bytes: &[u8]) -> bool {
+    // Content type and version, per RFC 8446 sec 5.1.
+    bytes.len() >= 3
+}
+
+fn http_committed(bytes: &[u8]) -> bool {
+    // Enough for the shortest method plus its space.
+    bytes.len() >= 4
+}
+
+fn bgp_committed(bytes: &[u8]) -> bool {
+    // The whole marker, per RFC 4271 sec 4.1.
+    bytes.len() >= 16
+}
+
+fn smb_committed(bytes: &[u8]) -> bool {
+    // The direct-TCP prefix and the protocol id behind it.
+    bytes.len() >= 8
+}
+
+fn never_committed(_: &[u8]) -> bool {
+    false
+}
+
+/// What a probe that did not match means for the rest of the walk.
+enum Step {
+    /// This probe owns the stream and has decided for it.
+    Stop(StreamProbeState),
+    /// It cannot decide and has no claim, so the next protocol still might.
+    Undecided,
+    /// Ruled out.
+    Next,
+}
+
+fn step_after<T>(result: &ProbeResult<T>, bytes: &[u8], committed: Committed) -> Step {
+    match result {
+        // Only a probe that matched a signature has standing to call the
+        // stream broken, or to hold it while the rest arrives. LDAP reports
+        // malformed off a lone 0x30, which is also MQTT PUBLISH's first byte.
+        ProbeResult::Malformed(_) if committed(bytes) => Step::Stop(StreamProbeState::Terminal),
+        ProbeResult::Incomplete { .. } if committed(bytes) => {
+            Step::Stop(StreamProbeState::NeedMore)
+        }
+        ProbeResult::Incomplete { .. } => Step::Undecided,
+        ProbeResult::Match(_) | ProbeResult::Malformed(_) | ProbeResult::NoMatch => Step::Next,
+    }
+}
+
 /// Tries each protocol against the bytes reassembled so far, strongest
 /// signature first. MQTT is last: a control packet is little more than a type
 /// nibble and a length.
-///
-/// `Incomplete` stops the walk - the deciding bytes have not arrived, and
-/// trying a weaker protocol on the same prefix is how a stream gets
-/// misidentified. `NoMatch` moves on; `Malformed` stops.
-fn probe_l7(bytes: &[u8]) -> Option<StreamL7> {
-    macro_rules! try_probe {
-        ($probe:expr, $variant:expr) => {
-            match $probe {
-                ProbeResult::Match(value) => return Some($variant(value)),
-                ProbeResult::Incomplete { .. } | ProbeResult::Malformed(_) => return None,
-                ProbeResult::NoMatch => {}
+fn classify_stream(bytes: &[u8]) -> StreamProbeState {
+    macro_rules! walk {
+        ($($probe:expr, $variant:expr, $committed:expr;)*) => {{
+            let mut waiting = false;
+            $(
+                match $probe {
+                    ProbeResult::Match(value) => {
+                        return StreamProbeState::Match(Box::new($variant(value)));
+                    }
+                    other => match step_after(&other, bytes, $committed) {
+                        Step::Stop(state) => return state,
+                        Step::Undecided => waiting = true,
+                        Step::Next => {}
+                    },
+                }
+            )*
+            if waiting {
+                StreamProbeState::NeedMore
+            } else {
+                StreamProbeState::Terminal
             }
-        };
+        }};
     }
 
-    try_probe!(probe_tls_client_hello(bytes), StreamL7::Tls);
-    try_probe!(probe_http(bytes), StreamL7::Http);
-    try_probe!(probe_bgp(bytes), StreamL7::Bgp);
-    try_probe!(probe_smb2(bytes), StreamL7::Smb2);
-    try_probe!(probe_smb1(bytes), StreamL7::Smb1);
-    try_probe!(probe_ldap(bytes), StreamL7::Ldap);
-    try_probe!(probe_dns_over_tcp(bytes), StreamL7::Dns);
-    try_probe!(probe_mqtt(bytes), StreamL7::Mqtt);
-    None
+    walk! {
+        probe_tls_client_hello(bytes), StreamL7::Tls, tls_committed;
+        probe_http(bytes), StreamL7::Http, http_committed;
+        probe_bgp(bytes), StreamL7::Bgp, bgp_committed;
+        probe_smb2(bytes), StreamL7::Smb2, smb_committed;
+        probe_smb1(bytes), StreamL7::Smb1, smb_committed;
+        probe_ldap(bytes), StreamL7::Ldap, never_committed;
+        probe_dns_over_tcp(bytes), StreamL7::Dns, never_committed;
+        probe_mqtt(bytes), StreamL7::Mqtt, never_committed;
+    }
 }
 
 fn direction_key(src: IpAddr, src_port: u16, dst: IpAddr, dst_port: u16) -> DirectionKey {
@@ -789,6 +882,88 @@ mod tests {
         assert!(matches!(event.l7, StreamL7::Dns(_)));
     }
 
+    /// An MQTT CONNECT opens `10 0c`, which DNS-over-TCP reads as a 4108-byte
+    /// message and reports incomplete. DNS has matched no signature there, only
+    /// a length, so it must not stop the walk before MQTT is tried.
+    #[test]
+    fn a_length_prefix_guess_does_not_shadow_mqtt() {
+        let mut connect = vec![0x10, 0x0c];
+        connect.extend([0x00, 0x04]);
+        connect.extend(b"MQTT");
+        connect.extend([0x05, 0x02, 0x00, 0x3c, 0x00, 0x00, 0x00]);
+
+        assert!(
+            probe_dns_over_tcp(&connect).is_incomplete(),
+            "the fixture must look incomplete to dns for this to test anything"
+        );
+        assert!(matches!(
+            classify_stream(&connect),
+            StreamProbeState::Match(_)
+        ));
+    }
+
+    /// A QoS-0 MQTT PUBLISH opens `0x30`, which is also LDAP's BER SEQUENCE
+    /// tag. One tag byte is not a signature.
+    #[test]
+    fn a_ber_tag_does_not_shadow_mqtt() {
+        // A whole PUBLISH, so a Match proves mqtt was reached rather than the
+        // walk merely ending up undecided.
+        let mut publish = vec![0x30, 0x09];
+        publish.extend([0x00, 0x05]);
+        publish.extend(b"topic");
+        publish.extend(b"hi");
+
+        assert!(
+            matches!(probe_ldap(&publish), ProbeResult::Malformed(_)),
+            "the fixture must look malformed to ldap for this to test anything"
+        );
+        let state = classify_stream(&publish);
+        assert!(
+            matches!(state, StreamProbeState::Match(_)),
+            "ldap's lone 0x30 stopped the walk before mqtt"
+        );
+    }
+
+    /// A committed probe still owns the stream: TLS has matched a record
+    /// header, so a weaker protocol must not be tried on the same prefix.
+    #[test]
+    fn a_committed_probe_still_stops_the_walk() {
+        let partial_tls_record = [0x16u8, 0x03, 0x01, 0x02, 0x00];
+        assert!(matches!(
+            classify_stream(&partial_tls_record),
+            StreamProbeState::NeedMore
+        ));
+    }
+
+    /// Bytes no protocol can claim must not be held: the global probe budget
+    /// is shared, and one dead stream holding its buffer costs every other.
+    #[test]
+    fn a_stream_no_protocol_claims_gives_its_buffer_back() {
+        let mut tracker = SessionTracker::new();
+        tracker.offer_frame(&tcp_frame(SRC_PORT, 100, true, &[]));
+
+        // Long enough for every probe to have checked its signature: BGP
+        // cannot rule itself out until its sixteen-byte marker has arrived, so
+        // a shorter fixture is legitimately still undecided. The leading pair
+        // is too small to be a DNS-over-TCP length.
+        let junk = [
+            0x00u8, 0x05, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
+            0x0f, 0x10, 0x11, 0x12, 0x13, 0x14,
+        ];
+        assert!(matches!(classify_stream(&junk), StreamProbeState::Terminal));
+
+        assert!(
+            tracker
+                .offer_frame(&tcp_frame(SRC_PORT, 101, false, &junk))
+                .is_none()
+        );
+        assert_eq!(
+            tracker.probe_bytes(),
+            0,
+            "a terminal direction holds nothing"
+        );
+    }
+
     /// The first five bytes of a TLS record are also a well formed MQTT
     /// control packet: 0x16 is a PUBREL type nibble and 0x03 a remaining
     /// length. TLS reports `Incomplete` on them and MQTT reports `Match`, so
@@ -812,7 +987,10 @@ mod tests {
         );
 
         assert!(
-            probe_l7(&partial_tls_record).is_none(),
+            matches!(
+                classify_stream(&partial_tls_record),
+                StreamProbeState::NeedMore
+            ),
             "a half-arrived tls record must not be reported as mqtt"
         );
     }
