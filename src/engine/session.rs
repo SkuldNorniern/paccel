@@ -383,6 +383,11 @@ fn ip_endpoints(parsed: &ParsedPacket) -> Option<(IpAddr, IpAddr)> {
     }
 }
 
+/// Where the TCP payload sits in the frame the caller handed over.
+///
+/// `payload_offset` is right for every link type: a raw IP capture gets a
+/// synthetic link header with an offset of zero, and a cooked one gets its
+/// real 16-byte offset. See `looks_like_bare_ip`.
 fn tcp_payload<'a>(raw: &'a [u8], parsed: &ParsedPacket, tcp: &TcpHeader) -> Option<&'a [u8]> {
     let l3_offset = parsed.ethernet.as_ref()?.payload_offset;
     let (ip_header_len, ip_packet_len) = if let Some(ipv4) = parsed.ipv4.as_ref() {
@@ -1059,6 +1064,47 @@ mod tests {
             event.is_some(),
             "the recreated probe was evicted by its own stale queue entry"
         );
+    }
+
+    /// The request bytes of `tcp_frame`, without its ethernet header.
+    fn bare_ipv4_request() -> Vec<u8> {
+        let framed = tcp_frame(SRC_PORT, 1_000, false, REQUEST);
+        framed[14..].to_vec()
+    }
+
+    /// The same, behind a Linux cooked header instead.
+    fn cooked_request() -> Vec<u8> {
+        let mut frame = vec![0x00, 0x00];
+        frame.extend([0x00, 0x01]);
+        frame.extend([0x00, 0x06]);
+        frame.extend([0, 1, 2, 3, 4, 5, 0x00, 0x00]);
+        frame.extend([0x08, 0x00]);
+        frame.extend(bare_ipv4_request());
+        frame
+    }
+
+    const REQUEST: &[u8] = b"GET /index.html HTTP/1.1\r\nHost: example.com\r\n\r\n";
+
+    /// The parser accepts a raw IP or cooked capture, so the tracker has to as
+    /// well. Requiring an ethernet header made it silently see nothing.
+    #[test]
+    fn a_stream_is_tracked_without_an_ethernet_header() {
+        for (label, frame) in [
+            ("bare ipv4", bare_ipv4_request()),
+            ("linux cooked", cooked_request()),
+        ] {
+            let mut tracker = SessionTracker::new();
+            let event = tracker.offer_frame(&frame);
+            let Some(event) = event else {
+                panic!("{label} produced no stream event");
+            };
+            match event.l7 {
+                StreamL7::Http(HttpMessage::Request { target, .. }) => {
+                    assert_eq!(target, "/index.html", "{label}");
+                }
+                other => panic!("{label} gave {other:?}"),
+            }
+        }
     }
 
     #[test]

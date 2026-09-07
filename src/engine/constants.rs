@@ -9,6 +9,9 @@ pub mod ethertype {
     pub const PPPOE_SESSION: u16 = 0x8864;
     pub const TRANSPARENT_ETHERNET_BRIDGING: u16 = 0x6558;
     pub const QINQ_8021AD: u16 = 0x88A8;
+    /// The QinQ ethertype in use before 802.1ad settled on 0x88A8. Still
+    /// configurable, and the default, on a lot of deployed gear.
+    pub const QINQ_LEGACY: u16 = 0x9100;
     pub const SLOW_PROTOCOLS: u16 = 0x8809;
     pub const LLDP: u16 = 0x88CC;
     pub const PTP_1588: u16 = 0x88F7;
@@ -44,7 +47,7 @@ pub fn ethertype_name(value: u16) -> &'static str {
         ethertype::MPLS_MULTICAST => "mpls-multicast",
         ethertype::PPPOE_DISCOVERY => "pppoe-discovery",
         ethertype::PPPOE_SESSION => "pppoe-session",
-        ethertype::QINQ_8021AD => "qinq",
+        ethertype::QINQ_8021AD | ethertype::QINQ_LEGACY => "qinq",
         ethertype::SLOW_PROTOCOLS => "slow-protocols",
         ethertype::LLDP => "lldp",
         ethertype::PTP_1588 => "ptp",
