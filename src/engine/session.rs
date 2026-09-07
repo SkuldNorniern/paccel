@@ -171,6 +171,16 @@ impl SessionTracker {
                 true
             }
         });
+
+        // The queue and the generations have to follow, or an expired key stays
+        // queued: the same flow comes back, gets queued again, and the eviction
+        // that pops the stale entry removes the live probe instead. The
+        // reassemblers rebuild theirs after expiry for the same reason.
+        let probes = &self.probes;
+        self.insertion_order.retain(|key| probes.contains_key(key));
+        self.generations
+            .retain(|flow, _| probes.keys().any(|key| &key.flow == flow));
+
         self.tcp.expire_before(cutoff);
         before - self.probes.len()
     }
@@ -823,6 +833,54 @@ mod tests {
             ))
             .expect("an http request is a stream event");
         assert!(matches!(event.l7, StreamL7::Http(_)), "got {:?}", event.l7);
+    }
+
+    /// Expiring a probe has to take its queue entry with it. Otherwise the
+    /// same flow comes back, is queued a second time, and the eviction that
+    /// pops the stale entry removes the live probe under that key - throwing
+    /// out the newest flow while older ones survive.
+    #[test]
+    fn an_expired_probe_does_not_leave_its_queue_entry_behind() {
+        let mut tracker = SessionTracker::new().with_max_probe_flows(3);
+        let open_flow = |tracker: &mut SessionTracker, port: u16, now: Option<Timestamp>| {
+            let syn = tcp_frame(port, 100, true, &[]);
+            let data = tcp_frame(port, 101, false, b"GET ");
+            match now {
+                Some(now) => {
+                    tracker.offer_frame_at(&syn, now);
+                    tracker.offer_frame_at(&data, now);
+                }
+                None => {
+                    tracker.offer_frame(&syn);
+                    tracker.offer_frame(&data);
+                }
+            }
+        };
+
+        // A is dated, so it expires. B and C are undated and stay.
+        open_flow(&mut tracker, SRC_PORT, Some(10));
+        assert_eq!(tracker.expire_before(20), 1);
+
+        open_flow(&mut tracker, SRC_PORT + 1, None);
+        open_flow(&mut tracker, SRC_PORT + 2, None);
+
+        // A comes back, and is now the newest of the three.
+        open_flow(&mut tracker, SRC_PORT, None);
+        assert_eq!(tracker.stats().active_probes, 3);
+
+        // A fourth flow forces one eviction. It must take the oldest, not A.
+        open_flow(&mut tracker, SRC_PORT + 3, None);
+
+        let event = tracker.offer_frame(&tcp_frame(
+            SRC_PORT,
+            105,
+            false,
+            b"/ HTTP/1.1\r\nHost: a\r\n\r\n",
+        ));
+        assert!(
+            event.is_some(),
+            "the recreated probe was evicted by its own stale queue entry"
+        );
     }
 
     #[test]
