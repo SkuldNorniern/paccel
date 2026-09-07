@@ -22,6 +22,9 @@ const SLL_PACKET_TYPE_OFFSET: usize = 0;
 const SLL_ADDR_LEN_OFFSET: usize = 4;
 const SLL_PROTOCOL_OFFSET: usize = 14;
 const SLL2_PROTOCOL_OFFSET: usize = 0;
+const SLL2_RESERVED_OFFSET: usize = 2;
+const SLL2_PACKET_TYPE_OFFSET: usize = 10;
+const SLL2_ADDR_LEN_OFFSET: usize = 11;
 
 const VLAN_TAG_LEN: usize = 4;
 
@@ -100,12 +103,24 @@ fn looks_like_sll(raw: &[u8]) -> bool {
         && matches!(read_u16_be_at(raw, SLL_PROTOCOL_OFFSET), Some(protocol) if is_common_ethertype(protocol))
 }
 
+/// Four fields, not one. The protocol alone sits where an ethernet frame keeps
+/// the first two bytes of its destination MAC, so a MAC beginning 08:00, 08:06
+/// or 86:dd would otherwise be read as cooked v2 before the real ethertype at
+/// offset 12 is ever looked at.
 fn looks_like_sll2(raw: &[u8]) -> bool {
-    raw.len() >= SLL2_HEADER_LEN
-        && matches!(
-            read_u16_be_at(raw, SLL2_PROTOCOL_OFFSET),
-            Some(ethertype::IPV4) | Some(ethertype::ARP) | Some(ethertype::IPV6)
-        )
+    let Some(header) = raw.get(..SLL2_HEADER_LEN) else {
+        return false;
+    };
+    let protocol_known = matches!(
+        read_u16_be_at(header, SLL2_PROTOCOL_OFFSET),
+        Some(ethertype::IPV4) | Some(ethertype::ARP) | Some(ethertype::IPV6)
+    );
+    // linux/if_packet.h sll2_header: reserved must be zero, the packet type is
+    // one of the five PACKET_* values, and the address length caps at eight.
+    protocol_known
+        && read_u16_be_at(header, SLL2_RESERVED_OFFSET) == Some(0)
+        && header[SLL2_PACKET_TYPE_OFFSET] <= 4
+        && header[SLL2_ADDR_LEN_OFFSET] <= 8
 }
 
 fn synthetic_link_frame(protocol: u16, payload_offset: usize) -> (EthernetFrame, usize) {
@@ -164,6 +179,21 @@ pub(super) fn parse_link(raw: &[u8]) -> Result<(EthernetFrame, usize), LayerErro
     parse_ethernet(raw)
 }
 
+/// A frame that is an IP packet with no link header. `expected` pins the
+/// family when the linktype names one.
+fn raw_ip_frame(raw: &[u8], expected: Option<u16>) -> Result<(EthernetFrame, usize), LayerError> {
+    let protocol = match raw.first().map(|byte| byte >> 4) {
+        Some(4) => ethertype::IPV4,
+        Some(6) => ethertype::IPV6,
+        Some(_) => return Err(LayerError::InvalidHeader),
+        None => return Err(LayerError::InvalidLength),
+    };
+    if expected.is_some_and(|family| family != protocol) {
+        return Err(LayerError::InvalidHeader);
+    }
+    Ok(synthetic_link_frame(protocol, 0))
+}
+
 /// Whether `raw` begins with an IP header and nothing before it.
 ///
 /// The declared length must account for the frame exactly, because a wrong
@@ -210,17 +240,17 @@ pub(super) fn parse_link_with_linktype(
         }
         // 101 = LINKTYPE_RAW, the current cross-platform number. BSD-derived
         // tools may emit the older DLT_RAW value 12 for the same wire format.
-        // 228/229 = LINKTYPE_IPV4/LINKTYPE_IPV6, fixed-family variants.
-        Some(101 | 12 | 228 | 229) => {
-            let protocol = match raw.first().map(|byte| byte >> 4) {
-                Some(4) => ethertype::IPV4,
-                Some(6) => ethertype::IPV6,
-                Some(_) => return Err(LayerError::InvalidHeader),
-                None => return Err(LayerError::InvalidLength),
-            };
-            Ok(synthetic_link_frame(protocol, 0))
-        }
-        Some(_) | None => parse_link(raw),
+        // Either family is allowed.
+        Some(101 | 12) => raw_ip_frame(raw, None),
+        // 228/229 name one family each, so the version nibble has to match.
+        Some(228) => raw_ip_frame(raw, Some(ethertype::IPV4)),
+        Some(229) => raw_ip_frame(raw, Some(ethertype::IPV6)),
+        // A linktype paccel does not know is refused rather than guessed at.
+        // Only a caller with no linktype at all gets autodetection.
+        Some(other) => Err(LayerError::ValidationError(format!(
+            "unsupported linktype {other}"
+        ))),
+        None => parse_link(raw),
     }
 }
 
@@ -592,14 +622,62 @@ mod tests {
         assert!(matches!(parsed.transport, Some(TransportSegment::Udp(_))));
     }
 
+    /// The cooked-v2 protocol field sits where ethernet keeps the first two
+    /// bytes of its destination MAC. A MAC that begins with an ethertype-shaped
+    /// pair must not turn the frame into a cooked capture.
     #[test]
-    fn unknown_linktype_falls_back_to_sniffing() {
-        let frame = ethernet_ipv4_udp_frame();
-        let parsed = BuiltinPacketParser::parse_with_linktype(&frame, 999)
-            .expect("Ethernet frame should parse via sniffing");
+    fn an_ethernet_mac_shaped_like_a_protocol_is_still_ethernet() {
+        for lead in [[0x08u8, 0x00], [0x08, 0x06], [0x86, 0xdd]] {
+            let mut frame = lead.to_vec();
+            frame.extend([0x11, 0x22, 0x33, 0x44]);
+            frame.extend([6, 7, 8, 9, 10, 11]);
+            frame.extend([0x08, 0x00]);
+            frame.extend(&bare_ipv4_udp());
 
-        assert!(parsed.ipv4.is_some());
-        assert!(matches!(parsed.transport, Some(TransportSegment::Udp(_))));
+            let parsed = BuiltinPacketParser::parse(&frame)
+                .unwrap_or_else(|error| panic!("{lead:02x?} was refused: {error}"));
+            let ethernet = parsed
+                .ethernet
+                .unwrap_or_else(|| panic!("{lead:02x?} produced no link header"));
+            assert_eq!(
+                ethernet.destination[..2],
+                lead,
+                "{lead:02x?} was read as a cooked capture"
+            );
+            assert_eq!(
+                parsed.ipv4.expect("the addresses").source.to_string(),
+                "10.0.0.1"
+            );
+        }
+    }
+
+    #[test]
+    /// A caller that names a linktype is asserting what the bytes are.
+    /// Guessing against that assertion produces a confident wrong answer, so a
+    /// linktype paccel does not know is refused. Only a caller with none gets
+    /// autodetection.
+    fn an_unknown_linktype_is_refused_rather_than_guessed() {
+        let frame = ethernet_ipv4_udp_frame();
+        assert!(BuiltinPacketParser::parse_with_linktype(&frame, 999).is_err());
+
+        let sniffed = BuiltinPacketParser::parse(&frame).expect("no linktype still sniffs");
+        assert!(sniffed.ipv4.is_some());
+        assert!(matches!(sniffed.transport, Some(TransportSegment::Udp(_))));
+    }
+
+    /// LINKTYPE_IPV4 and LINKTYPE_IPV6 each name one family, so a frame of the
+    /// other one is not what the capture says it is.
+    #[test]
+    fn a_fixed_family_linktype_refuses_the_other_family() {
+        let ipv4 = bare_ipv4_udp();
+        assert!(BuiltinPacketParser::parse_with_linktype(&ipv4, 228).is_ok());
+        assert!(
+            BuiltinPacketParser::parse_with_linktype(&ipv4, 229).is_err(),
+            "an ipv4 packet is not LINKTYPE_IPV6"
+        );
+
+        // RAW takes either.
+        assert!(BuiltinPacketParser::parse_with_linktype(&ipv4, 101).is_ok());
     }
 
     #[test]
