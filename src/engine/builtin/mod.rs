@@ -506,7 +506,7 @@ impl BuiltinPacketParser {
                             config,
                             depth,
                             l3_offset + ip_header_len,
-                        );
+                        )?;
                     }
                 }
                 Ok(())
@@ -606,7 +606,7 @@ impl BuiltinPacketParser {
                             config,
                             depth,
                             l3_offset + state.l4_offset,
-                        );
+                        )?;
                     }
                 }
 
@@ -670,7 +670,8 @@ impl BuiltinPacketParser {
                             ParseWarningCode::MplsInner,
                             l3_offset + mpls_payload_offset,
                             "MPLS inner payload; nested decode failed",
-                        );
+                            config.mode,
+                        )?;
                     } else {
                         push_inner_warning(
                             parsed,
@@ -810,7 +811,8 @@ fn decode_pppoe_session(
         ParseWarningCode::PppoeNoPayload,
         offset + inner_offset,
         "PPPoE PPP payload; nested decode failed",
-    );
+        config.mode,
+    )?;
     Ok(())
 }
 
@@ -849,10 +851,10 @@ fn recurse_transport_tunnel(
     config: ParseConfig,
     depth: usize,
     offset: usize,
-) {
+) -> Result<(), LayerError> {
     let candidate = if let Some(gre) = parsed.gre {
         let Some(candidate) = gre_inner(gre, l4_bytes, offset) else {
-            return;
+            return Ok(());
         };
         Some(candidate)
     } else if parsed.vxlan.is_some() {
@@ -928,7 +930,15 @@ fn recurse_transport_tunnel(
                 ))
             }
         });
-        recurse_or_warn(parsed, result, depth_limited, code, inner_offset, message);
+        recurse_or_warn(
+            parsed,
+            result,
+            depth_limited,
+            code,
+            inner_offset,
+            message,
+            config.mode,
+        )?;
     }
 
     if parsed.ah.is_some() {
@@ -947,6 +957,7 @@ fn recurse_transport_tunnel(
             message: "ESP payload present; no nested decode yet",
         });
     }
+    Ok(())
 }
 
 fn udp_payload_end(parsed: &ParsedPacket, captured_len: usize) -> Option<usize> {
@@ -963,7 +974,8 @@ fn recurse_or_warn(
     code: ParseWarningCode,
     offset: usize,
     message: &'static str,
-) {
+    mode: ParseMode,
+) -> Result<(), LayerError> {
     if depth_limited {
         parsed.warnings.push(ParseWarning {
             code: ParseWarningCode::TunnelDepthLimit,
@@ -971,10 +983,21 @@ fn recurse_or_warn(
             offset,
             message: "tunnel depth limit reached; skipping inner payload decode",
         });
-    } else if let Some(Ok(inner)) = result {
-        parsed.inner = Some(Box::new(inner));
-    } else {
-        push_inner_warning(parsed, code, offset, message);
+        return Ok(());
+    }
+    match result {
+        Some(Ok(inner)) => {
+            parsed.inner = Some(Box::new(inner));
+            Ok(())
+        }
+        // Strict refuses a payload it cannot read, wherever it sits. A tunnel
+        // is not an exception: the frame carries something the parser does not
+        // accept, and saying so is the whole point of the mode.
+        Some(Err(error)) if mode == ParseMode::Strict => Err(error),
+        Some(Err(_)) | None => {
+            push_inner_warning(parsed, code, offset, message);
+            Ok(())
+        }
     }
 }
 
@@ -1319,12 +1342,10 @@ mod tests {
 
     /// Ethernet / IPv4 / UDP / VXLAN / Ethernet / IPv4 / half a UDP header.
     ///
-    /// A tunnel whose payload does not decode is reported as a warning and
-    /// leaves `inner` empty, in Strict as well as Permissive: the outer packet
-    /// is intact and its addresses are good. Nothing is invented for the
-    /// inside, and the frame is not refused for it.
+    /// Strict refuses a payload it cannot read wherever it sits, a tunnel
+    /// included. Permissive keeps what the inner packet did have.
     #[test]
-    fn a_tunnel_payload_that_does_not_decode_warns_rather_than_failing() {
+    fn strict_refuses_a_tunnel_payload_it_cannot_read() {
         let inner = ipv4_with_half_a_udp_header();
         let vxlan_payload_len = 8 + inner.len();
         let udp_len = 8 + vxlan_payload_len;
@@ -1349,27 +1370,17 @@ mod tests {
         assert!(decoded.ipv4.is_some());
         assert_eq!(decoded.ports(), Some((1234, 53)));
 
-        // Strict refuses the inner packet, but that is not a reason to refuse
-        // the frame: the outer headers are good. It says so with a warning.
-        let strict = BuiltinPacketParser::parse_with_config(
+        // Strict refuses the frame. The layer says the tunnelled payload is
+        // what failed, not the outer headers, which all parsed.
+        let error = BuiltinPacketParser::parse_with_config(
             &frame,
             ParseConfig {
                 mode: ParseMode::Strict,
                 ..ParseConfig::default()
             },
         )
-        .expect("the outer packet is still intact");
-        assert!(strict.vxlan.is_some(), "the tunnel header is kept");
-        assert!(
-            strict.inner.is_none(),
-            "nothing is invented for a payload strict would not accept"
-        );
-        assert!(
-            strict
-                .warnings
-                .iter()
-                .any(|warning| warning.code == ParseWarningCode::VxlanInner)
-        );
+        .expect_err("strict does not accept a payload it cannot read");
+        assert_eq!(error.layer, crate::layer::Layer::Tunnel);
     }
 
     #[test]
