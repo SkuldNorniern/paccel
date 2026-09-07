@@ -26,8 +26,9 @@ pub use flow::{
     BiFlow, Direction, Endpoint, LastSeen, ReassemblyEvent, ReassemblyOutput, Timestamp,
 };
 pub use pcap::{
-    CaptureFrameIter, PcapFrame, PcapFrameIter, PcapNgFrameIter, TsResolution, iter_capture_frames,
-    iter_pcap_frames, iter_pcapng_frames, parse_capture_frames, parse_pcap_frames,
+    CaptureFrameIter, CaptureTimestamp, PcapFrame, PcapFrameIter, PcapNgFrameIter, TsResolution,
+    iter_capture_frames, iter_pcap_frames, iter_pcapng_frames, parse_capture_frames,
+    parse_pcap_frames,
 };
 pub use quic_tracker::{
     QuicConnectionId, QuicConnectionTracker, QuicPacketNumberSpace, QuicTrackerStats,
