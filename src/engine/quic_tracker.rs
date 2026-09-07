@@ -10,6 +10,15 @@ use crate::layer::application::quic::{
 };
 
 const DEFAULT_MAX_FLOWS: usize = 65_536;
+/// Four addresses per connection on average, which is generous for migration.
+const DEFAULT_MAX_TUPLES: usize = DEFAULT_MAX_FLOWS * 4;
+/// RFC 9000 sec 9 migrations are occasional, not continuous.
+const DEFAULT_MAX_TUPLES_PER_CONNECTION: usize = 8;
+/// RFC 9000 sec 5.1.1: active_connection_id_limit is small, and both ends have
+/// one pool each.
+const DEFAULT_MAX_CIDS: usize = DEFAULT_MAX_FLOWS * 4;
+/// Generous next to the active_connection_id_limit peers actually negotiate.
+const DEFAULT_MAX_CIDS_PER_POOL: usize = 32;
 
 /// The longest connection ID RFC 9000 allows. Longer ones cannot be indexed by
 /// length, so they are not remembered.
@@ -122,6 +131,19 @@ pub struct QuicConnectionTracker {
     /// other connections used is what matches a packet from a moved tuple.
     cid_lengths: u32,
     max_flows: usize,
+    /// Address pairs across every connection. A migrating connection binds a
+    /// new tuple without adding a connection, so the connection cap alone does
+    /// not bound this.
+    max_tuples: usize,
+    /// Address pairs one connection may hold. A peer that keeps moving would
+    /// otherwise grow a single connection without limit.
+    max_tuples_per_connection: usize,
+    /// Live connection IDs across every connection.
+    max_cids: usize,
+    /// Live connection IDs one endpoint of one connection may hold. RFC 9000
+    /// sec 5.1.1 bounds this with active_connection_id_limit; a peer that
+    /// ignores it must not grow the index without limit.
+    max_cids_per_pool: usize,
     connections: HashMap<QuicConnectionId, QuicConnectionState>,
     by_tuple: HashMap<BiFlow, QuicConnectionId>,
     by_cid: HashMap<Vec<u8>, QuicConnectionId>,
@@ -137,6 +159,10 @@ impl QuicConnectionTracker {
         Self {
             cid_lengths: 0,
             max_flows: DEFAULT_MAX_FLOWS,
+            max_tuples: DEFAULT_MAX_TUPLES,
+            max_tuples_per_connection: DEFAULT_MAX_TUPLES_PER_CONNECTION,
+            max_cids: DEFAULT_MAX_CIDS,
+            max_cids_per_pool: DEFAULT_MAX_CIDS_PER_POOL,
             connections: HashMap::new(),
             by_tuple: HashMap::new(),
             by_cid: HashMap::new(),
@@ -149,6 +175,32 @@ impl QuicConnectionTracker {
     #[must_use]
     pub fn with_max_flows(mut self, max_flows: usize) -> Self {
         self.max_flows = max_flows;
+        self
+    }
+
+    /// Sets the address pairs held across every connection, and the most one
+    /// connection may hold.
+    ///
+    /// A migrating connection binds another tuple without adding a connection,
+    /// so the connection cap does not bound this on its own.
+    #[must_use]
+    pub fn with_max_tuples(mut self, total: usize, per_connection: usize) -> Self {
+        self.max_tuples = total;
+        self.max_tuples_per_connection = per_connection;
+        self
+    }
+
+    /// Sets the live connection IDs held across every connection.
+    #[must_use]
+    pub fn with_max_cids(mut self, max_cids: usize) -> Self {
+        self.max_cids = max_cids;
+        self
+    }
+
+    /// Sets the live connection IDs one endpoint of one connection may hold.
+    #[must_use]
+    pub fn with_max_cids_per_pool(mut self, max_cids_per_pool: usize) -> Self {
+        self.max_cids_per_pool = max_cids_per_pool;
         self
     }
 
@@ -256,7 +308,7 @@ impl QuicConnectionTracker {
         if scid.len() <= MAX_CID_LEN {
             self.cid_lengths |= 1 << scid.len();
         }
-        self.by_cid.insert(scid.to_vec(), id);
+        self.remember_cid(scid, id);
     }
 
     /// Binds a short header's arrival tuple to the connection its DCID names,
@@ -376,11 +428,22 @@ impl QuicConnectionTracker {
             dropped.push(previous);
         }
 
+        // A peer that ignores its own active_connection_id_limit loses its
+        // oldest ids rather than growing the index without bound.
+        while pool.ids.len() > self.max_cids_per_pool {
+            let Some(oldest) = pool.ids.keys().next().copied() else {
+                break;
+            };
+            if let Some(stale) = pool.ids.remove(&oldest) {
+                dropped.push(stale);
+            }
+        }
+
         for stale in dropped {
             self.by_cid.remove(&stale);
         }
         self.cid_lengths |= 1 << cid.len();
-        self.by_cid.insert(cid.to_vec(), id);
+        self.remember_cid(cid, id);
         true
     }
 
@@ -602,6 +665,25 @@ impl QuicConnectionTracker {
     /// this may take it from whoever held it. The previous holder is told, or
     /// it reports an address that now reaches someone else.
     fn bind_tuple(&mut self, id: QuicConnectionId, key: BiFlow) {
+        if !self.by_tuple.contains_key(&key) {
+            // A connection that keeps moving drops its oldest address rather
+            // than growing without bound.
+            if let Some(connection) = self.connections.get_mut(&id)
+                && connection.tuples.len() >= self.max_tuples_per_connection
+                && !connection.tuples.is_empty()
+            {
+                let oldest = connection.tuples.remove(0);
+                self.by_tuple.remove(&oldest);
+            }
+            // And the tracker as a whole stays inside its total.
+            while self.by_tuple.len() >= self.max_tuples {
+                let Some(victim) = self.insertion_order.front().copied() else {
+                    break;
+                };
+                self.insertion_order.pop_front();
+                self.drop_connection(victim);
+            }
+        }
         match self.by_tuple.insert(key, id) {
             Some(previous) if previous == id => return,
             Some(previous) => {
@@ -626,6 +708,25 @@ impl QuicConnectionTracker {
         {
             connection.tuples.push(key);
         }
+    }
+
+    /// Indexes `cid`, evicting whole connections first if the tracker is at its
+    /// connection-ID cap. An index bigger than what it points at is how a
+    /// tracker grows without bound while its connection count looks healthy.
+    fn remember_cid(&mut self, cid: &[u8], id: QuicConnectionId) {
+        while self.by_cid.len() >= self.max_cids && !self.by_cid.contains_key(cid) {
+            let Some(victim) = self.insertion_order.front().copied() else {
+                break;
+            };
+            self.insertion_order.pop_front();
+            if victim == id {
+                // Never evict the connection this id belongs to.
+                self.insertion_order.push_back(victim);
+                break;
+            }
+            self.drop_connection(victim);
+        }
+        self.by_cid.insert(cid.to_vec(), id);
     }
 
     fn evict_until_room(&mut self) {
@@ -1011,6 +1112,56 @@ mod tests {
             "sequence 3 is below the threshold of 5"
         );
         assert!(tracker.connection_id_for_dcid(&[0x33; 8]).is_none());
+    }
+
+    /// A migrating connection binds another address without adding a
+    /// connection, so the connection cap alone leaves the tuple index
+    /// unbounded. One peer moving repeatedly must not grow it without limit.
+    #[test]
+    fn a_moving_connection_cannot_grow_the_tuple_index_without_bound() {
+        let server = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let cid = [9, 9, 9, 9];
+        let mut tracker = QuicConnectionTracker::new().with_max_tuples(64, 4);
+        let client = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        tracker.observe_long_header(server, 443, client, 5_000, &cid);
+        let id = tracker.connection_id_for_dcid(&cid).expect("opened");
+
+        for port in 0..500u16 {
+            tracker.observe_short_header(client, 6_000 + port, server, 443, &cid);
+        }
+
+        let stats = tracker.stats();
+        assert!(
+            stats.active_tuples <= 64,
+            "{} address pairs held past the cap",
+            stats.active_tuples
+        );
+        assert!(
+            tracker.tuples_for_connection(id).len() <= 4,
+            "one connection held {} addresses",
+            tracker.tuples_for_connection(id).len()
+        );
+    }
+
+    /// The same for connection IDs: a peer that keeps issuing them must not
+    /// grow the id index past its cap.
+    #[test]
+    fn announced_connection_ids_stay_inside_their_cap() {
+        let mut tracker = QuicConnectionTracker::new()
+            .with_max_cids(8)
+            .with_max_cids_per_pool(4);
+        let id = opened(&mut tracker);
+
+        for sequence in 1..200u64 {
+            let cid = sequence.to_be_bytes();
+            tracker.observe_new_connection_id(id, server_endpoint(), sequence, &cid, 0);
+        }
+
+        assert!(
+            tracker.stats().active_cids <= 8,
+            "{} ids held past the cap",
+            tracker.stats().active_cids
+        );
     }
 
     #[test]
