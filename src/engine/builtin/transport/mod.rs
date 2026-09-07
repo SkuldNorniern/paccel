@@ -4,10 +4,11 @@ mod udp;
 
 use std::net::Ipv4Addr;
 
+use crate::engine::builtin::BuiltinPacketParser;
 use crate::engine::builtin::types::{
     ApplicationLayers, ParseWarning, ParseWarningCode, ParseWarningProtocol, ParsedPacket,
 };
-use crate::engine::constants::ip_proto;
+use crate::engine::constants::{ethertype, ip_proto};
 use crate::layer::LayerError;
 use crate::layer::application::bgp::probe_bgp;
 use crate::layer::application::coap::{CoapMessage, parse_coap_message};
@@ -95,6 +96,36 @@ pub(super) fn parse_transport(
     result
 }
 
+/// Decodes the datagram an ICMP error quotes, into `icmp_quoted`.
+///
+/// The quote begins eight bytes in, after the ICMP header. An error can quote
+/// an error, so the depth is bounded by `max_icmp_quote_depth`. A quote that
+/// does not decode is simply absent: the error itself is still worth
+/// reporting.
+fn quote_from_icmp(
+    parsed: &mut ParsedPacket,
+    l4_bytes: &[u8],
+    ethertype: u16,
+    config: ParseConfig,
+) {
+    if config.stop_after != StopLayer::Application || config.max_icmp_quote_depth == 0 {
+        return;
+    }
+    let Some(quoted) = l4_bytes.get(8..) else {
+        return;
+    };
+    if quoted.is_empty() {
+        return;
+    }
+    let inner_config = ParseConfig {
+        max_icmp_quote_depth: config.max_icmp_quote_depth - 1,
+        ..config
+    };
+    if let Ok(inner) = BuiltinPacketParser::parse_l3(quoted, ethertype, inner_config, 0) {
+        parsed.icmp_quoted = Some(Box::new(inner));
+    }
+}
+
 fn parse_transport_inner(
     parsed: &mut ParsedPacket,
     protocol: u8,
@@ -160,19 +191,25 @@ fn parse_transport_inner(
         ip_proto::UDP => parse_udp_transport(parsed, l4_bytes, config),
         ip_proto::ICMP => {
             let icmp = parse_icmp_minimal(l4_bytes)?;
-            {
-                parsed.icmp = Some(icmp);
-                Ok(())
+            // RFC 792: destination unreachable, source quench, redirect, time
+            // exceeded and parameter problem all quote the datagram that
+            // caused them.
+            if matches!(icmp.icmp_type, 3 | 4 | 5 | 11 | 12) {
+                quote_from_icmp(parsed, l4_bytes, ethertype::IPV4, config);
             }
+            parsed.icmp = Some(icmp);
+            Ok(())
         }
         ip_proto::ICMPV6 => {
             let (icmpv6, ndp) =
                 parse_icmpv6_minimal(l4_bytes, config.stop_after == StopLayer::Application)?;
-            {
-                parsed.icmpv6 = Some(icmpv6);
-                parsed.ndp = ndp;
-                Ok(())
+            // RFC 4443 sec 3: types 1 to 4 are the error messages.
+            if matches!(icmpv6.icmp_type, 1..=4) {
+                quote_from_icmp(parsed, l4_bytes, ethertype::IPV6, config);
             }
+            parsed.icmpv6 = Some(icmpv6);
+            parsed.ndp = ndp;
+            Ok(())
         }
         ip_proto::IGMP => {
             let igmp = parse_igmp_minimal(l4_bytes)?;
@@ -282,6 +319,65 @@ mod tests {
     /// A snaplen that cuts a TCP header short still leaves its ports, and those
     /// are what a flow is keyed on. Permissive parsing used to discard the whole
     /// header, so a truncated capture reported no ports at all.
+    /// RFC 792: an ICMP error carries the datagram that caused it. That
+    /// datagram says which flow the error is about, which is the whole reason
+    /// to read it.
+    #[test]
+    fn an_icmp_error_carries_the_flow_it_is_about() {
+        // Ethernet / IPv4 / ICMP port-unreachable / quoted IPv4 / quoted UDP.
+        let mut quoted = vec![0x45, 0x00, 0x00, 0x1c, 0x00, 0x01, 0x00, 0x00, 64, 17, 0, 0];
+        quoted.extend([10, 0, 0, 1, 10, 0, 0, 2]);
+        quoted.extend(1234u16.to_be_bytes());
+        quoted.extend(53u16.to_be_bytes());
+        quoted.extend([0x00, 0x08, 0x00, 0x00]);
+
+        let mut icmp = vec![3, 3, 0, 0, 0, 0, 0, 0];
+        icmp.extend(&quoted);
+
+        let mut frame = vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0x08, 0x00];
+        let total = u16::try_from(20 + icmp.len()).expect("short frame");
+        frame.extend([0x45, 0x00]);
+        frame.extend(total.to_be_bytes());
+        frame.extend([0x00, 0x01, 0x00, 0x00, 64, 1, 0, 0]);
+        frame.extend([10, 0, 0, 3, 10, 0, 0, 1]);
+        frame.extend(&icmp);
+
+        let parsed = BuiltinPacketParser::parse(&frame).expect("the error parses");
+        assert_eq!(parsed.icmp.expect("the icmp header").icmp_type, 3);
+
+        let inner = parsed.icmp_quoted.as_deref().expect("the quoted datagram");
+        assert_eq!(
+            inner
+                .ipv4
+                .as_ref()
+                .expect("quoted addresses")
+                .source
+                .to_string(),
+            "10.0.0.1",
+            "the quote travelled the other way from the error"
+        );
+        assert_eq!(inner.ports(), Some((1234, 53)));
+        assert!(
+            inner.icmp_quoted.is_none(),
+            "one level, so an error quoting an error does not recurse without bound"
+        );
+    }
+
+    /// An error with nothing quoted, or a message that is not an error, leaves
+    /// the field empty rather than inventing one.
+    #[test]
+    fn only_an_icmp_error_with_a_quote_fills_the_field() {
+        let mut frame = vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0x08, 0x00];
+        frame.extend([0x45, 0x00, 0x00, 0x1c, 0x00, 0x01, 0x00, 0x00, 64, 1, 0, 0]);
+        frame.extend([10, 0, 0, 3, 10, 0, 0, 1]);
+        // An echo request: not an error, and nothing quoted.
+        frame.extend([8, 0, 0, 0, 0, 0, 0, 0]);
+
+        let parsed = BuiltinPacketParser::parse(&frame).expect("an echo parses");
+        assert!(parsed.icmp.is_some());
+        assert!(parsed.icmp_quoted.is_none());
+    }
+
     #[test]
     fn a_truncated_tcp_header_keeps_the_ports_that_survived() {
         let frame =

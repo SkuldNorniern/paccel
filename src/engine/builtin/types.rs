@@ -408,6 +408,12 @@ pub struct ParseConfig {
     pub max_ipv6_extension_headers: usize,
     pub max_mpls_labels: usize,
     pub max_tunnel_depth: usize,
+    /// How deep to follow the datagram an ICMP error quotes.
+    ///
+    /// An error can quote an error, so this is bounded rather than left to
+    /// terminate on its own. One level is the case that carries information;
+    /// zero turns the decode off.
+    pub max_icmp_quote_depth: usize,
     pub mode: ParseMode,
     pub stop_after: StopLayer,
 }
@@ -418,6 +424,7 @@ impl Default for ParseConfig {
             max_ipv6_extension_headers: 8,
             max_mpls_labels: 8,
             max_tunnel_depth: 4,
+            max_icmp_quote_depth: 1,
             mode: ParseMode::Permissive,
             stop_after: StopLayer::Application,
         }
@@ -655,6 +662,14 @@ pub struct ParsedPacket {
     pub udp_hints: Vec<UdpAppHint>,
     pub warnings: Vec<ParseWarning>,
     pub inner: Option<Box<ParsedPacket>>,
+    /// The packet an ICMP error quotes, when it quoted enough of one.
+    ///
+    /// RFC 792 and RFC 4443 sec 3 make an error carry the datagram that caused
+    /// it. That datagram travelled the *other* way, so this is deliberately not
+    /// `inner`: nothing here is a tunnel, and a flow keyed on these addresses
+    /// would be keyed backwards. It is here to say which flow the error is
+    /// about, and a caller decides what to do with that.
+    pub icmp_quoted: Option<Box<ParsedPacket>>,
     /// Byte offset of `transport` in the parsed buffer. UDP payload starts at
     /// `transport_segment_offset + 8`. Nested offsets are relative to the inner
     /// packet's buffer.
@@ -1190,9 +1205,10 @@ mod tests {
     fn the_parsed_packet_stays_the_size_it_was_measured_at() {
         assert_eq!(
             size_of::<ParsedPacket>(),
-            856,
+            864,
             "ParsedPacket changed size; the application layer moved behind a \
-             pointer to get it here from 2736"
+             pointer to get it here from 2736, and icmp_quoted added the eight \
+             that took it to 864"
         );
         assert_eq!(
             size_of::<ApplicationLayers>(),
