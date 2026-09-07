@@ -2,6 +2,7 @@ use std::net::Ipv4Addr;
 
 /// ARP operation codes.
 #[derive(Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ArpOperation {
     Request,
     Reply,

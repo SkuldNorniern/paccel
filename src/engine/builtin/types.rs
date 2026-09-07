@@ -261,6 +261,7 @@ pub struct EspInfo {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum WireGuardMessageType {
     HandshakeInitiation,
     HandshakeResponse,
@@ -285,6 +286,7 @@ pub struct WireGuardInfo {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum OpenVpnOpcode {
     ControlHardResetClientV1,
     ControlHardResetServerV1,
@@ -423,6 +425,7 @@ impl Default for ParseConfig {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum UdpAppHint {
     Dns,
     Mdns,

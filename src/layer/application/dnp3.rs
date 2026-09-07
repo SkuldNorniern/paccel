@@ -6,6 +6,7 @@ const DATA_CHUNK_LEN: usize = 16;
 const CRC_LEN: usize = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Dnp3FunctionCode {
     Reset,
     Test,
@@ -33,6 +34,7 @@ impl From<u8> for Dnp3FunctionCode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Dnp3AppFunctionCode {
     Confirm,
     Read,

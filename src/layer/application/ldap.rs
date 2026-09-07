@@ -4,6 +4,7 @@ const SEQUENCE_TAG: u8 = 0x30;
 const INTEGER_TAG: u8 = 0x02;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum LdapProtocolOp {
     BindRequest,
     BindResponse,

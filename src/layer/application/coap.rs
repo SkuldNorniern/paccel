@@ -3,6 +3,7 @@ use crate::layer::{Layer, LayerError, ParseError, ProbeResult};
 const HEADER_LEN: usize = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum CoapType {
     Confirmable,
     NonConfirmable,
