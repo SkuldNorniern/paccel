@@ -118,6 +118,12 @@ pub(super) fn parse_ipv6_header(data: &[u8]) -> Result<Ipv6Header, LayerError> {
     })
 }
 
+/// Whether `next_header` names an extension header the walk consumes rather
+/// than a transport protocol it stops at.
+fn is_ipv6_extension(next_header: u8) -> bool {
+    matches!(next_header, 0 | 43 | 44 | 60 | ip_proto::AH)
+}
+
 pub(super) fn resolve_ipv6_transport(
     packet: &[u8],
     initial_next_header: u8,
@@ -134,7 +140,11 @@ pub(super) fn resolve_ipv6_transport(
     let mut depth = 0usize;
 
     loop {
-        if depth >= max_ext_headers {
+        // The limit counts extension headers, so it applies when another one
+        // is about to be consumed. Testing it at the top of the loop refuses a
+        // packet whose next header is already the transport, which costs a
+        // whole extension of the caller's budget.
+        if is_ipv6_extension(state.next_header) && depth >= max_ext_headers {
             state.depth_limit_hit = true;
             return Ok(state);
         }
@@ -220,6 +230,66 @@ mod tests {
     use crate::engine::builtin::{
         BuiltinPacketParser, Ipv6FragmentHeader, ParseWarningCode, TransportSegment,
     };
+
+    /// An IPv6 frame with `extensions` hop-by-hop headers, then TCP.
+    fn ipv6_with_extensions(extensions: usize) -> Vec<u8> {
+        let payload_len = extensions * 8 + 20;
+        let mut frame = vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0x86, 0xdd];
+        frame.extend([0x60, 0, 0, 0]);
+        frame.extend(u16::try_from(payload_len).expect("short").to_be_bytes());
+        // The first next-header is an extension only if there is one.
+        frame.push(if extensions == 0 { 6 } else { 0 });
+        frame.push(64);
+        frame.extend([0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+        frame.extend([0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2]);
+        for index in 0..extensions {
+            // The last extension hands over to TCP.
+            frame.push(if index + 1 == extensions { 6 } else { 0 });
+            frame.push(0);
+            frame.extend([0u8; 6]);
+        }
+        frame.extend(4_660u16.to_be_bytes());
+        frame.extend(443u16.to_be_bytes());
+        frame.extend([0, 0, 0, 1, 0, 0, 0, 0, 0x50, 0x02, 0x20, 0x00, 0, 0, 0, 0]);
+        frame
+    }
+
+    fn parse_with_extension_limit(frame: &[u8], limit: usize) -> crate::engine::ParsedPacket {
+        BuiltinPacketParser::parse_with_config(
+            frame,
+            crate::engine::ParseConfig {
+                max_ipv6_extension_headers: limit,
+                ..crate::engine::ParseConfig::default()
+            },
+        )
+        .expect("permissive keeps what it read")
+    }
+
+    /// The limit counts extension headers. Testing it before looking at what
+    /// the next header actually is spends a whole extension of the budget on a
+    /// packet that has none.
+    #[test]
+    fn the_extension_limit_counts_extensions_not_loop_turns() {
+        let direct = parse_with_extension_limit(&ipv6_with_extensions(0), 0);
+        assert!(
+            matches!(direct.transport, Some(TransportSegment::Tcp(_))),
+            "a packet with no extensions cannot exceed a limit of zero"
+        );
+
+        let one = parse_with_extension_limit(&ipv6_with_extensions(1), 1);
+        assert!(
+            matches!(one.transport, Some(TransportSegment::Tcp(_))),
+            "one extension fits a limit of one"
+        );
+
+        let two = parse_with_extension_limit(&ipv6_with_extensions(2), 1);
+        assert!(
+            two.warnings
+                .iter()
+                .any(|warning| warning.code == ParseWarningCode::Ipv6ExtensionDepthLimit),
+            "two extensions do not fit a limit of one"
+        );
+    }
 
     #[test]
     fn parses_ipv4_icmp() {
