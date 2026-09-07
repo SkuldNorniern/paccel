@@ -1,6 +1,5 @@
 use std::convert::TryInto;
 use std::net::{Ipv4Addr, Ipv6Addr};
-use std::str;
 
 use crate::layer::{Layer, LayerError, ParseError, ProbeResult};
 
@@ -145,10 +144,26 @@ pub fn parse_dns_message(packet: &[u8]) -> Result<DnsMessage, LayerError> {
     // A question needs at least one root-name byte, plus qtype and qclass.
     let question_capacity = (header.questions as usize).min((packet.len() - 12) / 5);
     let mut questions = Vec::with_capacity(question_capacity);
-    for _ in 0..header.questions {
-        let (question, new_offset) = parse_question(packet, offset)?;
-        questions.push(question);
-        offset = new_offset;
+    let mut questions_whole = true;
+    for index in 0..header.questions {
+        match parse_question(packet, offset) {
+            Ok((question, new_offset)) => {
+                questions.push(question);
+                offset = new_offset;
+            }
+            // The first question still has to parse. It is what tells a DNS
+            // message apart from arbitrary bytes, and a probe that accepted a
+            // header alone would claim streams belonging to other protocols.
+            // Past that, a count larger than the message carries is no reason
+            // to discard the questions that did arrive - counts are attacker
+            // controlled, and 52,000 questions in fifty bytes is a claim, not
+            // a fact.
+            Err(error) if index == 0 => return Err(error),
+            Err(_) => {
+                questions_whole = false;
+                break;
+            }
+        }
     }
 
     // The question section still has to parse in full: it is what tells a
@@ -166,7 +181,7 @@ pub fn parse_dns_message(packet: &[u8]) -> Result<DnsMessage, LayerError> {
         answers,
         authorities,
         additionals,
-        truncated: !(answers_whole && authorities_whole && additionals_whole),
+        truncated: !(questions_whole && answers_whole && authorities_whole && additionals_whole),
     })
 }
 
@@ -243,6 +258,32 @@ fn dns_minimum_message_length(packet: &[u8]) -> Option<usize> {
 /// # Errors
 /// Returns `InvalidLength` for truncated data or `MalformedPacket` for an
 /// invalid name.
+/// Appends a label in RFC 1035 sec 5.1 presentation format.
+///
+/// RFC 2181 sec 11: "Any binary string whatever can be used as the label of any
+/// resource record." The preferred host-name syntax of RFC 1035 sec 2.3.1 is a
+/// recommendation for host names, not a rule a parser may enforce - wildcard
+/// records, DNS-SD instance names with spaces, and RFC 2317 classless
+/// delegations all carry characters outside it, and refusing them loses the
+/// whole message rather than one name.
+///
+/// Escaping keeps the result unambiguous: a literal dot inside a label would
+/// otherwise be indistinguishable from the separator between two labels, which
+/// matters to anything reading these names to spot exfiltration.
+fn push_escaped_label(name: &mut String, label: &[u8]) {
+    for &byte in label {
+        match byte {
+            b'.' => name.push_str("\\."),
+            b'\\' => name.push_str("\\\\"),
+            0x21..=0x7e => name.push(byte as char),
+            other => {
+                name.push('\\');
+                name.push_str(&format!("{other:03}"));
+            }
+        }
+    }
+}
+
 fn parse_domain_name(packet: &[u8], mut pos: usize) -> Result<(String, usize), LayerError> {
     let mut name = String::new();
     let mut jumped = false;
@@ -311,21 +352,11 @@ fn parse_domain_name(packet: &[u8], mut pos: usize) -> Result<(String, usize), L
         }
 
         let label_bytes = &packet[pos..pos + label_len];
-        // DNS labels are ASCII.
-        let label = str::from_utf8(label_bytes).map_err(|_| LayerError::MalformedPacket)?;
-
-        // Validate label characters (letters, digits, hyphens, and underscores only)
-        if !label
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-        {
-            return Err(LayerError::MalformedPacket);
-        }
 
         if !name.is_empty() {
             name.push('.');
         }
-        name.push_str(label);
+        push_escaped_label(&mut name, label_bytes);
         pos += label_len;
         iterations += 1;
     }
@@ -530,7 +561,9 @@ fn parse_txt(packet: &[u8], mut pos: usize, end: usize) -> Option<Vec<String>> {
         if string_end > end {
             return None;
         }
-        strings.push(str::from_utf8(&packet[pos..string_end]).ok()?.to_owned());
+        // RFC 1035 sec 3.3.14: a character-string is arbitrary octets, not
+        // text, so a non-UTF-8 byte is not a reason to drop the record.
+        strings.push(String::from_utf8_lossy(&packet[pos..string_end]).into_owned());
         pos = string_end;
     }
     Some(strings)
@@ -855,6 +888,94 @@ mod tests {
                 version: 0,
                 flags: 0x8000,
             }
+        );
+    }
+
+    fn question_for(name: &str) -> Vec<u8> {
+        let mut packet = Vec::new();
+        packet.extend(0x1234u16.to_be_bytes());
+        packet.extend(0x0100u16.to_be_bytes());
+        packet.extend(1u16.to_be_bytes());
+        packet.extend([0, 0, 0, 0, 0, 0]);
+        for label in name.split('.') {
+            packet.push(u8::try_from(label.len()).expect("short label"));
+            packet.extend(label.as_bytes());
+        }
+        packet.push(0);
+        packet.extend(1u16.to_be_bytes());
+        packet.extend(1u16.to_be_bytes());
+        packet
+    }
+
+    /// RFC 2181 sec 11: "Any binary string whatever can be used as the label of
+    /// any resource record." The preferred host-name syntax of RFC 1035 sec
+    /// 2.3.1 describes host names, and enforcing it as a parsing rule threw
+    /// away whole messages carrying names that resolvers handle every day.
+    #[test]
+    fn labels_outside_the_preferred_host_name_syntax_still_parse() {
+        for name in [
+            "*.example.com",             // a wildcard record
+            "_ipp._tcp.local",           // dns-sd
+            "1/24.2.0.192.in-addr.arpa", // rfc 2317 classless delegation
+            "a+b.example.com",
+        ] {
+            let message = parse_dns_message(&question_for(name));
+            assert!(message.is_ok(), "{name} was refused: {message:?}");
+            let message = message.expect("checked above");
+            assert_eq!(message.questions[0].qname, name);
+        }
+    }
+
+    /// RFC 1035 sec 5.1 presentation format. A literal dot inside a label has
+    /// to be escaped or it cannot be told from the separator between labels,
+    /// which matters to anything reading these names to spot exfiltration.
+    #[test]
+    fn a_label_is_rendered_in_presentation_format() {
+        let mut packet = Vec::new();
+        packet.extend(0x1234u16.to_be_bytes());
+        packet.extend(0x0100u16.to_be_bytes());
+        packet.extend(1u16.to_be_bytes());
+        packet.extend([0, 0, 0, 0, 0, 0]);
+        // One label holding a space, a dot, a backslash and a zero byte.
+        let label: &[u8] = b"a b.c\\d\x00e";
+        packet.push(u8::try_from(label.len()).expect("short label"));
+        packet.extend(label);
+        packet.push(0);
+        packet.extend(1u16.to_be_bytes());
+        packet.extend(1u16.to_be_bytes());
+
+        let message = parse_dns_message(&packet).expect("binary labels are legal");
+        assert_eq!(
+            message.questions[0].qname, "a\\032b\\.c\\\\d\\000e",
+            "the separator, the escape character and the unprintables are all escaped"
+        );
+    }
+
+    /// A single byte a resolver accepts must not make the whole message
+    /// invisible: that is a way to hide a query from anything watching.
+    #[test]
+    fn one_unusual_byte_does_not_hide_the_message() {
+        let mut packet = question_for("example.com");
+        packet[13] = 0xff;
+        let message = parse_dns_message(&packet).expect("still a dns message");
+        assert_eq!(message.header.transaction_id, 0x1234);
+        assert_eq!(message.questions.len(), 1);
+    }
+
+    /// A count far larger than the message carries is a claim, not a fact.
+    /// The questions that did arrive are kept.
+    #[test]
+    fn an_inflated_question_count_keeps_the_question_that_parsed() {
+        let mut packet = question_for("example.com");
+        packet[4..6].copy_from_slice(&52_225u16.to_be_bytes());
+
+        let message = parse_dns_message(&packet).expect("what parsed is kept");
+        assert!(message.truncated);
+        assert_eq!(message.questions.len(), 1);
+        assert_eq!(message.questions[0].qname, "example.com");
+        assert_eq!(
+            message.header.questions, 52_225,
+            "the claim is still reported"
         );
     }
 
