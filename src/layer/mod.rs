@@ -37,6 +37,7 @@ impl Error for LayerError {}
 
 /// Decoding stage where a [`ParseError`] occurred.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Layer {
     Link,
     Network,
@@ -210,6 +211,10 @@ pub fn looks_like_text_line(line: &[u8]) -> bool {
 /// Protocol probe result that distinguishes mismatch, truncation, and malformed
 /// input.
 ///
+/// Deliberately exhaustive. The four states are the whole answer a probe can
+/// give, the way `Result`'s two are; a fifth would change what callers have to
+/// do rather than add to it, and that is not a change to make quietly.
+///
 /// [`Self::ok`] collapses the distinction to `Option<T>`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProbeResult<T> {
@@ -259,6 +264,7 @@ impl<T> ProbeResult<T> {
 
 /// How sure a classification is, ordered weakest to strongest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[non_exhaustive]
 pub enum Confidence {
     /// Port number and/or a loose byte pattern, no structural check.
     Heuristic,

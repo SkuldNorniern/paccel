@@ -16,6 +16,7 @@ pub use frame::{QuicFrame, QuicFrameIter, iter_quic_frames};
 pub use keylog::{QuicKeyLog, QuicKeyLogLabel};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum QuicPacketType {
     Initial,
     ZeroRtt,

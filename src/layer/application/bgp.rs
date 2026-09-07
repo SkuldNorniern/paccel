@@ -4,6 +4,7 @@ const HEADER_LEN: usize = 19;
 const MARKER_LEN: usize = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum BgpMessageType {
     Open,
     Update,

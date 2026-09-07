@@ -5,6 +5,7 @@ const TAG_OCTET_STRING: u8 = 0x04;
 const TAG_SEQUENCE: u8 = 0x30;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SnmpPduType {
     GetRequest,
     GetNextRequest,

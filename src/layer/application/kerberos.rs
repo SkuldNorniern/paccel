@@ -6,6 +6,7 @@ const APPLICATION_TAG_CLASS: u8 = 0x60;
 const APPLICATION_TAG_NUMBER_MASK: u8 = 0x1f;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum KerberosMessageType {
     AsReq,
     AsRep,
