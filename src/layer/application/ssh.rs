@@ -75,7 +75,9 @@ fn read_name_list(payload: &[u8], offset: &mut usize) -> Result<Vec<String>, Lay
     let raw = payload.get(start..end).ok_or(LayerError::InvalidLength)?;
     *offset = end;
 
-    let text = str::from_utf8(raw).map_err(|_| LayerError::InvalidHeader)?;
+    // A name-list is US-ASCII per RFC 4253 sec 5, but a byte outside it is no
+    // reason to drop the whole key exchange.
+    let text = &String::from_utf8_lossy(raw);
     if text.is_empty() {
         return Ok(Vec::new());
     }
@@ -96,7 +98,11 @@ pub fn parse_ssh_banner(payload: &[u8]) -> Result<SshBanner, LayerError> {
         line = &line[..line.len() - 1];
     }
 
-    let line = str::from_utf8(line).map_err(|_| LayerError::InvalidHeader)?;
+    // RFC 4253 sec 4.2 lets the identification string carry a free-text
+    // comment after the software version. Refusing the banner because that
+    // comment is not UTF-8 loses a session paccel has already identified by
+    // its "SSH-" prefix.
+    let line = &String::from_utf8_lossy(line);
     let banner = line.strip_prefix("SSH-").ok_or(LayerError::InvalidHeader)?;
     let (protocol_version, remainder) = banner.split_once('-').ok_or(LayerError::InvalidHeader)?;
     let software_version = remainder

@@ -193,6 +193,20 @@ impl fmt::Display for ParseError {
 
 impl Error for ParseError {}
 
+/// Whether a line reads as protocol text rather than binary.
+///
+/// A control character other than tab is what says a stream is not a text
+/// protocol. The encoding is not: RFC 2640 sec 2 covers non-ASCII FTP
+/// pathnames, RFC 6531 covers SMTP, RFC 3977 sec 3.1 allows UTF-8 in NNTP, and
+/// servers older than any of them send Latin-1 regardless. Testing for valid
+/// UTF-8 instead throws away a whole session over one accented filename - and
+/// worse, reports `NoMatch`, so the walk falls through and another protocol
+/// claims the stream.
+#[must_use]
+pub fn looks_like_text_line(line: &[u8]) -> bool {
+    line.iter().all(|&byte| byte >= 0x20 || byte == b'\t')
+}
+
 /// Protocol probe result that distinguishes mismatch, truncation, and malformed
 /// input.
 ///
