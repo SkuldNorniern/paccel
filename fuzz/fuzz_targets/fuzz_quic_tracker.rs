@@ -14,8 +14,16 @@ fuzz_target!(|data: &[u8]| {
     let src = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     let dst = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
     const MAX_CONNECTIONS: usize = 32;
+    const MAX_TUPLES: usize = 64;
+    const MAX_TUPLES_PER_CONNECTION: usize = 4;
+    const MAX_CIDS: usize = 64;
+    const MAX_CIDS_PER_POOL: usize = 4;
 
-    let mut tracker = QuicConnectionTracker::new().with_max_flows(MAX_CONNECTIONS);
+    let mut tracker = QuicConnectionTracker::new()
+        .with_max_flows(MAX_CONNECTIONS)
+        .with_max_tuples(MAX_TUPLES, MAX_TUPLES_PER_CONNECTION)
+        .with_max_cids(MAX_CIDS)
+        .with_max_cids_per_pool(MAX_CIDS_PER_POOL);
     let mut cursor = data;
     let mut announced: Vec<Vec<u8>> = Vec::new();
 
@@ -96,6 +104,18 @@ fuzz_target!(|data: &[u8]| {
             "{} connections hold only {} addresses between them",
             stats.active_connections,
             stats.active_tuples
+        );
+        // Migration binds tuples and NEW_CONNECTION_ID adds ids without adding
+        // connections, so each index needs its own bound.
+        assert!(
+            stats.active_tuples <= MAX_TUPLES,
+            "{} address pairs past the {MAX_TUPLES} cap",
+            stats.active_tuples
+        );
+        assert!(
+            stats.active_cids <= MAX_CIDS,
+            "{} connection ids past the {MAX_CIDS} cap",
+            stats.active_cids
         );
 
         for cid in &announced {
