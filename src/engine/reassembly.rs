@@ -7,6 +7,7 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use crate::engine::flow::{BiFlow, LastSeen, ReassemblyEvent, ReassemblyOutput, Timestamp};
+use crate::engine::quic_tracker::{QuicConnectionId, QuicDirection};
 use crate::layer::application::quic::QuicFrame;
 use crate::layer::network::ipv4::Ipv4Header;
 
@@ -1166,12 +1167,23 @@ impl Default for TcpStreamReassembler {
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct QuicStreamKey {
-    flow: BiFlow,
+    scope: QuicStreamScope,
     // A bidirectional stream carries independent byte sequences each way,
     // both under the same stream_id - without this, the two directions
     // collide into one QuicStreamState.
     direction: usize,
     stream_id: u64,
+}
+
+/// What a stream's byte state is keyed on.
+///
+/// A connection that migrates keeps its [`QuicConnectionId`] but changes its
+/// address pair, so state keyed on the tuple splits in two at the move. A
+/// caller with a [`QuicConnectionTracker`] should key on the connection.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum QuicStreamScope {
+    Connection(QuicConnectionId),
+    Tuple(BiFlow),
 }
 
 /// What became of a range offered to a stream's buffer.
@@ -1426,6 +1438,63 @@ impl QuicStreamReassembler {
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// Offers a STREAM frame keyed on the connection rather than the address
+    /// pair it arrived on.
+    ///
+    /// A connection that migrates keeps its [`QuicConnectionId`], so its byte
+    /// state carries across the move instead of splitting in two. Resolve the
+    /// arguments with
+    /// [`QuicConnectionTracker::connection_and_direction`](crate::engine::QuicConnectionTracker::connection_and_direction).
+    #[allow(clippy::too_many_arguments)]
+    pub fn offer_for_connection(
+        &mut self,
+        connection: QuicConnectionId,
+        direction: QuicDirection,
+        stream_id: u64,
+        offset: u64,
+        fin: bool,
+        data: &[u8],
+    ) -> ReassemblyOutput {
+        self.offer_keyed(
+            QuicStreamKey {
+                scope: QuicStreamScope::Connection(connection),
+                direction: direction.index(),
+                stream_id,
+            },
+            offset,
+            fin,
+            data,
+            None,
+        )
+    }
+
+    /// As [`Self::offer_for_connection`], dating the stream so
+    /// [`Self::expire_before`] can age it out.
+    #[allow(clippy::too_many_arguments)]
+    pub fn offer_for_connection_at(
+        &mut self,
+        connection: QuicConnectionId,
+        direction: QuicDirection,
+        stream_id: u64,
+        offset: u64,
+        fin: bool,
+        data: &[u8],
+        now: Timestamp,
+    ) -> ReassemblyOutput {
+        self.offer_keyed(
+            QuicStreamKey {
+                scope: QuicStreamScope::Connection(connection),
+                direction: direction.index(),
+                stream_id,
+            },
+            offset,
+            fin,
+            data,
+            Some(now),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn offer_inner(
         &mut self,
         src: IpAddr,
@@ -1438,13 +1507,24 @@ impl QuicStreamReassembler {
         data: &[u8],
         now: Option<Timestamp>,
     ) -> ReassemblyOutput {
+        let key = normalized_quic_stream(src, src_port, dst, dst_port, stream_id);
+        self.offer_keyed(key, offset, fin, data, now)
+    }
+
+    fn offer_keyed(
+        &mut self,
+        key: QuicStreamKey,
+        offset: u64,
+        fin: bool,
+        data: &[u8],
+        now: Option<Timestamp>,
+    ) -> ReassemblyOutput {
         let Ok(data_length) = u64::try_from(data.len()) else {
             return ReassemblyOutput::empty(ReassemblyEvent::Ignored);
         };
         let Some(end) = offset.checked_add(data_length) else {
             return ReassemblyOutput::empty(ReassemblyEvent::Ignored);
         };
-        let key = normalized_quic_stream(src, src_port, dst, dst_port, stream_id);
         if !self.ensure_stream(&key) {
             return ReassemblyOutput::empty(ReassemblyEvent::ResourceLimit);
         }
@@ -1550,14 +1630,15 @@ impl QuicStreamReassembler {
         let previous_len = self.streams.len();
         let mut freed = 0usize;
         self.streams.retain(|key, state| {
-            let keep = key.flow != flow;
+            let keep = key.scope != QuicStreamScope::Tuple(flow);
             if !keep {
                 freed += state.buffered_bytes;
             }
             keep
         });
         self.total_buffered_bytes = self.total_buffered_bytes.saturating_sub(freed);
-        self.insertion_order.retain(|key| key.flow != flow);
+        self.insertion_order
+            .retain(|key| key.scope != QuicStreamScope::Tuple(flow));
         self.streams.len() != previous_len
     }
 
@@ -1896,7 +1977,7 @@ fn normalized_quic_stream(
 ) -> QuicStreamKey {
     let (flow, direction) = normalized_flow(src, src_port, dst, dst_port);
     QuicStreamKey {
-        flow,
+        scope: QuicStreamScope::Tuple(flow),
         direction,
         stream_id,
     }
@@ -2009,6 +2090,78 @@ mod tests {
             options: None,
             options_truncated: false,
         }
+    }
+
+    /// The point of keying on the connection: a client that changes address
+    /// keeps one stream, where tuple-keyed state splits into two at the move
+    /// and neither half is the stream that was sent.
+    #[test]
+    fn a_connection_keyed_stream_survives_migration() {
+        use crate::engine::{Endpoint, QuicConnectionTracker};
+
+        let client = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let server = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let moved = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+        let server_cid = [9, 9, 9, 9];
+
+        let mut tracker = QuicConnectionTracker::new();
+        // The client's Initial first, as a capture that starts at the
+        // handshake sees it, so the responder anchor lands on the server.
+        tracker.observe_long_header(client, 5_000, server, 443, &[1, 1, 1, 1]);
+        tracker.observe_long_header(server, 443, client, 5_000, &server_cid);
+        let (id, direction) = tracker
+            .connection_and_direction(client, 5_000, server, 443, &server_cid)
+            .expect("the connection is known");
+
+        let mut reassembler = QuicStreamReassembler::new();
+        let first = reassembler.offer_for_connection(id, direction, 0, 0, false, b"hello ");
+        assert_eq!(first.data, b"hello ");
+
+        // The client moves. Same connection, new address pair.
+        tracker.observe_short_header(moved, 53_000, server, 443, &server_cid);
+        let (moved_id, moved_direction) = tracker
+            .connection_and_direction(moved, 53_000, server, 443, &server_cid)
+            .expect("the move is known");
+        assert_eq!(moved_id, id);
+        assert_eq!(
+            moved_direction, direction,
+            "direction is anchored on the responder, so the move does not flip it"
+        );
+
+        let second =
+            reassembler.offer_for_connection(moved_id, moved_direction, 0, 6, false, b"world");
+        assert_eq!(
+            second.data, b"world",
+            "the stream carried on from offset six rather than starting again"
+        );
+
+        // Direction really is stable: the reverse way is a different stream.
+        let reverse = tracker
+            .direction_for(id, Endpoint::new(server, 443), Endpoint::new(moved, 53_000))
+            .expect("the reverse direction");
+        assert_ne!(reverse, direction);
+    }
+
+    /// The tuple-keyed API is what splits at a move, which is why the
+    /// connection-keyed one exists.
+    #[test]
+    fn a_tuple_keyed_stream_does_not_survive_migration() {
+        let client = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let server = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let moved = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+        let mut reassembler = QuicStreamReassembler::new();
+
+        assert_eq!(
+            reassembler.offer(client, 5_000, server, 443, 0, 0, false, b"hello "),
+            b"hello "
+        );
+        // The same stream from a new address is a new stream, so the bytes at
+        // offset six sit behind a gap that will never be filled.
+        assert!(
+            reassembler
+                .offer(moved, 53_000, server, 443, 0, 6, false, b"world")
+                .is_empty()
+        );
     }
 
     /// A zero-length STREAM frame with FIN closes the stream, so the event has

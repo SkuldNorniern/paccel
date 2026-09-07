@@ -49,6 +49,32 @@ pub struct BiFlow {
 }
 
 impl BiFlow {
+    /// Whether `endpoint` is one of this pair.
+    #[must_use]
+    pub fn holds(&self, endpoint: Endpoint) -> bool {
+        self.first == endpoint || self.second == endpoint
+    }
+
+    /// The endpoint this pair and `other` have in common, if exactly one.
+    ///
+    /// When a connection moves, one end stays put. That end is the one both
+    /// address pairs share.
+    #[must_use]
+    pub fn shared_endpoint(&self, other: Self) -> Option<Endpoint> {
+        let mut shared = None;
+        for endpoint in [self.first, self.second] {
+            if other.holds(endpoint) {
+                if shared.is_some() {
+                    // Both ends match, so nothing moved and there is nothing
+                    // to learn from this pair.
+                    return None;
+                }
+                shared = Some(endpoint);
+            }
+        }
+        shared
+    }
+
     /// Order the endpoints and say which way this packet went.
     #[must_use]
     pub fn normalize(

@@ -31,7 +31,7 @@ pub use pcap::{
     parse_pcap_frames,
 };
 pub use quic_tracker::{
-    QuicConnectionId, QuicConnectionTracker, QuicPacketNumberSpace, QuicTrackerStats,
+    QuicConnectionId, QuicConnectionTracker, QuicDirection, QuicPacketNumberSpace, QuicTrackerStats,
 };
 pub use reassembly::{
     IpFragmentReassembler, QuicReassemblyStats, QuicStreamReassembler, TcpOverlapPolicy,
