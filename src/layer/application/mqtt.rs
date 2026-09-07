@@ -1,6 +1,7 @@
 use crate::layer::{Layer, LayerError, ParseError, ProbeResult};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum MqttPacketType {
     Connect,
     ConnAck,
@@ -16,6 +17,8 @@ pub enum MqttPacketType {
     PingReq,
     PingResp,
     Disconnect,
+    /// MQTT 5.0 sec 3.15, for enhanced authentication.
+    Auth,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,6 +45,7 @@ pub fn parse_mqtt_message(payload: &[u8]) -> Result<MqttMessage, LayerError> {
         12 => MqttPacketType::PingReq,
         13 => MqttPacketType::PingResp,
         14 => MqttPacketType::Disconnect,
+        15 => MqttPacketType::Auth,
         _ => return Err(LayerError::InvalidHeader),
     };
     let flags = first & 0x0f;
@@ -63,7 +67,8 @@ pub fn probe_mqtt(payload: &[u8]) -> ProbeResult<MqttMessage> {
             available: 0,
         };
     };
-    if !(1..=14).contains(&(first >> 4)) {
+    // MQTT 5.0 sec 2.1.2 adds AUTH as 15; only 0 is reserved.
+    if !(1..=15).contains(&(first >> 4)) {
         return ProbeResult::NoMatch;
     }
 
@@ -145,6 +150,16 @@ mod tests {
     use crate::layer::{LayerError, ProbeResult};
 
     const PUBLISH: [u8; 4] = [0x30, 0x02, 0xab, 0xcd];
+
+    /// MQTT 5.0 sec 2.1.2 Table 2-1 adds AUTH as packet type 15, used for
+    /// enhanced authentication. Only 0 is reserved.
+    #[test]
+    fn parses_an_mqtt5_auth_packet() {
+        let packet = [0xf0, 0x00];
+        let message = parse_mqtt_message(&packet).expect("auth is a valid type");
+        assert_eq!(message.packet_type, MqttPacketType::Auth);
+        assert!(probe_mqtt(&packet).is_match());
+    }
 
     #[test]
     fn parses_connect() {
