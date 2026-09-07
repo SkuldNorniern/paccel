@@ -4,7 +4,9 @@ mod udp;
 
 use std::net::Ipv4Addr;
 
-use crate::engine::builtin::types::{ApplicationLayers, ParsedPacket};
+use crate::engine::builtin::types::{
+    ApplicationLayers, ParseWarning, ParseWarningCode, ParseWarningProtocol, ParsedPacket,
+};
 use crate::engine::constants::ip_proto;
 use crate::layer::LayerError;
 use crate::layer::application::bgp::probe_bgp;
@@ -103,7 +105,25 @@ fn parse_transport_inner(
         ip_proto::TCP => {
             let parse_application = config.stop_after == StopLayer::Application;
             let tcp = parse_tcp_header(l4_bytes, parse_application)?;
+            // Strict refuses a header the capture did not keep whole; the same
+            // line IPv4 options draw. Permissive keeps the fixed fields and
+            // says the option list is short.
+            if tcp.options_truncated {
+                if config.mode == ParseMode::Strict {
+                    return Err(LayerError::InvalidLength);
+                }
+                parsed.warnings.push(ParseWarning {
+                    code: ParseWarningCode::TcpOptionsTruncated,
+                    protocol: ParseWarningProtocol::Transport,
+                    offset: 0,
+                    message: "TCP options did not survive the capture; \
+                              the fixed header fields are still valid",
+                });
+            }
+            // Clamped, because a data offset past the capture would otherwise
+            // slice past the end of the buffer.
             let header_len = usize::from(tcp.data_offset) * 4;
+            let header_len = header_len.min(l4_bytes.len());
             let tcp_options = parse_application.then(|| {
                 tcp.options
                     .as_deref()

@@ -1,7 +1,8 @@
 #![allow(clippy::panic)]
 
 use paccel::engine::{
-    BuiltinPacketParser, ParseConfig, ParseMode, iter_capture_frames, parse_capture_frames,
+    BuiltinPacketParser, ParseConfig, ParseMode, ParseWarningCode, TransportSegment,
+    iter_capture_frames, parse_capture_frames,
 };
 use paccel::layer::application::dns::parse_dns_message;
 
@@ -214,11 +215,47 @@ fn tcp_max_data_offset_with_short_header_is_rejected_only_in_strict_mode() {
 
     let parsed = BuiltinPacketParser::parse(&bytes).expect("permissive keeps what it read");
     assert!(parsed.ipv4.is_some(), "the addresses are still valid");
+
+    // All twenty fixed bytes arrived; only the option list the data offset
+    // named is missing. Nothing has to be invented to report the sequence
+    // number, flags and window, so they are reported - the same way a
+    // truncated IPv4 option list still yields its addresses.
+    let Some(TransportSegment::Tcp(tcp)) = &parsed.transport else {
+        panic!("expected the fixed header, got {:?}", parsed.transport);
+    };
+    assert!(tcp.options_truncated, "and the shortfall is recorded");
     assert!(
-        parsed.transport.is_none(),
-        "the header that did not survive is absent"
+        parsed
+            .warnings
+            .iter()
+            .any(|w| w.code == ParseWarningCode::TcpOptionsTruncated),
+        "with a warning saying so"
     );
     assert!(BuiltinPacketParser::parse_with_config(&bytes, strict_config()).is_err());
+}
+
+/// The distinction the case above turns on: when the fixed fields themselves
+/// did not arrive, there is nothing to report and the ports are all that is
+/// kept. Reporting a header here would mean inventing the missing fields.
+#[test]
+fn a_tcp_header_cut_inside_its_fixed_fields_is_still_absent() {
+    let mut bytes = ethernet(0x0800);
+    bytes.extend_from_slice(&ipv4_header(5, 32, 6));
+    let mut tcp = vec![0; 12];
+    tcp[0..2].copy_from_slice(&1234u16.to_be_bytes());
+    tcp[2..4].copy_from_slice(&80u16.to_be_bytes());
+    bytes.extend_from_slice(&tcp);
+
+    let parsed = BuiltinPacketParser::parse(&bytes).expect("permissive keeps what it read");
+    assert!(
+        parsed.transport.is_none(),
+        "twelve bytes are not a tcp header"
+    );
+    assert_eq!(
+        parsed.ports(),
+        Some((1234, 80)),
+        "the ports did survive, and are what a flow is keyed on"
+    );
 }
 
 #[test]
@@ -300,4 +337,77 @@ fn dns_label_spanning_past_buffer_is_rejected() {
     bytes[5] = 1;
     bytes.extend_from_slice(&[63, b'a', b'b', b'c']);
     assert!(parse_dns_message(&bytes).is_err());
+}
+
+/// RFC 1701 sec 4.1: with the routing bit set a variable-length source-route
+/// list follows the fixed fields, so the payload is not at `header_len`.
+/// Decoding from there reads routing data as an inner packet, which is how
+/// tshark and scapy both decline it. RFC 2784 sec 2.3.1 deprecates routing and
+/// tells receivers to discard.
+#[test]
+fn gre_with_the_routing_bit_set_decodes_no_inner_packet() {
+    let mut bytes = ethernet(0x0800);
+    bytes.extend_from_slice(&ipv4_header(5, 44, 47));
+    // Routing present, protocol IPv4, then what would look like an inner packet.
+    bytes.extend_from_slice(&[0x40, 0x00, 0x08, 0x00]);
+    bytes.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
+    bytes.extend_from_slice(&ipv4_header(5, 20, 6));
+
+    let parsed = BuiltinPacketParser::parse(&bytes).expect("the outer packet is fine");
+    let gre = parsed.gre.expect("the gre header itself parses");
+    assert!(gre.routing_present);
+    assert!(
+        parsed.inner.is_none(),
+        "a payload that cannot be located must not be decoded from a guess"
+    );
+}
+
+/// A frame with a complete link header and nothing behind it still has usable
+/// addresses and VLAN tags. Discarding the whole frame loses the only thing it
+/// carried.
+#[test]
+fn a_frame_that_is_only_a_link_header_keeps_it() {
+    let bytes = ethernet(0x0800);
+
+    let parsed = BuiltinPacketParser::parse(&bytes).expect("permissive keeps the link header");
+    assert!(parsed.ethernet.is_some(), "the addresses are still valid");
+    assert!(
+        parsed
+            .warnings
+            .iter()
+            .any(|w| w.code == ParseWarningCode::LinkPayloadTruncated),
+        "and it says why there is nothing more"
+    );
+    assert!(BuiltinPacketParser::parse_with_config(&bytes, strict_config()).is_err());
+}
+
+/// A network header too short to parse used to throw the frame away, taking
+/// the VLAN tag and MAC addresses with it.
+#[test]
+fn a_vlan_tag_survives_a_network_header_that_does_not() {
+    let mut bytes = vec![0x00; 12];
+    bytes.extend_from_slice(&[0x81, 0x00]);
+    bytes.extend_from_slice(&[0x00, 0x64]);
+    bytes.extend_from_slice(&[0x08, 0x00]);
+    bytes.extend_from_slice(&[0x45, 0x00, 0x00]);
+
+    let parsed = BuiltinPacketParser::parse(&bytes).expect("permissive keeps what it read");
+    let ethernet = parsed.ethernet.expect("the link header");
+    assert_eq!(
+        ethernet.vlan_tags.first().map(|tag| tag & 0x0fff),
+        Some(100),
+        "the vlan tag parsed and must not be discarded with the ip header"
+    );
+    assert!(
+        parsed.ipv4.is_none(),
+        "nothing is invented for the part that failed"
+    );
+    assert!(
+        parsed
+            .warnings
+            .iter()
+            .any(|w| w.code == ParseWarningCode::NetworkHeaderUnreadable),
+        "and it says the network header could not be read"
+    );
+    assert!(BuiltinPacketParser::parse_with_config(&bytes, strict_config()).is_err());
 }

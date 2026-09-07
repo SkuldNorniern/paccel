@@ -25,4 +25,10 @@ pub struct TcpHeader {
     pub checksum: u16,
     pub urgent_pointer: u16,
     pub options: Option<Vec<u8>>,
+    /// The data offset named more header than the capture kept, so `options`
+    /// holds only the bytes that survived.
+    ///
+    /// The twenty fixed bytes are all present regardless: only the option list
+    /// is short. Mirrors the IPv4 header's own `options_truncated`.
+    pub options_truncated: bool,
 }
