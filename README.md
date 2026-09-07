@@ -40,12 +40,14 @@ paccel = { version = "0.3", features = ["quic-decrypt"] }
 | Application (full parse) | DNS (records + EDNS), mDNS, DHCP, DHCPv6, NTP, TLS ClientHello (SNI/ALPN/raw extension order) and ServerHello, HTTP/1.x, HTTP/2 (typed frame iterator: bodies decoded per frame type, no HPACK), QUIC (version-aware long-header packet types v1/v2, Token/Length/PN-offset, Retry token + integrity tag, Version Negotiation lists, opt-in coalesced-packet splitting), SSH banner and `SSH_MSG_KEXINIT` algorithm lists, BGP, CoAP, DNP3, FTP, HSRP, IKE/ISAKMP (v1/v2), IMAP, Kerberos (UDP/TCP), LDAP, Modbus/TCP, MQTT, NNTP, ONC-RPC (NFS classification), PCP, RADIUS, RIP, RTCP, RTP, SIP, SMB1/CIFS, SMB2, SMTP, SNMP, SSDP, STUN, Syslog, TFTP, Telnet (IAC negotiation). Also OSPF, PIM, EIGRP, VRRP, CDP, LACP (see Link/Network rows) |
 | Application (port/heuristic classification only) | WireGuard, OpenVPN, L2TP, QUIC short header (1-RTT), LLMNR, NBNS, NAT-PMP. Port and a loose byte pattern, no structural check. `QuicConnectionTracker::classify_short_header` gives `Confidence::Structural` or `::Stateful` instead once it knows the connection |
 | Fingerprinting (`fingerprint` feature) | JA3 / JA4 (TLS ClientHello), JA3S (TLS ServerHello), HASSH / HASSHServer (SSH KEXINIT) |
-| QUIC decrypt (`quic-decrypt` feature) | Initial packets: full decrypt from publicly-derivable keys (recovers the ClientHello - SNI/ALPN). Handshake/1-RTT: decrypt via an externally-supplied `SSLKEYLOGFILE`-format secret (`QuicKeyLog`), same model Wireshark/curl/browsers use - these levels need a live TLS 1.3 ECDHE exchange, not derivable from a passive capture alone. Opt-in `QuicConnectionTracker` keys that state on the connection rather than the address pair, so packet numbers and connection IDs survive a client migration. Tracks the NEW_CONNECTION_ID/RETIRE_CONNECTION_ID lifecycle, and packet numbers per RFC 9000 sec 12.3 space (Initial/Handshake/Application). |
+| QUIC decrypt (`quic-decrypt` feature) | Initial packets: full decrypt from publicly-derivable keys (recovers the ClientHello - SNI/ALPN). Handshake/1-RTT: decrypt via an externally-supplied `SSLKEYLOGFILE`-format secret (`QuicKeyLog`), same model Wireshark/curl/browsers use - these levels need a live TLS 1.3 ECDHE exchange, not derivable from a passive capture alone. Opt-in `QuicConnectionTracker` keys that state on the connection rather than the address pair, so packet numbers and connection IDs survive a client migration. Tracks the NEW_CONNECTION_ID/RETIRE_CONNECTION_ID lifecycle with a separate sequence space per endpoint, and packet numbers per RFC 9000 sec 12.3 space (Initial/Handshake/Application). `QuicStreamReassembler::offer_for_connection` keys stream bytes on the connection too, so a stream carries across a move. |
 | Capture formats | pcap and pcapng (linktype-aware: Ethernet, SLL, SLL2, NULL, RAW/IPv4/IPv6, FDDI/SNAP, and 802.11) |
-| Reassembly | IPv4/IPv6 fragments; TCP and QUIC streams (opt-in). Overlap policy is `Reject`, `FirstWins` or `LastWins`, default `Reject`. `RST` tears a flow down, and a `SYN` on an open direction restarts it rather than appending to the old stream. Every reassembler caps total buffered bytes across all flows, not just per flow (64 MiB default) |
-| Streaming | Multi-segment HTTP, TLS, BGP, SMB1/2, LDAP, DNS-over-TCP and MQTT through `SessionTracker` |
+| Reassembly | IPv4/IPv6 fragments; TCP and QUIC streams (opt-in). Overlap policy is `Reject`, `FirstWins` or `LastWins`, default `Reject`. `RST` tears a flow down, and a `SYN` on an open direction restarts it rather than appending to the old stream. A direction closes at its FIN and refuses the bytes after it. Every reassembler caps total buffered bytes across all flows, not just per flow (64 MiB default) |
+| Streaming | Multi-segment HTTP, TLS, BGP, SMB1/2, LDAP, DNS-over-TCP and MQTT through `SessionTracker`. Probes are tried strongest signature first, and one that has only read a length field cannot claim a stream from one that matched a signature. A direction that runs out of budget while undecided is retired rather than left buffering |
 
 Malformed input does not panic. Fuzzed, property-tested, and diffed against tshark and scapy.
+
+State is bounded and ages out. Every index has a cap, per connection as well as in total, and `expire_before` on a caller-supplied clock drops what has gone quiet. Nothing reads a clock internally, so a pcap replay ages state the same way a live capture does.
 
 ## Quick usage
 
@@ -55,7 +57,7 @@ use paccel::engine::BuiltinPacketParser;
 fn parse_frame(frame: &[u8]) {
     match BuiltinPacketParser::parse(frame) {
         Ok(parsed) => {
-            if let Some(ipv4) = parsed.ipv4 {
+            if let Some(ipv4) = parsed.ipv4.as_ref() {
                 println!("ipv4 {} -> {}", ipv4.source, ipv4.destination);
             }
             if let Some(dns) = parsed.dns() {
@@ -65,7 +67,7 @@ fn parse_frame(frame: &[u8]) {
                 let hint_names: Vec<_> = parsed.udp_hints.iter().map(|h| h.as_str()).collect();
                 println!("udp app hints: {:?}", hint_names);
             }
-            for warning in parsed.warnings {
+            for warning in &parsed.warnings {
                 println!(
                     "warning [{}:{}@{}]: {}",
                     warning.protocol.as_str(),
@@ -90,6 +92,41 @@ For pcap/pcapng workflows, use `paccel::engine::parse_capture_frames(...)` and f
 For allocation-sensitive iteration, use `paccel::engine::iter_capture_frames(...)` to stream frames without collecting first.
 
 `BuiltinPacketParser` is stateless. Flow and state tracking compose on top, for example inside Fluere.
+
+## Stateful usage
+
+The stateful pieces take the capture's own clock, so a replay ages state the same way a live capture does.
+
+```rust
+use paccel::engine::{CaptureTimestamp, SessionTracker, iter_capture_frames};
+
+fn classify(capture: &[u8]) {
+    let mut tracker = SessionTracker::new();
+    let mut last = 0u64;
+
+    for frame in iter_capture_frames(capture).expect("a capture header") {
+        let Ok(frame) = frame else { continue };
+        // A Simple Packet Block has no timestamp; keep the last one we saw.
+        let now = frame
+            .timestamp
+            .and_then(CaptureTimestamp::to_timestamp_ns)
+            .unwrap_or(last);
+        last = now;
+
+        if let Some(event) = tracker.offer_frame_at(frame.data, now) {
+            println!("{}:{} -> {:?}", event.src, event.src_port, event.l7);
+        }
+
+        // Drop anything quiet for five minutes.
+        tracker.expire_before(now.saturating_sub(300_000_000_000));
+    }
+
+    let stats = tracker.stats();
+    println!("{} probes holding {} bytes", stats.active_probes, stats.probe_bytes);
+}
+```
+
+`QuicConnectionTracker` works the same way, and hands `QuicStreamReassembler::offer_for_connection` a connection and direction that stay put when a client changes address.
 
 ## Cargo features
 
