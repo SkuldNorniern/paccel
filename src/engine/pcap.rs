@@ -6,12 +6,61 @@ const PCAPNG_BLOCK_SIMPLE_PACKET: u32 = 0x0000_0003;
 const PCAPNG_BLOCK_ENHANCED_PACKET: u32 = 0x0000_0006;
 const PCAPNG_OPT_ENDOFOPT: u16 = 0;
 const PCAPNG_OPT_IF_TSRESOL: u16 = 9;
+const PCAPNG_OPT_IF_TSOFFSET: u16 = 14;
+
+/// When a frame was captured, in the units the capture itself uses.
+///
+/// A pcapng timestamp is a 64-bit tick count at a resolution the interface
+/// declares, plus a signed seconds offset (`if_tsoffset`). Splitting that into
+/// seconds and a sub-second remainder loses range and cannot represent the
+/// offset, so the raw form is kept and the conversions are offered instead.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CaptureTimestamp {
+    /// Ticks since the epoch, before `offset_seconds` is applied.
+    pub ticks: u64,
+    /// Ticks in one second, from `if_tsresol`. Never zero.
+    pub ticks_per_second: u64,
+    /// pcapng `if_tsoffset`, added to the seconds the ticks work out to.
+    pub offset_seconds: i64,
+}
+
+impl CaptureTimestamp {
+    /// Whole seconds since the epoch, offset applied.
+    #[must_use]
+    pub fn seconds(self) -> i64 {
+        let whole = i64::try_from(self.ticks / self.ticks_per_second).unwrap_or(i64::MAX);
+        whole.saturating_add(self.offset_seconds)
+    }
+
+    /// Ticks past the second `seconds` names.
+    #[must_use]
+    pub fn subsecond_ticks(self) -> u64 {
+        self.ticks % self.ticks_per_second
+    }
+
+    /// Nanoseconds since the epoch, or `None` before it or past `u64`.
+    #[must_use]
+    pub fn to_timestamp_ns(self) -> Option<u64> {
+        let seconds = u64::try_from(self.seconds()).ok()?;
+        let subsecond =
+            u128::from(self.subsecond_ticks()) * 1_000_000_000 / u128::from(self.ticks_per_second);
+        seconds
+            .checked_mul(1_000_000_000)?
+            .checked_add(u64::try_from(subsecond).ok()?)
+    }
+
+    /// The resolution, named where it has a familiar name.
+    #[must_use]
+    pub fn resolution(self) -> TsResolution {
+        resolution_from_ticks(self.ticks_per_second)
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct PcapFrame<'a> {
-    pub timestamp_sec: u32,
-    pub timestamp_subsec: u32,
-    pub ts_resolution: TsResolution,
+    /// `None` for a pcapng Simple Packet Block, which carries no timestamp.
+    /// Reporting zero there would be a time, not an absence.
+    pub timestamp: Option<CaptureTimestamp>,
     pub linktype: u16,
     pub data: &'a [u8],
 }
@@ -50,6 +99,7 @@ pub enum CaptureFrameIter<'a> {
 #[derive(Debug, Clone, Copy)]
 struct InterfaceInfo {
     ts_ticks_per_second: u64,
+    ts_offset_seconds: i64,
     linktype: u16,
 }
 
@@ -163,10 +213,21 @@ impl<'a> Iterator for PcapFrameIter<'a> {
             return Some(Err(LayerError::InvalidLength));
         }
 
+        // A classic pcap header is seconds plus a sub-second field whose unit
+        // the file magic names, so it converts straight into ticks.
+        let ticks_per_second = match self.ts_resolution {
+            TsResolution::Micro => 1_000_000,
+            TsResolution::Nano => 1_000_000_000,
+            TsResolution::Other(ticks) => ticks.max(1),
+        };
         let frame = PcapFrame {
-            timestamp_sec: ts_sec,
-            timestamp_subsec: ts_subsec,
-            ts_resolution: self.ts_resolution,
+            timestamp: Some(CaptureTimestamp {
+                ticks: u64::from(ts_sec)
+                    .saturating_mul(ticks_per_second)
+                    .saturating_add(u64::from(ts_subsec)),
+                ticks_per_second,
+                offset_seconds: 0,
+            }),
             linktype: self.linktype,
             data: &self.input[self.offset..self.offset + incl_len],
         };
@@ -369,6 +430,7 @@ fn parse_pcapng_interface_desc(
     let options_end = offset + block_len - 4;
     let linktype = read_u16(input, offset + 8, little_endian)?;
     let mut ts_ticks_per_second = 1_000_000u64;
+    let mut ts_offset_seconds = 0i64;
     let mut cursor = options_start;
 
     while cursor + 4 <= options_end {
@@ -390,6 +452,19 @@ fn parse_pcapng_interface_desc(
         {
             ts_ticks_per_second = value;
         }
+        // pcapng sec 4.2: if_tsoffset is signed 64-bit seconds added to every
+        // timestamp on the interface.
+        if code == PCAPNG_OPT_IF_TSOFFSET
+            && len >= 8
+            && let Some(bytes) = input.get(value_start..value_start + 8)
+        {
+            let raw = <[u8; 8]>::try_from(bytes).unwrap_or([0; 8]);
+            ts_offset_seconds = if little_endian {
+                i64::from_le_bytes(raw)
+            } else {
+                i64::from_be_bytes(raw)
+            };
+        }
 
         cursor = value_end + padding_len(len);
         if cursor > options_end {
@@ -399,6 +474,7 @@ fn parse_pcapng_interface_desc(
 
     interfaces.push(InterfaceInfo {
         ts_ticks_per_second,
+        ts_offset_seconds,
         linktype,
     });
     Ok(())
@@ -434,13 +510,13 @@ fn parse_pcapng_enhanced_packet<'a>(
         .get(interface_id)
         .ok_or(LayerError::InvalidHeader)?;
     let raw_ts = (ts_high << 32) | ts_low;
-    let ticks = interface.ts_ticks_per_second;
-    let (timestamp_sec, timestamp_subsec) = split_timestamp(raw_ts, ticks);
 
     Ok(PcapFrame {
-        timestamp_sec,
-        timestamp_subsec,
-        ts_resolution: resolution_from_ticks(ticks),
+        timestamp: Some(CaptureTimestamp {
+            ticks: raw_ts,
+            ticks_per_second: interface.ts_ticks_per_second.max(1),
+            offset_seconds: interface.ts_offset_seconds,
+        }),
         linktype: interface.linktype,
         data: &input[data_start..data_start + cap_len],
     })
@@ -472,9 +548,8 @@ fn parse_pcapng_simple_packet<'a>(
     let interface = interfaces.first().ok_or(LayerError::InvalidHeader)?;
 
     Ok(PcapFrame {
-        timestamp_sec: 0,
-        timestamp_subsec: 0,
-        ts_resolution: resolution_from_ticks(interface.ts_ticks_per_second),
+        // A Simple Packet Block carries no timestamp at all.
+        timestamp: None,
         linktype: interface.linktype,
         data: &input[data_start..data_start + cap_len],
     })
@@ -507,16 +582,6 @@ fn validate_pcapng_block(
     }
 
     Ok(())
-}
-
-fn split_timestamp(raw: u64, ticks_per_second: u64) -> (u32, u32) {
-    if ticks_per_second == 0 {
-        return (0, 0);
-    }
-
-    let sec = u32::try_from((raw / ticks_per_second).min(u64::from(u32::MAX))).unwrap_or(u32::MAX);
-    let sub = u32::try_from((raw % ticks_per_second).min(u64::from(u32::MAX))).unwrap_or(u32::MAX);
-    (sec, sub)
 }
 
 fn parse_tsresol(value: u8) -> Option<u64> {
@@ -580,8 +645,85 @@ fn read_u32(input: &[u8], offset: usize, little_endian: bool) -> Result<u32, Lay
 #[allow(clippy::absolute_paths, clippy::cast_possible_truncation)]
 mod tests {
     use super::{
-        TsResolution, iter_capture_frames, iter_pcap_frames, iter_pcapng_frames, parse_pcap_frames,
+        TsResolution, iter_capture_frames, iter_pcap_frames, iter_pcapng_frames,
+        parse_capture_frames, parse_pcap_frames,
     };
+
+    /// A pcapng with `if_tsresol` and `if_tsoffset`, and one EPB at `ticks`.
+    fn pcapng_with_offset(tsresol_byte: u8, offset_seconds: i64, ticks: u64) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&0x0a0d_0d0au32.to_le_bytes());
+        out.extend_from_slice(&28u32.to_le_bytes());
+        out.extend_from_slice(&0x1a2b_3c4du32.to_le_bytes());
+        out.extend_from_slice(&1u16.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&(-1i64).to_le_bytes());
+        out.extend_from_slice(&28u32.to_le_bytes());
+
+        // IDB carrying both options.
+        let idb_total_len: u32 = 16 + 8 + 4 + 12 + 4;
+        out.extend_from_slice(&1u32.to_le_bytes());
+        out.extend_from_slice(&idb_total_len.to_le_bytes());
+        out.extend_from_slice(&1u16.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&65_535u32.to_le_bytes());
+        out.extend_from_slice(&9u16.to_le_bytes());
+        out.extend_from_slice(&1u16.to_le_bytes());
+        out.push(tsresol_byte);
+        out.extend_from_slice(&[0u8; 3]);
+        out.extend_from_slice(&14u16.to_le_bytes()); // if_tsoffset
+        out.extend_from_slice(&8u16.to_le_bytes());
+        out.extend_from_slice(&offset_seconds.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&idb_total_len.to_le_bytes());
+
+        let frame = [0u8; 4];
+        let epb_total_len: u32 = 32 + 4;
+        out.extend_from_slice(&6u32.to_le_bytes());
+        out.extend_from_slice(&epb_total_len.to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes());
+        out.extend_from_slice(&u32::try_from(ticks >> 32).unwrap_or(0).to_le_bytes());
+        out.extend_from_slice(
+            &u32::try_from(ticks & 0xffff_ffff)
+                .unwrap_or(0)
+                .to_le_bytes(),
+        );
+        out.extend_from_slice(&4u32.to_le_bytes());
+        out.extend_from_slice(&4u32.to_le_bytes());
+        out.extend_from_slice(&frame);
+        out.extend_from_slice(&epb_total_len.to_le_bytes());
+        out
+    }
+
+    /// pcapng sec 4.2: `if_tsoffset` shifts every timestamp on the interface.
+    /// The old split into seconds and sub-seconds had nowhere to put it.
+    #[test]
+    fn an_interface_timestamp_offset_is_applied() {
+        // Microsecond resolution, one hour of offset, two seconds of ticks.
+        let capture = pcapng_with_offset(6, 3_600, 2_000_000);
+        let frames = parse_capture_frames(&capture).expect("parses");
+        let timestamp = frames[0].timestamp.expect("an EPB has a timestamp");
+
+        assert_eq!(timestamp.seconds(), 3_602);
+        assert_eq!(timestamp.subsecond_ticks(), 0);
+        assert_eq!(timestamp.to_timestamp_ns(), Some(3_602_000_000_000));
+    }
+
+    /// A tick count past what 32 bits of seconds can hold used to saturate.
+    #[test]
+    fn a_timestamp_beyond_u32_seconds_is_kept_whole() {
+        let seconds = u64::from(u32::MAX) + 10;
+        let capture = pcapng_with_offset(6, 0, seconds * 1_000_000);
+        let frames = parse_capture_frames(&capture).expect("parses");
+        let timestamp = frames[0].timestamp.expect("a timestamp");
+
+        assert_eq!(
+            timestamp.seconds(),
+            i64::try_from(seconds).expect("fits an i64"),
+            "the seconds are no longer clamped to u32::MAX"
+        );
+    }
 
     #[test]
     fn iterates_single_frame_pcap() {
@@ -621,7 +763,10 @@ mod tests {
         bytes.extend_from_slice(&0u32.to_le_bytes());
 
         let frames = parse_pcap_frames(&bytes).expect("pcap should parse");
-        assert_eq!(frames[0].ts_resolution, TsResolution::Nano);
+        assert_eq!(
+            frames[0].timestamp.expect("a timestamp").resolution(),
+            TsResolution::Nano
+        );
     }
 
     #[test]
@@ -707,7 +852,7 @@ mod tests {
         let frames = parse_pcap_frames(bytes).expect("pcap should parse");
         assert_eq!(frames.len(), 1);
         // Scapy writes a non-zero timestamp for the first frame
-        assert!(frames[0].timestamp_sec > 0 || frames[0].timestamp_subsec > 0);
+        assert!(frames[0].timestamp.expect("a timestamp").ticks > 0);
     }
 
     #[test]
@@ -836,8 +981,14 @@ mod tests {
         let bytes = build_pcapng_epb_with_tsresol(0x03, &frame);
 
         let frames = parse_pcap_frames(&bytes).expect("pcapng should parse");
-        assert_eq!(frames[0].ts_resolution, TsResolution::Other(1_000));
-        assert_ne!(frames[0].ts_resolution, TsResolution::Micro);
+        assert_eq!(
+            frames[0].timestamp.expect("a timestamp").resolution(),
+            TsResolution::Other(1_000)
+        );
+        assert_ne!(
+            frames[0].timestamp.expect("a timestamp").resolution(),
+            TsResolution::Micro
+        );
     }
 
     #[test]
@@ -847,6 +998,9 @@ mod tests {
         let bytes = build_pcapng_epb_with_tsresol(0x06, &frame);
 
         let frames = parse_pcap_frames(&bytes).expect("pcapng should parse");
-        assert_eq!(frames[0].ts_resolution, TsResolution::Micro);
+        assert_eq!(
+            frames[0].timestamp.expect("a timestamp").resolution(),
+            TsResolution::Micro
+        );
     }
 }
