@@ -85,10 +85,14 @@ pub(super) fn parse_gre_minimal(data: &[u8]) -> Result<GreInfo, LayerError> {
         return Err(LayerError::InvalidLength);
     }
     let checksum_present = data[0] & 0x80 != 0;
+    let routing_present = data[0] & 0x40 != 0;
     let key_present = data[0] & 0x20 != 0;
     let sequence_present = data[0] & 0x10 != 0;
+    // RFC 1701 sec 4.1: the checksum and offset fields are both present if
+    // either bit is set, not only the checksum one.
+    let has_checksum_and_offset = checksum_present || routing_present;
     let header_len = 4
-        + usize::from(checksum_present) * 4
+        + usize::from(has_checksum_and_offset) * 4
         + usize::from(key_present) * 4
         + usize::from(sequence_present) * 4;
     if data.len() < header_len {
@@ -96,7 +100,7 @@ pub(super) fn parse_gre_minimal(data: &[u8]) -> Result<GreInfo, LayerError> {
     }
     let protocol_type = u16::from_be_bytes([data[2], data[3]]);
     let mut offset = 4;
-    if checksum_present {
+    if has_checksum_and_offset {
         offset += 4;
     }
     let key = key_present.then(|| {
@@ -120,6 +124,7 @@ pub(super) fn parse_gre_minimal(data: &[u8]) -> Result<GreInfo, LayerError> {
     Ok(GreInfo {
         protocol_type,
         checksum_present,
+        routing_present,
         key_present,
         sequence_present,
         key,

@@ -65,6 +65,12 @@ use super::network::Ipv6FragmentHeader;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ParseWarningCode {
+    /// The frame carried a complete link header and nothing after it.
+    LinkPayloadTruncated,
+    /// The link header parsed but the network header behind it did not.
+    NetworkHeaderUnreadable,
+    /// The TCP data offset named more header than the capture kept.
+    TcpOptionsTruncated,
     Ipv6NonInitialFragment,
     Ipv6ExtensionDepthLimit,
     /// The IPv6 extension header chain ran past the end of the capture.
@@ -92,6 +98,9 @@ impl ParseWarningCode {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::TransportTruncated => "transport-truncated",
+            Self::LinkPayloadTruncated => "link-payload-truncated",
+            Self::NetworkHeaderUnreadable => "network-header-unreadable",
+            Self::TcpOptionsTruncated => "tcp-options-truncated",
             Self::Ipv6NonInitialFragment => "ipv6-non-initial-fragment",
             Self::Ipv6ExtensionDepthLimit => "ipv6-ext-depth-limit",
             Self::Ipv6ExtensionTruncated => "ipv6-ext-truncated",
@@ -197,6 +206,13 @@ pub struct TcpOptionsParsed {
 pub struct GreInfo {
     pub protocol_type: u16,
     pub checksum_present: bool,
+    /// RFC 1701 sec 4.1. Deprecated by RFC 2784 sec 2.3.1, which requires a
+    /// receiver to discard packets that set it.
+    ///
+    /// When set, a variable-length source-route list follows the fixed fields,
+    /// so the payload cannot be located from the flags alone. paccel keeps the
+    /// header it read and declines to decode a payload it cannot find.
+    pub routing_present: bool,
     pub key_present: bool,
     pub sequence_present: bool,
     pub key: Option<u32>,

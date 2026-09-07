@@ -287,7 +287,22 @@ impl BuiltinPacketParser {
         parsed.ethernet = Some(eth.clone());
 
         if l3_offset >= raw.len() {
-            return Err(LayerError::InvalidLength);
+            // The link header parsed and there is nothing behind it. Strict
+            // refuses, but permissive already keeps a truncated IPv4 option
+            // list, IPv6 chain or transport header and says so, and the link
+            // header is no different: the addresses and any VLAN tags are
+            // good, and throwing them away loses the only thing the frame had.
+            if config.mode == ParseMode::Strict {
+                return Err(LayerError::InvalidLength);
+            }
+            parsed.warnings.push(ParseWarning {
+                code: ParseWarningCode::LinkPayloadTruncated,
+                protocol: ParseWarningProtocol::Link,
+                offset: l3_offset,
+                message: "link header is complete but nothing follows it; \
+                          addresses and vlan tags are still valid",
+            });
+            return Ok(());
         }
 
         if eth.ethertype == 0 && eth.payload_offset == 17 {
@@ -300,14 +315,33 @@ impl BuiltinPacketParser {
             return Ok(());
         }
 
-        Self::parse_ethertype(
+        let result = Self::parse_ethertype(
             &raw[l3_offset..],
             eth.ethertype,
             config,
             depth,
             l3_offset,
             parsed,
-        )
+        );
+
+        // Permissive already keeps a truncated IPv4 option list, IPv6 chain or
+        // transport header and warns. A network header too short to parse at
+        // all was the one case that still threw the whole frame away, taking
+        // the addresses and VLAN tags with it. Whatever the network layer did
+        // manage to fill in stays, since the parse writes as it goes.
+        match result {
+            Err(_) if config.mode == ParseMode::Permissive => {
+                parsed.warnings.push(ParseWarning {
+                    code: ParseWarningCode::NetworkHeaderUnreadable,
+                    protocol: ParseWarningProtocol::Network,
+                    offset: l3_offset,
+                    message: "network header could not be read; \
+                              link addresses and vlan tags are still valid",
+                });
+                Ok(())
+            }
+            other => other,
+        }
     }
 
     fn parse_dot11_l2(
@@ -775,6 +809,37 @@ fn decode_pppoe_session(
     Ok(())
 }
 
+/// Where a GRE header's payload starts, or `None` when it cannot be located.
+///
+/// RFC 1701 sec 4.1 puts a variable-length source-route list after the fixed
+/// fields, terminated by a null entry, so with the routing bit set the payload
+/// does not begin at `header_len`. Decoding from there reads routing data as an
+/// inner packet. RFC 2784 sec 2.3.1 deprecates routing outright and tells
+/// receivers to discard, so the outer header is kept and nothing is invented
+/// for the inside.
+type GreInnerCandidate<'a> = (
+    Option<&'a [u8]>,
+    u16,
+    bool,
+    ParseWarningCode,
+    usize,
+    &'static str,
+);
+
+fn gre_inner(gre: GreInfo, l4_bytes: &[u8], offset: usize) -> Option<GreInnerCandidate<'_>> {
+    if gre.routing_present {
+        return None;
+    }
+    Some((
+        l4_bytes.get(gre.header_len..),
+        gre.protocol_type,
+        gre.protocol_type == ethertype::TRANSPARENT_ETHERNET_BRIDGING,
+        ParseWarningCode::GreInner,
+        offset + gre.header_len,
+        "GRE inner payload; nested decode failed",
+    ))
+}
+
 fn recurse_transport_tunnel(
     parsed: &mut ParsedPacket,
     protocol: u8,
@@ -784,15 +849,10 @@ fn recurse_transport_tunnel(
     offset: usize,
 ) {
     let candidate = if let Some(gre) = parsed.gre {
-        let inner = l4_bytes.get(gre.header_len..);
-        Some((
-            inner,
-            gre.protocol_type,
-            gre.protocol_type == ethertype::TRANSPARENT_ETHERNET_BRIDGING,
-            ParseWarningCode::GreInner,
-            offset + gre.header_len,
-            "GRE inner payload; nested decode failed",
-        ))
+        let Some(candidate) = gre_inner(gre, l4_bytes, offset) else {
+            return;
+        };
+        Some(candidate)
     } else if parsed.vxlan.is_some() {
         let udp_end = udp_payload_end(parsed, l4_bytes.len());
         Some((
