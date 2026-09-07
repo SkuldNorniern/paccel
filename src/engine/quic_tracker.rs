@@ -43,6 +43,33 @@ impl QuicPacketNumberSpace {
     }
 }
 
+/// Which way a packet travelled through a QUIC connection.
+///
+/// Anchored on the endpoint roles, not on address ordering, so it stays the
+/// same when a client changes address.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum QuicDirection {
+    InitiatorToResponder,
+    ResponderToInitiator,
+}
+
+impl QuicDirection {
+    pub(crate) fn index(self) -> usize {
+        match self {
+            Self::InitiatorToResponder => 0,
+            Self::ResponderToInitiator => 1,
+        }
+    }
+
+    fn from_index(index: usize) -> Self {
+        if index == 0 {
+            Self::InitiatorToResponder
+        } else {
+            Self::ResponderToInitiator
+        }
+    }
+}
+
 /// A connection, independent of the addresses carrying it.
 ///
 /// Handed out by the tracker and only meaningful to it. A connection keeps its
@@ -361,6 +388,46 @@ impl QuicConnectionTracker {
         Some(id)
     }
 
+    /// Which way a packet from `src` to `dst` travelled through `id`.
+    ///
+    /// The stable answer, so a caller keying state on direction does not have
+    /// to know that the tuple's own ordering flips when a client moves.
+    #[must_use]
+    pub fn direction_for(
+        &self,
+        id: QuicConnectionId,
+        _src: Endpoint,
+        dst: Endpoint,
+    ) -> Option<QuicDirection> {
+        let connection = self.connections.get(&id)?;
+        Some(QuicDirection::from_index(connection.direction_to(dst)))
+    }
+
+    /// The connection a packet belongs to and which way it travelled, resolved
+    /// by its address pair or, when that is new, by its connection ID.
+    #[must_use]
+    pub fn connection_and_direction(
+        &self,
+        src: IpAddr,
+        src_port: u16,
+        dst: IpAddr,
+        dst_port: u16,
+        dcid: &[u8],
+    ) -> Option<(QuicConnectionId, QuicDirection)> {
+        let (key, _) = normalized_flow(src, src_port, dst, dst_port);
+        let id = self
+            .by_tuple
+            .get(&key)
+            .or_else(|| self.by_cid.get(dcid))
+            .copied()?;
+        let direction = self.direction_for(
+            id,
+            Endpoint::new(src, src_port),
+            Endpoint::new(dst, dst_port),
+        )?;
+        Some((id, direction))
+    }
+
     /// The connection a DCID names, if it is one being tracked.
     #[must_use]
     pub fn connection_id_for_dcid(&self, dcid: &[u8]) -> Option<QuicConnectionId> {
@@ -665,6 +732,20 @@ impl QuicConnectionTracker {
     /// this may take it from whoever held it. The previous holder is told, or
     /// it reports an address that now reaches someone else.
     fn bind_tuple(&mut self, id: QuicConnectionId, key: BiFlow) {
+        // If the endpoint direction is anchored on is the one that moved, the
+        // anchor has to move with it, or every direction collapses onto one
+        // value. The endpoint shared with a tuple the connection already held
+        // is the side that stayed put, so that is the anchor.
+        if let Some(connection) = self.connections.get_mut(&id)
+            && !key.holds(connection.responder)
+            && let Some(stationary) = connection
+                .tuples
+                .iter()
+                .find_map(|held| key.shared_endpoint(*held))
+        {
+            connection.responder = stationary;
+        }
+
         if !self.by_tuple.contains_key(&key) {
             // A connection that keeps moving drops its oldest address rather
             // than growing without bound.
@@ -1161,6 +1242,36 @@ mod tests {
             tracker.stats().active_cids <= 8,
             "{} ids held past the cap",
             tracker.stats().active_cids
+        );
+    }
+
+    /// A capture joined mid-connection can anchor direction on the wrong end.
+    /// If that end then moves, the anchor is corrected to the side that stayed
+    /// put, rather than matching neither and collapsing both directions.
+    #[test]
+    fn the_direction_anchor_follows_the_end_that_stayed() {
+        let client = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let server = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let moved = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+        let server_cid = [9, 9, 9, 9];
+        let mut tracker = QuicConnectionTracker::new();
+
+        // The server's packet is seen first, so the anchor lands on the client.
+        tracker.observe_long_header(server, 443, client, 5_000, &server_cid);
+        let id = tracker.connection_id_for_dcid(&server_cid).expect("opened");
+
+        // The client then moves, and the anchor with it.
+        tracker.observe_short_header(moved, 53_000, server, 443, &server_cid);
+
+        let to_server = tracker
+            .direction_for(id, Endpoint::new(moved, 53_000), Endpoint::new(server, 443))
+            .expect("a direction");
+        let to_client = tracker
+            .direction_for(id, Endpoint::new(server, 443), Endpoint::new(moved, 53_000))
+            .expect("a direction");
+        assert_ne!(
+            to_server, to_client,
+            "both ways must not collapse onto one direction"
         );
     }
 
