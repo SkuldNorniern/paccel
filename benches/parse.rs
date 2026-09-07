@@ -4,9 +4,12 @@
 use std::hint::black_box;
 use std::net::{IpAddr, Ipv4Addr};
 
-use criterion::{Criterion, criterion_group, criterion_main};
+use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use paccel::engine::builtin::{ParseConfig, ParsedPacket, StopLayer};
-use paccel::engine::{BuiltinPacketParser, QuicStreamReassembler, TcpStreamReassembler};
+use paccel::engine::{
+    BuiltinPacketParser, QuicConnectionTracker, QuicStreamReassembler, SessionTracker,
+    TcpStreamReassembler,
+};
 use paccel::engine::{iter_capture_frames, parse_capture_frames};
 
 const ETH: [u8; 14] = [
@@ -187,5 +190,136 @@ fn reassembly(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, transport, application, captures, reassembly);
+/// The 0.4 stateful paths: connection tracking, expiry at scale, stream
+/// classification, and what the detailed variants cost over the plain ones.
+fn stateful(c: &mut Criterion) {
+    let client = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let server = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let moved = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let cid = [9u8, 9, 9, 9];
+    let mut group = c.benchmark_group("stateful");
+
+    group.bench_function("quic tracker migration", |b| {
+        b.iter(|| {
+            let mut tracker = QuicConnectionTracker::new();
+            tracker.observe_long_header(client, 5_000, server, 443, &[1, 1, 1, 1]);
+            tracker.observe_long_header(server, 443, client, 5_000, &cid);
+            black_box(tracker.observe_short_header(moved, 53_000, server, 443, &cid));
+        });
+    });
+
+    group.bench_function("quic cid lookup", |b| {
+        let mut tracker = QuicConnectionTracker::new();
+        for index in 0..1_000u32 {
+            let port = 40_000u16.wrapping_add(u16::try_from(index).unwrap_or(0));
+            tracker.observe_long_header(client, port, server, 443, &index.to_be_bytes());
+        }
+        b.iter(|| black_box(tracker.connection_and_direction(client, 40_500, server, 443, &cid)));
+    });
+
+    for count in [10_000usize, 100_000] {
+        group.bench_function(format!("quic expire_before {count}"), |b| {
+            b.iter_batched(
+                || {
+                    let mut tracker = QuicConnectionTracker::new()
+                        .with_max_flows(count * 2)
+                        .with_max_tuples(count * 4, 8);
+                    for index in 0..count {
+                        let port = u16::try_from(index % 60_000).unwrap_or(0);
+                        let value = u32::try_from(index).unwrap_or(0);
+                        tracker.observe_long_header_at(
+                            client,
+                            port,
+                            server,
+                            443,
+                            &value.to_be_bytes(),
+                            u64::try_from(index).unwrap_or(0),
+                        );
+                    }
+                    tracker
+                },
+                |mut tracker| black_box(tracker.expire_before(u64::MAX / 2)),
+                BatchSize::LargeInput,
+            );
+        });
+    }
+
+    // What the event and stats bookkeeping costs over the plain call.
+    let payload = [0x41u8; 512];
+    group.bench_function("tcp offer", |b| {
+        b.iter(|| {
+            let mut r = TcpStreamReassembler::new();
+            r.offer(client, 4_000, server, 80, 0, true, false, false, b"");
+            black_box(r.offer(client, 4_000, server, 80, 1, false, false, false, &payload));
+        });
+    });
+    group.bench_function("tcp offer_detailed", |b| {
+        b.iter(|| {
+            let mut r = TcpStreamReassembler::new();
+            r.offer(client, 4_000, server, 80, 0, true, false, false, b"");
+            black_box(
+                r.offer_detailed(client, 4_000, server, 80, 1, false, false, false, &payload),
+            );
+        });
+    });
+
+    // Stream classification, one bench per shape the walk has to separate.
+    let mut bgp = vec![0xffu8; 16];
+    bgp.extend(19u16.to_be_bytes());
+    bgp.push(4);
+    let mut dns = vec![0x00u8, 0x1d, 0x12, 0x34, 0x01, 0x00];
+    dns.extend([0, 1, 0, 0, 0, 0, 0, 0]);
+    dns.extend([0x07]);
+    dns.extend(b"example");
+    dns.extend([0x03]);
+    dns.extend(b"com");
+    dns.extend([0x00, 0x00, 0x01, 0x00, 0x01]);
+    let mut mqtt = vec![0x10u8, 0x0c, 0x00, 0x04];
+    mqtt.extend(b"MQTT");
+    mqtt.extend([0x05, 0x02, 0x00, 0x3c, 0x00, 0x00, 0x00]);
+
+    for (name, body) in [
+        (
+            "http",
+            b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n".to_vec(),
+        ),
+        ("bgp", bgp),
+        ("dns", dns),
+        ("mqtt", mqtt),
+    ] {
+        group.bench_function(format!("session classify {name}"), |b| {
+            b.iter(|| {
+                let mut tracker = SessionTracker::new();
+                tracker.offer_frame(&tcp_stream_frame(0, true, b""));
+                black_box(tracker.offer_frame(&tcp_stream_frame(1, false, &body)))
+            });
+        });
+    }
+
+    group.finish();
+}
+
+/// One TCP frame carrying `payload`, for the session benches.
+fn tcp_stream_frame(sequence: u32, syn: bool, payload: &[u8]) -> Vec<u8> {
+    let mut tcp = Vec::with_capacity(20 + payload.len());
+    tcp.extend_from_slice(&40_000u16.to_be_bytes());
+    tcp.extend_from_slice(&443u16.to_be_bytes());
+    tcp.extend_from_slice(&sequence.to_be_bytes());
+    tcp.extend_from_slice(&0u32.to_be_bytes());
+    tcp.push(0x50);
+    tcp.push(if syn { 0x02 } else { 0x18 });
+    tcp.extend_from_slice(&0x4000u16.to_be_bytes());
+    tcp.extend_from_slice(&[0, 0, 0, 0]);
+    tcp.extend_from_slice(payload);
+    ipv4(6, &tcp)
+}
+
+criterion_group!(
+    benches,
+    transport,
+    application,
+    captures,
+    reassembly,
+    stateful
+);
 criterion_main!(benches);
