@@ -6,6 +6,24 @@ pub enum ImapMessage {
     Tagged { tag: String, text: String },
 }
 
+/// No length is given in RFC 3501; this bound exists so a line of arbitrary
+/// text is not read as a tagged command, and is generous next to the four or
+/// five characters clients actually use.
+const MAX_TAG_LEN: usize = 32;
+
+/// RFC 3501 sec 9: `tag = 1*<any ASTRING-CHAR except "+">`, where the
+/// exclusions are `atom-specials` - `(`, `)`, `{`, space, controls, the list
+/// wildcards `%` and `*`, and the quoted-specials `"` and `\`.
+///
+/// Alphanumerics alone would be the common case, not the rule: `.`, `-` and
+/// `_` all appear in tags real clients send, and refusing them loses the line.
+fn is_tag_char(byte: u8) -> bool {
+    !matches!(
+        byte,
+        b'(' | b')' | b'{' | b' ' | b'%' | b'*' | b'"' | b'\\' | b'+' | 0x00..=0x1f | 0x7f
+    )
+}
+
 pub fn parse_imap_message(payload: &[u8]) -> Result<ImapMessage, LayerError> {
     let line_end = find_line_end(payload).unwrap_or(payload.len());
     if line_end == 0 {
@@ -24,7 +42,7 @@ pub fn parse_imap_message(payload: &[u8]) -> Result<ImapMessage, LayerError> {
 
     let mut fields = line.splitn(2, ' ');
     let tag = fields.next().unwrap_or("");
-    if tag.is_empty() || tag.len() > 14 || !tag.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
+    if tag.is_empty() || tag.len() > MAX_TAG_LEN || !tag.bytes().all(is_tag_char) {
         return Err(LayerError::InvalidHeader);
     }
     let text = fields.next().ok_or(LayerError::InvalidHeader)?;
@@ -80,6 +98,30 @@ fn find_line_end(payload: &[u8]) -> Option<usize> {
 mod tests {
     use super::{ImapMessage, parse_imap_message, probe_imap};
     use crate::layer::{LayerError, ProbeResult};
+
+    /// RFC 3501 sec 9 defines a tag as any ASTRING-CHAR except `+`, which is
+    /// far wider than the alphanumerics clients most often use.
+    #[test]
+    fn a_tag_may_hold_more_than_alphanumerics() {
+        for tag in ["A001", "a.1", "tag-2", "x_9", "A1:B", "[2]"] {
+            let line = format!("{tag} OK done\r\n");
+            let message = parse_imap_message(line.as_bytes());
+            assert!(message.is_ok(), "{tag} was refused: {message:?}");
+        }
+    }
+
+    /// The exclusions are still exclusions, or a line of prose would read as a
+    /// tagged command.
+    #[test]
+    fn the_characters_a_tag_may_not_hold_are_still_refused() {
+        for tag in ["a+b", "a(b", "a)b", "a{b", "a%b", "a*b", "a\"b"] {
+            let line = format!("{tag} OK done\r\n");
+            assert!(
+                parse_imap_message(line.as_bytes()).is_err(),
+                "{tag} was accepted"
+            );
+        }
+    }
 
     #[test]
     fn parses_untagged_greeting() {
