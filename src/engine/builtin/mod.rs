@@ -109,10 +109,31 @@ impl BuiltinPacketParser {
     #[cold]
     #[inline(never)]
     fn describe_failure(error: &LayerError, parsed: &ParsedPacket) -> ParseError {
-        let reached_link =
-            parsed.ethernet.is_some() || parsed.dot11.is_some() || parsed.radiotap.is_some();
-        if !reached_link {
-            return ParseError::from_layer_error(error, Layer::Link, None, 0);
+        // The failure is in the innermost packet the parse reached: an outer
+        // tunnel header must have succeeded for there to be an inner one at
+        // all. `offset` is then relative to that inner buffer, not the frame.
+        let mut deepest = parsed;
+        let mut depth = 0usize;
+        while let Some(inner) = deepest.inner.as_deref() {
+            deepest = inner;
+            depth += 1;
+        }
+        Self::describe_layer(error, deepest, depth)
+    }
+
+    /// Which layer of one packet stopped, ignoring anything tunnelled inside
+    /// it. `depth` is 0 for the frame itself.
+    #[cold]
+    #[inline(never)]
+    fn describe_layer(error: &LayerError, parsed: &ParsedPacket, depth: usize) -> ParseError {
+        // Only the outermost packet has a link header to have failed at. An
+        // inner one carried by GRE or IP-in-IP has none by construction.
+        if depth == 0 {
+            let reached_link =
+                parsed.ethernet.is_some() || parsed.dot11.is_some() || parsed.radiotap.is_some();
+            if !reached_link {
+                return ParseError::from_layer_error(error, Layer::Link, None, 0);
+            }
         }
 
         let network = if parsed.ipv4.is_some() {
@@ -128,13 +149,10 @@ impl BuiltinPacketParser {
             return ParseError::from_layer_error(error, Layer::Network, None, 0);
         };
 
-        // A tunnel that opened but never produced an inner packet failed as a
-        // tunnel, not as the transport it would have carried.
+        // A tunnel that opened and produced nothing inside failed as a tunnel,
+        // not as the transport it would have carried.
         if parsed.gre.is_some() || parsed.vxlan.is_some() || parsed.geneve.is_some() {
-            if parsed.inner.is_none() {
-                return ParseError::from_layer_error(error, Layer::Tunnel, None, 0);
-            }
-            return ParseError::from_layer_error(error, Layer::Application, None, 0);
+            return ParseError::from_layer_error(error, Layer::Tunnel, None, 0);
         }
 
         let offset = parsed.transport_segment_offset.unwrap_or(0);
@@ -1297,6 +1315,61 @@ mod tests {
             0x45, 0x00, 0x00, 0x18, 0x00, 0x01, 0x00, 0x00, 64, 17, 0, 0, // ipv4, total 24
             192, 168, 1, 1, 192, 168, 1, 2, 0x04, 0xd2, 0x00, 0x35, // 4 of udp's 8 bytes
         ]
+    }
+
+    /// Ethernet / IPv4 / UDP / VXLAN / Ethernet / IPv4 / half a UDP header.
+    ///
+    /// A tunnel whose payload does not decode is reported as a warning and
+    /// leaves `inner` empty, in Strict as well as Permissive: the outer packet
+    /// is intact and its addresses are good. Nothing is invented for the
+    /// inside, and the frame is not refused for it.
+    #[test]
+    fn a_tunnel_payload_that_does_not_decode_warns_rather_than_failing() {
+        let inner = ipv4_with_half_a_udp_header();
+        let vxlan_payload_len = 8 + inner.len();
+        let udp_len = 8 + vxlan_payload_len;
+        let total_len = u16::try_from(20 + udp_len).expect("short frame");
+
+        let mut frame = vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0x08, 0x00];
+        frame.extend([0x45, 0x00]);
+        frame.extend(total_len.to_be_bytes());
+        frame.extend([0x00, 0x01, 0x00, 0x00, 64, 17, 0, 0]);
+        frame.extend([192, 168, 1, 1, 192, 168, 1, 2]);
+        frame.extend(4789u16.to_be_bytes());
+        frame.extend(4789u16.to_be_bytes());
+        frame.extend(u16::try_from(udp_len).expect("short frame").to_be_bytes());
+        frame.extend([0, 0]);
+        frame.extend([0x08, 0, 0, 0, 0, 0, 0x2a, 0]);
+        frame.extend(&inner);
+
+        // Permissive keeps what the inner packet did have: its addresses, and
+        // the ports the cut transport header left.
+        let permissive = BuiltinPacketParser::parse(&frame).expect("the outer packet is intact");
+        let decoded = permissive.inner.as_deref().expect("the inner packet");
+        assert!(decoded.ipv4.is_some());
+        assert_eq!(decoded.ports(), Some((1234, 53)));
+
+        // Strict refuses the inner packet, but that is not a reason to refuse
+        // the frame: the outer headers are good. It says so with a warning.
+        let strict = BuiltinPacketParser::parse_with_config(
+            &frame,
+            ParseConfig {
+                mode: ParseMode::Strict,
+                ..ParseConfig::default()
+            },
+        )
+        .expect("the outer packet is still intact");
+        assert!(strict.vxlan.is_some(), "the tunnel header is kept");
+        assert!(
+            strict.inner.is_none(),
+            "nothing is invented for a payload strict would not accept"
+        );
+        assert!(
+            strict
+                .warnings
+                .iter()
+                .any(|warning| warning.code == ParseWarningCode::VxlanInner)
+        );
     }
 
     #[test]
