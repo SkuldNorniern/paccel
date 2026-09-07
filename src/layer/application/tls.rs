@@ -393,16 +393,28 @@ fn parse_server_name(data: &[u8], parsed: &mut TlsClientHello) -> bool {
         return false;
     }
 
-    let name_type = data[2];
-    let name_length = usize::from(u16::from_be_bytes([data[3], data[4]]));
-    let Some(name_end) = 5usize.checked_add(name_length) else {
-        return false;
-    };
-    if name_end > list_end {
-        return false;
-    }
-    if name_type == 0 {
-        parsed.server_name = Some(String::from_utf8_lossy(&data[5..name_end]).into_owned());
+    // RFC 6066 sec 3: ServerNameList is a list. Reading only its first entry
+    // misses a host_name behind an entry of any other type - which a server
+    // still finds, because it walks the list.
+    let mut offset = 2;
+    while offset + 3 <= list_end {
+        let name_type = data[offset];
+        let name_length = usize::from(u16::from_be_bytes([data[offset + 1], data[offset + 2]]));
+        let Some(name_end) = offset
+            .checked_add(3)
+            .and_then(|start| start.checked_add(name_length))
+        else {
+            return false;
+        };
+        if name_end > list_end {
+            return false;
+        }
+        if name_type == 0 {
+            parsed.server_name =
+                Some(String::from_utf8_lossy(&data[offset + 3..name_end]).into_owned());
+            return true;
+        }
+        offset = name_end;
     }
     true
 }
@@ -604,6 +616,31 @@ mod tests {
             parse_tls_server_hello(&server),
             Err(LayerError::InsufficientData)
         ));
+    }
+
+    /// RFC 6066 sec 3: ServerNameList is a list, and a server walks it. Reading
+    /// only the first entry lets a decoy of another name_type hide the real
+    /// host_name from anything watching, while the connection still works.
+    #[test]
+    fn a_host_name_behind_another_entry_is_still_found() {
+        let entry = |name_type: u8, name: &[u8]| {
+            let mut out = vec![name_type];
+            out.extend(u16::try_from(name.len()).expect("short name").to_be_bytes());
+            out.extend(name);
+            out
+        };
+        let mut list = entry(99, b"decoy");
+        list.extend(entry(0, b"real.example.com"));
+        let mut body = u16::try_from(list.len())
+            .expect("short list")
+            .to_be_bytes()
+            .to_vec();
+        body.extend(&list);
+
+        let mut hello = client_hello();
+        hello.server_name = None;
+        assert!(parse_server_name(&body, &mut hello));
+        assert_eq!(hello.server_name.as_deref(), Some("real.example.com"));
     }
 
     #[test]
