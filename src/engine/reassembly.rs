@@ -367,6 +367,8 @@ pub struct TcpReassemblyStats {
     pub resets: u64,
     /// Segments refused because they contradicted buffered bytes.
     pub overlap_conflicts: u64,
+    /// Segments refused because the direction's FIN had already been reached.
+    pub closed_rejections: u64,
     /// Segments dropped for sitting too far past what was expected.
     pub gap_rejections: u64,
 }
@@ -403,8 +405,22 @@ struct TcpDirectionState {
     expected: Option<u32>,
     segments: BTreeMap<u32, Vec<u8>>,
     buffered_bytes: usize,
-    closing: bool,
-    fin_sequence: Option<u32>,
+    lifecycle: TcpDirectionLifecycle,
+}
+
+/// How far through its close one direction of a TCP flow is.
+///
+/// RFC 9293 sec 3.5: a FIN consumes a sequence number and ends the sender's
+/// stream. Bytes after it belong to no stream, and a reassembler that keeps
+/// accepting them can be fed data the endpoint will never see.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum TcpDirectionLifecycle {
+    #[default]
+    Open,
+    /// A FIN has been seen but not yet reached in sequence.
+    FinPending(u32),
+    /// The FIN was reached. The stream is over.
+    Closed,
 }
 
 #[derive(Debug, Default)]
@@ -698,9 +714,18 @@ impl TcpStreamReassembler {
             state.expected = Some(if syn { seq.wrapping_add(1) } else { seq });
         }
         let data_sequence = if syn { seq.wrapping_add(1) } else { seq };
-        if fin {
-            state.closing = true;
-            state.fin_sequence = Some(data_sequence.wrapping_add(payload_sequence_length));
+        let already_closed = Self::note_fin(
+            state,
+            fin,
+            data_sequence.wrapping_add(payload_sequence_length),
+        );
+
+        // RFC 9293 sec 3.5: the FIN ended this direction's stream. Anything
+        // after it is not stream data, and emitting it would hand a caller
+        // bytes the endpoint itself discards.
+        if already_closed {
+            self.stats.closed_rejections = self.stats.closed_rejections.saturating_add(1);
+            return ReassemblyOutput::new(Vec::new(), ReassemblyEvent::Closed);
         }
 
         let mut output = Vec::new();
@@ -1070,13 +1095,26 @@ impl TcpStreamReassembler {
         }
     }
 
+    /// Records a FIN, and says whether this direction was already closed. A
+    /// retransmitted FIN on a closed direction changes nothing.
+    fn note_fin(state: &mut TcpDirectionState, fin: bool, fin_sequence: u32) -> bool {
+        if state.lifecycle == TcpDirectionLifecycle::Closed {
+            return true;
+        }
+        if fin {
+            state.lifecycle = TcpDirectionLifecycle::FinPending(fin_sequence);
+        }
+        false
+    }
+
     /// Returns whether the FIN was reached, so the caller can report it.
     fn consume_fin(state: &mut TcpDirectionState) -> bool {
-        if let (Some(expected), Some(fin_sequence)) = (state.expected, state.fin_sequence)
+        if let (Some(expected), TcpDirectionLifecycle::FinPending(fin_sequence)) =
+            (state.expected, state.lifecycle)
             && expected == fin_sequence
         {
             state.expected = Some(expected.wrapping_add(1));
-            state.fin_sequence = None;
+            state.lifecycle = TcpDirectionLifecycle::Closed;
             return true;
         }
         false
@@ -1964,6 +2002,108 @@ mod tests {
             reassembler.is_finished(src, 40_000, dst, 443, 0),
             "and the two agree"
         );
+    }
+
+    /// RFC 9293 sec 3.5: a FIN ends the sender's stream. Bytes after it belong
+    /// to no stream, and accepting them lets a reassembler be fed data the
+    /// endpoint itself discards.
+    #[test]
+    fn data_after_a_fin_is_refused() {
+        let src = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let dst = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let mut reassembler = TcpStreamReassembler::new();
+        reassembler.offer(src, 40_000, dst, 443, 100, true, false, false, &[]);
+
+        let data = reassembler.offer(src, 40_000, dst, 443, 101, false, false, false, b"hello");
+        assert_eq!(data, b"hello");
+
+        let closed =
+            reassembler.offer_detailed(src, 40_000, dst, 443, 106, false, true, false, &[]);
+        assert_eq!(closed.event, ReassemblyEvent::Fin);
+
+        let after =
+            reassembler.offer_detailed(src, 40_000, dst, 443, 107, false, false, false, b"evil");
+        assert_eq!(after.event, ReassemblyEvent::Closed);
+        assert!(after.data.is_empty(), "post-fin bytes are never emitted");
+        assert_eq!(reassembler.stats().closed_rejections, 1);
+    }
+
+    /// A FIN that arrives before the data it follows waits, and only closes the
+    /// direction once the gap is filled.
+    #[test]
+    fn a_fin_ahead_of_its_data_waits_for_it() {
+        let src = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let dst = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let mut reassembler = TcpStreamReassembler::new();
+        reassembler.offer(src, 40_000, dst, 443, 100, true, false, false, &[]);
+
+        // The FIN arrives first, sitting past a gap.
+        let early = reassembler.offer_detailed(src, 40_000, dst, 443, 106, false, true, false, &[]);
+        assert_ne!(early.event, ReassemblyEvent::Fin, "not reached yet");
+
+        // The missing bytes arrive and carry the stream up to the FIN.
+        let filled =
+            reassembler.offer_detailed(src, 40_000, dst, 443, 101, false, false, false, b"hello");
+        assert_eq!(filled.data, b"hello");
+
+        let after =
+            reassembler.offer_detailed(src, 40_000, dst, 443, 107, false, false, false, b"evil");
+        assert_eq!(
+            after.event,
+            ReassemblyEvent::Closed,
+            "the direction closed when the fin was reached"
+        );
+    }
+
+    /// Re-sending the FIN, or the data before it, must not reopen anything.
+    #[test]
+    fn a_retransmission_after_close_stays_closed() {
+        let src = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let dst = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let mut reassembler = TcpStreamReassembler::new();
+        reassembler.offer(src, 40_000, dst, 443, 100, true, false, false, &[]);
+        reassembler.offer(src, 40_000, dst, 443, 101, false, false, false, b"hello");
+        reassembler.offer(src, 40_000, dst, 443, 106, false, true, false, &[]);
+
+        for (label, seq, fin) in [
+            ("the fin again", 106u32, true),
+            ("the data again", 101, false),
+        ] {
+            let again =
+                reassembler.offer_detailed(src, 40_000, dst, 443, seq, false, fin, false, b"x");
+            assert_eq!(again.event, ReassemblyEvent::Closed, "{label}");
+            assert!(again.data.is_empty(), "{label}");
+        }
+    }
+
+    /// Closing one direction says nothing about the other.
+    #[test]
+    fn closing_one_direction_leaves_the_other_open() {
+        let src = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let dst = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let mut reassembler = TcpStreamReassembler::new();
+        reassembler.offer(src, 40_000, dst, 443, 100, true, false, false, &[]);
+        reassembler.offer(src, 40_000, dst, 443, 101, false, true, false, &[]);
+
+        // The reverse direction is a different lifecycle entirely.
+        reassembler.offer(dst, 443, src, 40_000, 500, true, false, false, &[]);
+        let reply = reassembler.offer(dst, 443, src, 40_000, 501, false, false, false, b"reply");
+        assert_eq!(reply, b"reply");
+    }
+
+    /// A new SYN starts a new connection on the tuple, so the close does not
+    /// carry over.
+    #[test]
+    fn a_syn_after_close_reopens_the_direction() {
+        let src = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let dst = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let mut reassembler = TcpStreamReassembler::new();
+        reassembler.offer(src, 40_000, dst, 443, 100, true, false, false, &[]);
+        reassembler.offer(src, 40_000, dst, 443, 101, false, true, false, &[]);
+
+        reassembler.offer(src, 40_000, dst, 443, 9_000, true, false, false, &[]);
+        let fresh = reassembler.offer(src, 40_000, dst, 443, 9_001, false, false, false, b"new");
+        assert_eq!(fresh, b"new", "a new connection is not the closed one");
     }
 
     /// A FIN riding on a segment that was refused must not be reported as the
