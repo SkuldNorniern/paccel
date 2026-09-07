@@ -42,6 +42,10 @@ struct IpDatagramState {
     received: Vec<bool>,
     fragment_count: usize,
     total_length: Option<usize>,
+    /// What the IPv6 fragments of this datagram said follows the fragment
+    /// header. It is not part of the identity key, but fragments of one
+    /// datagram must not disagree about it.
+    ipv6_next_header: Option<u8>,
 }
 
 enum FragmentResult {
@@ -178,16 +182,28 @@ impl IpFragmentReassembler {
         next_header: u8,
         payload: &[u8],
     ) -> Option<Vec<u8>> {
-        // IPv6 fragment identity excludes next-header: only source, destination,
-        // and identification identify the datagram.
-        let _ = next_header;
+        // Identity excludes next-header: only source, destination and
+        // identification name the datagram. But fragments of one datagram must
+        // still agree about what follows the fragment header.
         let key = IpDatagramKey::V6 {
             source: src,
             destination: dst,
             identification: id,
         };
+        if let Some(state) = self.datagrams.get(&key)
+            && state
+                .ipv6_next_header
+                .is_some_and(|seen| seen != next_header)
+        {
+            self.remove_datagram(&key);
+            return None;
+        }
         let offset = usize::from(frag_offset) * 8;
-        self.offer_fragment(key, offset, more_fragments, payload, None)
+        let reassembled = self.offer_fragment(key.clone(), offset, more_fragments, payload, None);
+        if let Some(state) = self.datagrams.get_mut(&key) {
+            state.ipv6_next_header = Some(next_header);
+        }
+        reassembled
     }
 
     fn offer_fragment(
@@ -198,6 +214,13 @@ impl IpFragmentReassembler {
         payload: &[u8],
         now: Option<Timestamp>,
     ) -> Option<Vec<u8>> {
+        // RFC 8200 sec 4.5 and RFC 791: a fragment with More Fragments set
+        // carries a whole number of eight-byte units. One that does not cannot
+        // be placed, and is a known evasion shape.
+        if more_fragments && !payload.len().is_multiple_of(8) {
+            self.remove_datagram(&key);
+            return None;
+        }
         let Some(end) = offset.checked_add(payload.len()) else {
             self.remove_datagram(&key);
             return None;
@@ -2196,6 +2219,62 @@ mod tests {
         assert_eq!(
             reassembler.offer_ipv4(&ipv4_header(1, true), &payload[8..16]),
             Some(payload.to_vec())
+        );
+    }
+
+    /// RFC 8200 sec 4.5: a fragment with More Fragments set carries a whole
+    /// number of eight-byte units. One that does not cannot be placed, and is
+    /// a known evasion shape.
+    #[test]
+    fn a_non_final_fragment_of_odd_length_is_dropped() {
+        let src = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1);
+        let dst = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 2);
+        let mut reassembler = IpFragmentReassembler::new();
+
+        // Seven bytes, More Fragments set: not a multiple of eight. The
+        // datagram is dropped, not merely left incomplete.
+        assert_eq!(
+            reassembler.offer_ipv6(src, dst, 1, 0, true, 6, b"1234567"),
+            None
+        );
+        assert!(
+            reassembler.datagrams.is_empty(),
+            "an unplaceable fragment takes the datagram with it"
+        );
+
+        // A whole number of units is fine.
+        assert_eq!(
+            reassembler.offer_ipv6(src, dst, 2, 0, true, 6, b"12345678"),
+            None
+        );
+        assert_eq!(
+            reassembler.offer_ipv6(src, dst, 2, 1, false, 6, b"tail"),
+            Some(b"12345678tail".to_vec())
+        );
+    }
+
+    /// The next-header is not part of the identity key, but fragments of one
+    /// datagram must not disagree about what follows the fragment header.
+    #[test]
+    fn ipv6_fragments_disagreeing_on_next_header_drop_the_datagram() {
+        let src = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1);
+        let dst = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 2);
+        let mut reassembler = IpFragmentReassembler::new();
+
+        assert_eq!(
+            reassembler.offer_ipv6(src, dst, 7, 0, true, 6, b"12345678"),
+            None
+        );
+        // Same datagram, but claiming UDP follows rather than TCP.
+        assert_eq!(
+            reassembler.offer_ipv6(src, dst, 7, 1, false, 17, b"tail"),
+            None,
+            "the datagram is dropped rather than reassembled from disagreeing parts"
+        );
+        // And it really is gone: the original tail no longer completes it.
+        assert_eq!(
+            reassembler.offer_ipv6(src, dst, 7, 1, false, 6, b"tail"),
+            None
         );
     }
 
