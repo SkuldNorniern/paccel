@@ -299,16 +299,20 @@ impl QuicConnectionTracker {
         scid: &[u8],
         now: Option<Timestamp>,
     ) {
-        if scid.is_empty() {
-            return;
-        }
+        // A zero-length SCID is legal (RFC 9000 sec 17.2): an endpoint that
+        // does not need its peer to address it by ID uses none.
+        let named = !scid.is_empty();
         let (key, _) = normalized_flow(src, src_port, dst, dst_port);
         let source = Endpoint::new(src, src_port);
         let destination = Endpoint::new(dst, dst_port);
 
         // An SCID already on the books names the connection even when the
         // address pair does not: that is a long header arriving after a move.
-        let id = match self.by_tuple.get(&key).or_else(|| self.by_cid.get(scid)) {
+        let id = match self
+            .by_tuple
+            .get(&key)
+            .or_else(|| named.then(|| self.by_cid.get(scid)).flatten())
+        {
             Some(id) => *id,
             // Nothing known yet, so this is the first packet of a connection
             // and its destination is the end that did not initiate.
@@ -324,9 +328,18 @@ impl QuicConnectionTracker {
         let Some(connection) = self.connections.get_mut(&id) else {
             return;
         };
+        let reply_direction = connection.direction_to(source);
+        if !named {
+            // Nothing to expect back and nothing to index, but the tuple above
+            // is now bound and the connection is dated below.
+            if let Some(now) = now {
+                connection.last_seen.observe(now);
+            }
+            return;
+        }
+
         // The sender announces the ID its peer should send *back* to, so this
         // is the DCID expected on packets headed the other way.
-        let reply_direction = connection.direction_to(source);
         let displaced = connection.expected_dcids[reply_direction]
             .replace(scid.to_vec())
             .filter(|previous| previous != scid);
@@ -915,6 +928,29 @@ fn normalized_flow(src: IpAddr, src_port: u16, dst: IpAddr, dst_port: u16) -> (B
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_zero_length_scid_is_still_tracked_by_its_addresses() {
+        let mut tracker = QuicConnectionTracker::new();
+        let client = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let server = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+
+        tracker.observe_long_header(client, 50_000, server, 443, &[]);
+
+        let (id, direction) = tracker
+            .connection_and_direction(client, 50_000, server, 443, &[])
+            .expect("the connection is addressable by its tuple");
+        assert_eq!(direction, QuicDirection::InitiatorToResponder);
+        assert_eq!(
+            tracker.tuples_for_connection(id).len(),
+            1,
+            "the address pair it was seen on"
+        );
+
+        // Nothing was indexed by ID, because there was no ID to index.
+        assert!(tracker.connection_id_for_dcid(&[]).is_none());
+        assert_eq!(tracker.stats().active_connections, 1);
+    }
 
     #[test]
     fn expire_before_drops_dated_flows_and_their_connection_ids() {

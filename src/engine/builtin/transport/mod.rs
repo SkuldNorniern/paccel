@@ -102,13 +102,21 @@ pub(super) fn parse_transport(
 /// an error, so the depth is bounded by `max_icmp_quote_depth`. A quote that
 /// does not decode is simply absent: the error itself is still worth
 /// reporting.
+///
+/// Available to a transport-depth parse, not only an application one: what an
+/// error quotes is an IP header with a transport header behind it, so a caller
+/// that asked for transport has asked for exactly what this reads. The inner
+/// parse inherits the caller's config and stops where the caller said.
+///
+/// A network-depth parse returns before the transport layer is reached at all,
+/// so there is no depth left to check here beyond the quote's own.
 fn quote_from_icmp(
     parsed: &mut ParsedPacket,
     l4_bytes: &[u8],
     ethertype: u16,
     config: ParseConfig,
 ) {
-    if config.stop_after != StopLayer::Application || config.max_icmp_quote_depth == 0 {
+    if config.max_icmp_quote_depth == 0 {
         return;
     }
     let Some(quoted) = l4_bytes.get(8..) else {
@@ -361,6 +369,39 @@ mod tests {
             inner.icmp_quoted.is_none(),
             "one level, so an error quoting an error does not recurse without bound"
         );
+    }
+
+    #[test]
+    fn a_transport_depth_parse_still_reads_the_quote() {
+        let mut quoted = vec![0x45, 0x00, 0x00, 0x1c, 0x00, 0x01, 0x00, 0x00, 64, 17, 0, 0];
+        quoted.extend([10, 0, 0, 1, 10, 0, 0, 3]);
+        quoted.extend([0x04, 0xd2, 0x00, 0x35, 0x00, 0x08, 0x00, 0x00]);
+
+        let mut icmp = vec![3, 1, 0, 0, 0, 0, 0, 0];
+        icmp.extend(&quoted);
+
+        let mut frame = vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0x08, 0x00];
+        let total = u16::try_from(20 + icmp.len()).expect("fits");
+        frame.extend([0x45, 0x00]);
+        frame.extend(total.to_be_bytes());
+        frame.extend([0x00, 0x01, 0x00, 0x00, 64, 1, 0, 0]);
+        frame.extend([10, 0, 0, 3, 10, 0, 0, 1]);
+        frame.extend(&icmp);
+
+        let parsed = BuiltinPacketParser::parse_with_config(
+            &frame,
+            ParseConfig {
+                stop_after: StopLayer::Transport,
+                ..ParseConfig::default()
+            },
+        )
+        .expect("the error parses");
+
+        let inner = parsed
+            .icmp_quoted
+            .as_deref()
+            .expect("the quoted datagram, at transport depth");
+        assert_eq!(inner.ports(), Some((1234, 53)));
     }
 
     /// An error with nothing quoted, or a message that is not an error, leaves
