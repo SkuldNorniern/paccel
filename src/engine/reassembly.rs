@@ -183,6 +183,12 @@ impl IpFragmentReassembler {
         next_header: u8,
         payload: &[u8],
     ) -> Option<Vec<u8>> {
+        // RFC 6946: offset zero with no More Fragments is an atomic fragment, a
+        // whole packet that happens to carry the header.
+        if frag_offset == 0 && !more_fragments {
+            return None;
+        }
+
         // Identity excludes next-header: only source, destination and
         // identification name the datagram. But fragments of one datagram must
         // still agree about what follows the fragment header.
@@ -314,10 +320,14 @@ impl IpFragmentReassembler {
             state.received.resize(end, false);
             *total_bytes = projected_total;
         }
-        if state
-            .received
-            .get(offset..end)
-            .is_some_and(|coverage| coverage.contains(&true))
+        if let (Some(held), Some(coverage)) = (
+            state.bytes.get(offset..end),
+            state.received.get(offset..end),
+        ) && coverage
+            .iter()
+            .zip(held)
+            .zip(payload)
+            .any(|((seen, held), fresh)| *seen && held != fresh)
         {
             return FragmentResult::Drop;
         }
@@ -2428,6 +2438,56 @@ mod tests {
         assert_eq!(
             reassembler.offer_ipv6(src, dst, 7, 1, false, 6, b"tail"),
             None
+        );
+    }
+
+    /// RFC 6946: a fragment header with offset zero and no More Fragments is an
+    /// atomic fragment, a whole packet that happens to carry the header.
+    #[test]
+    fn an_ipv6_atomic_fragment_does_not_disturb_a_real_datagram() {
+        let src = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1);
+        let dst = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 2);
+        let mut reassembler = IpFragmentReassembler::new();
+
+        // A real datagram, first half buffered.
+        assert_eq!(
+            reassembler.offer_ipv6(src, dst, 7, 0, true, 17, b"12345678"),
+            None
+        );
+
+        // An atomic fragment reusing the identification, naming another
+        // protocol. It is its own packet and must not touch the datagram.
+        assert_eq!(
+            reassembler.offer_ipv6(src, dst, 7, 0, false, 6, b"standalone"),
+            None,
+            "an atomic fragment is not reassembled with anything"
+        );
+
+        // The real datagram still completes.
+        assert_eq!(
+            reassembler.offer_ipv6(src, dst, 7, 1, false, 17, b"tail"),
+            Some(b"12345678tail".to_vec()),
+            "one packet must not be able to wipe a datagram in flight"
+        );
+    }
+
+    #[test]
+    fn a_duplicated_fragment_does_not_drop_the_datagram() {
+        let mut reassembler = IpFragmentReassembler::new();
+
+        assert_eq!(
+            reassembler.offer_ipv4(&ipv4_header(0, true), b"abcdefgh"),
+            None
+        );
+        // The same fragment again, byte for byte.
+        assert_eq!(
+            reassembler.offer_ipv4(&ipv4_header(0, true), b"abcdefgh"),
+            None
+        );
+        assert_eq!(
+            reassembler.offer_ipv4(&ipv4_header(1, false), b"ijklmnop"),
+            Some(b"abcdefghijklmnop".to_vec()),
+            "a duplicate must not cost the datagram"
         );
     }
 
