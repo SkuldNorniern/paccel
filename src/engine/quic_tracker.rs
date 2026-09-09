@@ -326,7 +326,7 @@ impl QuicConnectionTracker {
         // is its sequence 0. Without it here, RETIRE_CONNECTION_ID(0) and a
         // retire_prior_to above 0 have nothing to act on.
         let pool = &mut connection.issued_cids[reply_direction];
-        if pool.retire_prior_to == 0 {
+        if pool.retire_prior_to == 0 && self.max_cids_per_pool > 0 {
             pool.ids.entry(0).or_insert_with(|| scid.to_vec());
         }
         if let Some(now) = now {
@@ -712,7 +712,8 @@ impl QuicConnectionTracker {
     /// Starts a connection on `key`, with `responder` as the end that did not
     /// initiate. `None` when the tracker is not allowed to hold any.
     fn open_connection(&mut self, key: BiFlow, responder: Endpoint) -> Option<QuicConnectionId> {
-        if self.max_flows == 0 {
+        // A zero cap on any of the three means there is nowhere to put this.
+        if self.max_flows == 0 || self.max_tuples == 0 || self.max_tuples_per_connection == 0 {
             return None;
         }
         self.evict_until_room();
@@ -732,21 +733,27 @@ impl QuicConnectionTracker {
     /// this may take it from whoever held it. The previous holder is told, or
     /// it reports an address that now reaches someone else.
     fn bind_tuple(&mut self, id: QuicConnectionId, key: BiFlow) {
-        // If the endpoint direction is anchored on is the one that moved, the
-        // anchor has to move with it, or every direction collapses onto one
-        // value. The endpoint shared with a tuple the connection already held
-        // is the side that stayed put, so that is the anchor.
+        // The responder is a role, not an address. If the address it was
+        // anchored on is gone from this pair, the responder is the end that
+        // moved, so the anchor follows it to its new address. Anchoring on the
+        // end that stayed would hand the role to the initiator and swap both
+        // directions.
         if let Some(connection) = self.connections.get_mut(&id)
             && !key.holds(connection.responder)
-            && let Some(stationary) = connection
+            && let Some(moved) = connection
                 .tuples
                 .iter()
                 .find_map(|held| key.shared_endpoint(*held))
+                .and_then(|stationary| key.other_endpoint(stationary))
         {
-            connection.responder = stationary;
+            connection.responder = moved;
         }
 
         if !self.by_tuple.contains_key(&key) {
+            // A cap of zero means zero: there is no room to make.
+            if self.max_tuples == 0 || self.max_tuples_per_connection == 0 {
+                return;
+            }
             // A connection that keeps moving drops its oldest address rather
             // than growing without bound.
             if let Some(connection) = self.connections.get_mut(&id)
@@ -795,6 +802,9 @@ impl QuicConnectionTracker {
     /// connection-ID cap. An index bigger than what it points at is how a
     /// tracker grows without bound while its connection count looks healthy.
     fn remember_cid(&mut self, cid: &[u8], id: QuicConnectionId) {
+        if self.max_cids == 0 {
+            return;
+        }
         while self.by_cid.len() >= self.max_cids && !self.by_cid.contains_key(cid) {
             // Another connection first: this one is the reason for the insert.
             if let Some(position) = self.insertion_order.iter().position(|queued| *queued != id)
@@ -1270,10 +1280,10 @@ mod tests {
     }
 
     /// A capture joined mid-connection can anchor direction on the wrong end.
-    /// If that end then moves, the anchor is corrected to the side that stayed
-    /// put, rather than matching neither and collapsing both directions.
+    /// If the anchored end then moves, the anchor follows it to its new
+    /// address rather than matching neither and collapsing both directions.
     #[test]
-    fn the_direction_anchor_follows_the_end_that_stayed() {
+    fn the_direction_anchor_follows_the_end_it_named() {
         let client = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
         let server = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
         let moved = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
@@ -1318,6 +1328,82 @@ mod tests {
                 tracker.stats().active_cids
             );
         }
+    }
+
+    /// A limit of zero has to mean zero. A cap that silently keeps one entry
+    /// is worse than no cap, because a caller that set it cannot tell.
+    #[test]
+    fn a_zero_limit_retains_nothing() {
+        let client = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let server = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+
+        let mut no_tuples = QuicConnectionTracker::new().with_max_tuples(0, 0);
+        no_tuples.observe_long_header(client, 5_000, server, 443, &[1, 1, 1, 1]);
+        assert_eq!(no_tuples.stats().active_tuples, 0);
+        assert_eq!(no_tuples.stats().active_connections, 0);
+
+        let mut no_cids = QuicConnectionTracker::new().with_max_cids(0);
+        no_cids.observe_long_header(client, 5_000, server, 443, &[2, 2, 2, 2]);
+        assert_eq!(no_cids.stats().active_cids, 0);
+
+        let mut no_pool = QuicConnectionTracker::new().with_max_cids_per_pool(0);
+        no_pool.observe_long_header(client, 5_000, server, 443, &[3, 3, 3, 3]);
+        if let Some(id) = no_pool.connection_id_for_dcid(&[3, 3, 3, 3]) {
+            assert!(
+                no_pool
+                    .issued_connection_ids(id, Endpoint::new(client, 5_000))
+                    .is_empty()
+            );
+        }
+
+        let mut no_flows = QuicConnectionTracker::new().with_max_flows(0);
+        no_flows.observe_long_header(client, 5_000, server, 443, &[4, 4, 4, 4]);
+        assert_eq!(no_flows.stats().active_connections, 0);
+    }
+
+    /// The server can move too, not just the client. Direction has to stay
+    /// meaningful either way, or state keyed on it swaps sides mid-connection.
+    #[test]
+    fn direction_survives_the_responder_changing_address() {
+        let client = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let server = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let server_moved = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9));
+        let client_cid = [1, 1, 1, 1];
+        let mut tracker = QuicConnectionTracker::new();
+
+        // The client's Initial first, so the responder anchor is the server.
+        tracker.observe_long_header(client, 5_000, server, 443, &client_cid);
+        let (id, before) = tracker
+            .connection_and_direction(client, 5_000, server, 443, &client_cid)
+            .expect("the connection is known");
+        assert_eq!(before, QuicDirection::InitiatorToResponder);
+
+        // Now the responder moves. The client stayed put.
+        tracker.observe_short_header(server_moved, 443, client, 5_000, &client_cid);
+
+        let to_server = tracker
+            .direction_for(
+                id,
+                Endpoint::new(client, 5_000),
+                Endpoint::new(server_moved, 443),
+            )
+            .expect("a direction");
+        let to_client = tracker
+            .direction_for(
+                id,
+                Endpoint::new(server_moved, 443),
+                Endpoint::new(client, 5_000),
+            )
+            .expect("a direction");
+
+        assert_ne!(
+            to_server, to_client,
+            "the two ways must stay distinguishable after the responder moves"
+        );
+        assert_eq!(
+            to_server, before,
+            "and the way to the responder is still the way to the responder"
+        );
     }
 
     #[test]
