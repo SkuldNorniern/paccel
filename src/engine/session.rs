@@ -287,7 +287,10 @@ impl SessionTracker {
             state.bytes.extend_from_slice(bytes);
             self.total_probe_bytes = self.total_probe_bytes.saturating_add(bytes.len());
         }
-        let at_direction_cap = state.bytes.len() >= self.max_probe_bytes;
+        // Either cap can stop a direction making progress: its own, or the
+        // global one refusing bytes that nothing could be evicted to fit.
+        let starved = append_len < wanted;
+        let at_a_cap = state.bytes.len() >= self.max_probe_bytes || starved;
 
         // A direction that is finished with, matched or not, gives its buffer
         // back. Holding bytes for a stream no protocol can ever claim is how
@@ -298,7 +301,7 @@ impl SessionTracker {
                 // Still undecided with no room left to decide in. Retiring it
                 // is the honest outcome: a cap should degrade predictably, not
                 // leave a direction buffering forever.
-                if at_direction_cap {
+                if at_a_cap {
                     Self::retire_probe(state, &mut self.total_probe_bytes);
                     self.probe_resource_limits = self.probe_resource_limits.saturating_add(1);
                 }
@@ -324,20 +327,26 @@ impl SessionTracker {
     /// global cap, leaving `keep` alone.
     fn make_room_for(&mut self, keep: &DirectionKey, wanted: usize) {
         while self.total_probe_bytes.saturating_add(wanted) > self.max_total_probe_bytes {
-            let Some(position) = self
-                .insertion_order
-                .iter()
-                .position(|queued| queued != keep && self.probes.contains_key(queued))
-            else {
+            // Only an unfinished probe is holding bytes worth taking. A done
+            // direction holds none, and removing it would let the stream be
+            // probed again from the middle of a connection it has already
+            // been classified from.
+            let probes = &self.probes;
+            let Some(position) = self.insertion_order.iter().position(|queued| {
+                queued != keep && probes.get(queued).is_some_and(|state| !state.done)
+            }) else {
                 break;
             };
-            let Some(victim) = self.insertion_order.remove(position) else {
+            let Some(victim) = self.insertion_order.get(position).cloned() else {
                 break;
             };
-            if let Some(state) = self.probes.remove(&victim) {
-                self.total_probe_bytes = self.total_probe_bytes.saturating_sub(state.bytes.len());
-                self.probe_evictions = self.probe_evictions.saturating_add(1);
-            }
+            let Some(state) = self.probes.get_mut(&victim) else {
+                break;
+            };
+            // Retired in place, not removed: the entry stays as a tombstone so
+            // the direction is not probed again from the middle.
+            Self::retire_probe(state, &mut self.total_probe_bytes);
+            self.probe_evictions = self.probe_evictions.saturating_add(1);
         }
     }
 
@@ -858,6 +867,77 @@ mod tests {
         assert!(
             event.is_some(),
             "a recognisable stream must still classify under pressure"
+        );
+    }
+
+    /// The global cap can starve a direction that is nowhere near its own.
+    /// With nothing to evict, appending fewer bytes than arrived means it can
+    /// never decide, so it is retired rather than left buffering forever.
+    #[test]
+    fn a_direction_starved_by_the_global_cap_is_retired() {
+        // Far below the per-direction cap, so only the global one can bite.
+        let mut tracker = SessionTracker::new().with_max_total_probe_bytes(16);
+
+        let mut record = vec![0x16, 0x03, 0x01, 0xff, 0x00];
+        record.extend([0x42; 64]);
+        assert!(
+            tracker
+                .offer_frame(&tcp_frame(SRC_PORT, 1_000, false, &record))
+                .is_none()
+        );
+
+        assert_eq!(
+            tracker.probe_bytes(),
+            0,
+            "a direction that cannot make progress holds nothing"
+        );
+        assert_eq!(tracker.stats().probe_resource_limits, 1);
+    }
+
+    /// A direction that already classified keeps a tombstone so it is not
+    /// probed again from the middle of the connection. Byte pressure must not
+    /// take that away: the tombstone holds no bytes, so there is nothing to
+    /// gain and a mid-stream reclassification to lose.
+    #[test]
+    fn byte_pressure_does_not_remove_a_finished_direction() {
+        let request = b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n";
+        let mut tracker = SessionTracker::new().with_max_total_probe_bytes(request.len());
+
+        // Classify one direction, which leaves it done.
+        assert!(
+            tracker
+                .offer_frame(&tcp_frame(SRC_PORT, 1_000, false, request))
+                .is_some()
+        );
+
+        // An unfinished probe holding bytes, so there is something to evict.
+        assert!(
+            tracker
+                .offer_frame(&tcp_frame(2_000, 1_000, false, b"GET "))
+                .is_none()
+        );
+        // A third flow now forces the eviction loop to run.
+        assert!(
+            tracker
+                .offer_frame(&tcp_frame(3_000, 1_000, false, request))
+                .is_some()
+        );
+        assert!(
+            tracker.stats().probe_evictions > 0,
+            "the fixture must actually apply pressure"
+        );
+
+        // More bytes on the classified direction must not start a new probe
+        // from the middle of its stream.
+        let mid_stream = tracker.offer_frame(&tcp_frame(
+            SRC_PORT,
+            1_000 + u32::try_from(request.len()).expect("short"),
+            false,
+            request,
+        ));
+        assert!(
+            mid_stream.is_none(),
+            "a classified direction was probed again from the middle"
         );
     }
 
