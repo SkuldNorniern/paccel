@@ -98,6 +98,9 @@ pub struct SessionTracker {
     probe_evictions: u64,
     probe_resource_limits: u64,
     insertion_order: VecDeque<DirectionKey>,
+    /// Probes holding bytes, oldest first. Stale entries are dropped as they
+    /// reach the front.
+    holding: VecDeque<DirectionKey>,
 }
 
 impl SessionTracker {
@@ -121,6 +124,7 @@ impl SessionTracker {
             probe_evictions: 0,
             probe_resource_limits: 0,
             insertion_order: VecDeque::new(),
+            holding: VecDeque::new(),
         }
     }
 
@@ -283,9 +287,18 @@ impl SessionTracker {
             .max_total_probe_bytes
             .saturating_sub(self.total_probe_bytes);
         let append_len = per_direction_remaining.min(total_remaining).min(wanted);
-        if let Some(bytes) = contiguous.get(..append_len) {
+        let mut newly_holding = false;
+        if let Some(bytes) = contiguous.get(..append_len)
+            && !bytes.is_empty()
+        {
+            newly_holding = state.bytes.is_empty();
             state.bytes.extend_from_slice(bytes);
             self.total_probe_bytes = self.total_probe_bytes.saturating_add(bytes.len());
+        }
+        if newly_holding {
+            // A direct field, so this does not disturb the borrow on `probes`
+            // that the rest of this function still holds.
+            self.holding.push_back(key.clone());
         }
         // Either cap can stop a direction making progress: its own, or the
         // global one refusing bytes that nothing could be evicted to fit.
@@ -325,28 +338,49 @@ impl SessionTracker {
 
     /// Drops the oldest unfinished probes until `wanted` bytes fit under the
     /// global cap, leaving `keep` alone.
+    fn prune_holding(&mut self) {
+        if self.holding.len() <= self.max_probe_flows.saturating_mul(2) {
+            return;
+        }
+        let probes = &self.probes;
+        self.holding.retain(|key| {
+            probes
+                .get(key)
+                .is_some_and(|state| !state.done && !state.bytes.is_empty())
+        });
+    }
+
     fn make_room_for(&mut self, keep: &DirectionKey, wanted: usize) {
+        self.prune_holding();
+
+        // `keep` is the reason for the append, so it is passed over rather than
+        // reclaimed. Held aside and put back, so passing it does not spin.
+        let mut passed = Vec::new();
+
         while self.total_probe_bytes.saturating_add(wanted) > self.max_total_probe_bytes {
+            let Some(candidate) = self.holding.pop_front() else {
+                break;
+            };
+            if &candidate == keep {
+                passed.push(candidate);
+                continue;
+            }
             // Only an unfinished probe is holding bytes worth taking. A done
             // direction holds none, and removing it would let the stream be
-            // probed again from the middle of a connection it has already
-            // been classified from.
-            let probes = &self.probes;
-            let Some(position) = self.insertion_order.iter().position(|queued| {
-                queued != keep && probes.get(queued).is_some_and(|state| !state.done)
-            }) else {
-                break;
+            let Some(state) = self.probes.get_mut(&candidate) else {
+                continue;
             };
-            let Some(victim) = self.insertion_order.get(position).cloned() else {
-                break;
-            };
-            let Some(state) = self.probes.get_mut(&victim) else {
-                break;
-            };
+            if state.done || state.bytes.is_empty() {
+                continue;
+            }
             // Retired in place, not removed: the entry stays as a tombstone so
             // the direction is not probed again from the middle.
             Self::retire_probe(state, &mut self.total_probe_bytes);
             self.probe_evictions = self.probe_evictions.saturating_add(1);
+        }
+
+        for key in passed {
+            self.holding.push_front(key);
         }
     }
 
@@ -387,6 +421,7 @@ impl SessionTracker {
         self.probes.clear();
         self.generations.clear();
         self.insertion_order.clear();
+        self.holding.clear();
         self.total_probe_bytes = 0;
     }
 
@@ -867,6 +902,29 @@ mod tests {
         assert!(
             event.is_some(),
             "a recognisable stream must still classify under pressure"
+        );
+    }
+
+    #[test]
+    fn a_stream_is_not_reclaimed_to_make_room_for_itself() {
+        // Small enough that the third append is under pressure, and payload
+        // that no probe will ever claim, so it accumulates instead of deciding.
+        let mut tracker = SessionTracker::new().with_max_total_probe_bytes(16);
+
+        let mut sequence = 1_000u32;
+        for _ in 0..3 {
+            tracker.offer_frame(&tcp_frame(SRC_PORT, sequence, false, &[0xAB; 8]));
+            sequence = sequence.wrapping_add(8);
+        }
+
+        let stats = tracker.stats();
+        assert_eq!(
+            stats.probe_evictions, 0,
+            "the only holder was the stream being appended to, so nothing was evicted"
+        );
+        assert_eq!(
+            stats.probe_resource_limits, 1,
+            "it should be given up as starved instead"
         );
     }
 
