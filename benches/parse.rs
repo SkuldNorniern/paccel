@@ -245,6 +245,26 @@ fn stateful(c: &mut Criterion) {
         });
     }
 
+    for flows in [256usize, 1_024] {
+        group.bench_function(format!("session offer_frame across {flows} flows"), |b| {
+            let frames: Vec<Vec<u8>> = (0..flows)
+                .map(|index| {
+                    let port = 40_000u16.wrapping_add(u16::try_from(index % 20_000).unwrap_or(0));
+                    tcp_stream_frame_from(port, 1_001, false, &[0xABu8; 256])
+                })
+                .collect();
+            b.iter_batched(
+                SessionTracker::new,
+                |mut tracker| {
+                    for frame in &frames {
+                        black_box(tracker.offer_frame(frame));
+                    }
+                },
+                BatchSize::SmallInput,
+            );
+        });
+    }
+
     group.bench_function("quic cid lookup", |b| {
         let mut tracker = QuicConnectionTracker::new();
         for index in 0..1_000u32 {
@@ -337,6 +357,20 @@ fn stateful(c: &mut Criterion) {
 }
 
 /// One TCP frame carrying `payload`, for the session benches.
+fn tcp_stream_frame_from(source_port: u16, sequence: u32, syn: bool, payload: &[u8]) -> Vec<u8> {
+    let mut tcp = Vec::with_capacity(20 + payload.len());
+    tcp.extend_from_slice(&source_port.to_be_bytes());
+    tcp.extend_from_slice(&80u16.to_be_bytes());
+    tcp.extend_from_slice(&sequence.to_be_bytes());
+    tcp.extend_from_slice(&[0, 0, 0, 0]);
+    tcp.push(0x50);
+    tcp.push(if syn { 0x02 } else { 0x18 });
+    tcp.extend_from_slice(&0x4000u16.to_be_bytes());
+    tcp.extend_from_slice(&[0, 0, 0, 0]);
+    tcp.extend_from_slice(payload);
+    ipv4(6, &tcp)
+}
+
 fn tcp_stream_frame(sequence: u32, syn: bool, payload: &[u8]) -> Vec<u8> {
     let mut tcp = Vec::with_capacity(20 + payload.len());
     tcp.extend_from_slice(&40_000u16.to_be_bytes());

@@ -214,7 +214,11 @@ impl SessionTracker {
         now: Option<Timestamp>,
     ) -> Option<()> {
         let generation = self.tcp.generation(src, src_port, dst, dst_port)?;
-        if self.generations.get(&key.flow).copied() != Some(generation) {
+        if self
+            .generations
+            .get(&key.flow)
+            .is_some_and(|previous| *previous != generation)
+        {
             self.remove_probe_flow(&key.flow);
         }
 
@@ -401,18 +405,18 @@ impl SessionTracker {
     }
 
     fn remove_probe_flow(&mut self, flow: &BiFlow) -> bool {
-        let previous_len = self.probes.len();
-        let mut freed = 0usize;
-        self.probes.retain(|key, state| {
-            let keep = &key.flow != flow;
-            if !keep {
-                freed = freed.saturating_add(state.bytes.len());
+        let mut removed = false;
+        for direction in 0..2 {
+            let key = DirectionKey {
+                flow: *flow,
+                direction,
+            };
+            if let Some(state) = self.probes.remove(&key) {
+                self.total_probe_bytes = self.total_probe_bytes.saturating_sub(state.bytes.len());
+                removed = true;
             }
-            keep
-        });
-        self.total_probe_bytes = self.total_probe_bytes.saturating_sub(freed);
-        self.insertion_order.retain(|key| &key.flow != flow);
-        self.probes.len() != previous_len
+        }
+        removed
     }
 
     /// Releases all TCP and application probe state.
@@ -660,6 +664,16 @@ mod tests {
         frame
     }
 
+    /// The same flow travelling the other way: addresses and ports swapped.
+    fn tcp_reply_frame(dst_port: u16, sequence: u32, payload: &[u8]) -> Vec<u8> {
+        let mut frame = tcp_frame(dst_port, sequence, false, payload);
+        frame[26..30].copy_from_slice(&[10, 0, 0, 2]);
+        frame[30..34].copy_from_slice(&[10, 0, 0, 1]);
+        frame[34..36].copy_from_slice(&DST_PORT.to_be_bytes());
+        frame[36..38].copy_from_slice(&dst_port.to_be_bytes());
+        frame
+    }
+
     fn tcp_rst_frame(src_port: u16, sequence: u32) -> Vec<u8> {
         let mut frame = tcp_frame(src_port, sequence, false, &[]);
         let flags_offset = 14 + 20 + 13; // Ethernet + IPv4 header + TCP flags byte
@@ -851,6 +865,44 @@ mod tests {
                 assert_eq!(target, "/other.html");
             }
             _ => panic!("expected HTTP request"),
+        }
+    }
+
+    #[test]
+    fn syn_restart_clears_the_reply_direction_too() {
+        let mut tracker = SessionTracker::new();
+
+        // Open the flow, then leave the reply direction mid-message: a status
+        // line with no blank line after it is not yet a complete response.
+        assert!(
+            tracker
+                .offer_frame(&tcp_frame(SRC_PORT, 1_000, true, &[]))
+                .is_none()
+        );
+        assert!(
+            tracker
+                .offer_frame(&tcp_reply_frame(SRC_PORT, 5_000, b"HTTP/1.1 500 Oops\r\n"))
+                .is_none()
+        );
+
+        assert!(
+            tracker
+                .offer_frame(&tcp_frame(SRC_PORT, 9_000, true, &[]))
+                .is_none()
+        );
+
+        let event = tracker
+            .offer_frame(&tcp_reply_frame(
+                SRC_PORT,
+                12_000,
+                b"HTTP/1.1 200 OK\r\n\r\n",
+            ))
+            .expect("the new connection's reply should be probed fresh");
+        match event.l7 {
+            StreamL7::Http(HttpMessage::Response { status, .. }) => {
+                assert_eq!(status, 200, "the abandoned 500 must not carry over");
+            }
+            other => panic!("expected an HTTP response, got {other:?}"),
         }
     }
 
