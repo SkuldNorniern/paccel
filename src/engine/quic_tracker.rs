@@ -109,6 +109,13 @@ struct QuicConnectionState {
 }
 
 impl QuicConnectionState {
+    fn indexed_cids(&self) -> impl Iterator<Item = &Vec<u8>> {
+        self.expected_dcids
+            .iter()
+            .flatten()
+            .chain(self.issued_cids.iter().flat_map(|pool| pool.ids.values()))
+    }
+
     fn new(responder: Endpoint) -> Self {
         QuicConnectionState {
             responder,
@@ -320,7 +327,9 @@ impl QuicConnectionTracker {
         // The sender announces the ID its peer should send *back* to, so this
         // is the DCID expected on packets headed the other way.
         let reply_direction = connection.direction_to(source);
-        connection.expected_dcids[reply_direction] = Some(scid.to_vec());
+        let displaced = connection.expected_dcids[reply_direction]
+            .replace(scid.to_vec())
+            .filter(|previous| previous != scid);
 
         // RFC 9000 sec 5.1.1: the ID an endpoint puts in its first long header
         // is its sequence 0. Without it here, RETIRE_CONNECTION_ID(0) and a
@@ -335,6 +344,15 @@ impl QuicConnectionTracker {
         if scid.len() <= MAX_CID_LEN {
             self.cid_lengths |= 1 << scid.len();
         }
+
+        if let Some(displaced) = displaced
+            && let Some(connection) = self.connections.get(&id)
+            && !connection.indexed_cids().any(|held| held == &displaced)
+            && self.by_cid.get(&displaced) == Some(&id)
+        {
+            self.by_cid.remove(&displaced);
+        }
+
         self.remember_cid(scid, id);
     }
 
@@ -810,7 +828,7 @@ impl QuicConnectionTracker {
             if let Some(position) = self.insertion_order.iter().position(|queued| *queued != id)
                 && let Some(victim) = self.insertion_order.remove(position)
             {
-                self.drop_connection(victim);
+                self.drop_dequeued_connection(victim);
                 continue;
             }
             // Nothing else left to give, so this connection gives up its own
@@ -852,15 +870,35 @@ impl QuicConnectionTracker {
                 self.by_cid.clear();
                 break;
             };
-            self.drop_connection(oldest);
+            self.drop_dequeued_connection(oldest);
         }
     }
 
     fn drop_connection(&mut self, id: QuicConnectionId) {
-        self.connections.remove(&id);
-        self.by_tuple.retain(|_, held| held != &id);
-        self.by_cid.retain(|_, held| held != &id);
+        self.forget_connection(id);
         self.insertion_order.retain(|queued| queued != &id);
+    }
+
+    /// Drops a connection whose id the caller has already dequeued.
+    fn drop_dequeued_connection(&mut self, id: QuicConnectionId) {
+        self.forget_connection(id);
+    }
+
+    fn forget_connection(&mut self, id: QuicConnectionId) {
+        let Some(connection) = self.connections.remove(&id) else {
+            return;
+        };
+
+        for key in &connection.tuples {
+            if self.by_tuple.get(key) == Some(&id) {
+                self.by_tuple.remove(key);
+            }
+        }
+        for cid in connection.indexed_cids() {
+            if self.by_cid.get(cid) == Some(&id) {
+                self.by_cid.remove(cid);
+            }
+        }
     }
 }
 

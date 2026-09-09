@@ -208,6 +208,43 @@ fn stateful(c: &mut Criterion) {
         });
     });
 
+    for cap in [1_024usize, 8_192] {
+        group.bench_function(format!("quic eviction at cap {cap}"), |b| {
+            b.iter_batched(
+                || {
+                    let mut tracker = QuicConnectionTracker::new().with_max_flows(cap);
+                    for index in 0..cap {
+                        let port = u16::try_from(index % 60_000).unwrap_or(0);
+                        let value = u32::try_from(index).unwrap_or(0);
+                        tracker.observe_long_header(
+                            client,
+                            port,
+                            server,
+                            443,
+                            &value.to_be_bytes(),
+                        );
+                    }
+                    tracker
+                },
+                |mut tracker| {
+                    // A thousand arrivals against a full tracker.
+                    for index in 0..1_000u32 {
+                        let value = index.wrapping_add(9_000_000);
+                        tracker.observe_long_header(
+                            client,
+                            u16::try_from(index % 60_000).unwrap_or(0),
+                            moved,
+                            443,
+                            &value.to_be_bytes(),
+                        );
+                    }
+                    black_box(tracker.stats())
+                },
+                BatchSize::SmallInput,
+            );
+        });
+    }
+
     group.bench_function("quic cid lookup", |b| {
         let mut tracker = QuicConnectionTracker::new();
         for index in 0..1_000u32 {
