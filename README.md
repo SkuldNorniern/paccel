@@ -15,10 +15,10 @@ cargo add paccel
 Or in `Cargo.toml`:
 
 ```toml
-paccel = "0.3"
+paccel = "0.4"
 # optional features:
-paccel = { version = "0.3", features = ["fingerprint"] }
-paccel = { version = "0.3", features = ["quic-decrypt"] }
+paccel = { version = "0.4", features = ["fingerprint"] }
+paccel = { version = "0.4", features = ["quic-decrypt"] }
 ```
 
 `0.x` can break the public API between minor versions before `1.0`.
