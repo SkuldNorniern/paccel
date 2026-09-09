@@ -75,6 +75,18 @@ impl BiFlow {
         shared
     }
 
+    /// The endpoint of this pair that is not `endpoint`.
+    #[must_use]
+    pub fn other_endpoint(&self, endpoint: Endpoint) -> Option<Endpoint> {
+        if self.first == endpoint {
+            Some(self.second)
+        } else if self.second == endpoint {
+            Some(self.first)
+        } else {
+            None
+        }
+    }
+
     /// Order the endpoints and say which way this packet went.
     #[must_use]
     pub fn normalize(
