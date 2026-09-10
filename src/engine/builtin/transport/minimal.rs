@@ -156,8 +156,15 @@ pub(super) fn parse_esp_minimal(data: &[u8]) -> Result<EspInfo, LayerError> {
 }
 
 pub(super) fn parse_vxlan_minimal(data: &[u8]) -> Result<VxlanInfo, LayerError> {
+    // RFC 7348 sec 5: the I flag "MUST be set to 1 for a valid VXLAN Network ID
+    // (VNI)"
+    const VNI_VALID_FLAG: u8 = 0x08;
+
     if data.len() < 8 {
         return Err(LayerError::InvalidLength);
+    }
+    if data[0] & VNI_VALID_FLAG == 0 {
+        return Err(LayerError::InvalidHeader);
     }
     let vni = u32::from(data[4]) << 16 | u32::from(data[5]) << 8 | u32::from(data[6]);
     Ok(VxlanInfo { vni })
@@ -209,5 +216,31 @@ pub(super) fn parse_l2tp_minimal(data: &[u8]) -> L2tpInfo {
         version: flags.to_be_bytes()[1] & 0x0f,
         tunnel_id,
         session_id,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// RFC 7348 sec 5: "the I flag MUST be set to 1 for a valid VXLAN Network
+    /// ID (VNI)"
+    #[test]
+    fn a_vxlan_header_without_the_i_flag_has_no_vni() {
+        let without = [0x00, 0, 0, 0, 0x00, 0x00, 0x2a, 0];
+
+        assert!(parse_vxlan_minimal(&without).is_err());
+    }
+
+    /// And the other seven flag bits are reserved and ignored on receipt, so a
+    /// header that sets them is still read.
+    #[test]
+    fn a_vxlan_header_ignores_the_reserved_flag_bits() {
+        let noisy = [0xff, 0, 0, 0, 0x00, 0x00, 0x2a, 0];
+
+        assert_eq!(
+            parse_vxlan_minimal(&noisy).expect("the I flag is set").vni,
+            42
+        );
     }
 }
