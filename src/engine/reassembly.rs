@@ -714,6 +714,12 @@ impl TcpStreamReassembler {
         let (key, direction) = normalized_flow(src, src_port, dst, dst_port);
 
         if rst {
+            // RFC 9293 sec 3.5.3: outside SYN-SENT, a RST is validated by its
+            // sequence number and is acted on only when that falls in the
+            // window.
+            if !self.reset_is_plausible(&key, direction, seq) {
+                return ReassemblyOutput::empty(ReassemblyEvent::Ignored);
+            }
             if let Some(flow) = self.flows.remove(&key) {
                 self.total_buffered_bytes = self
                     .total_buffered_bytes
@@ -1139,6 +1145,18 @@ impl TcpStreamReassembler {
         if syn && state.initial_sequence.is_none() {
             state.initial_sequence = Some(seq);
         }
+    }
+
+    fn reset_is_plausible(&self, key: &BiFlow, direction: usize, seq: u32) -> bool {
+        let Some(flow) = self.flows.get(key) else {
+            return true;
+        };
+        let Some(expected) = flow.directions[direction].expected else {
+            return true;
+        };
+
+        let delta = seq.wrapping_sub(expected);
+        delta < TCP_SEQUENCE_HALF_RANGE && u32_to_usize(delta) <= self.max_gap
     }
 
     fn syn_opens_a_new_connection(state: &TcpDirectionState, syn: bool, seq: u32) -> bool {
@@ -2525,6 +2543,49 @@ mod tests {
         );
     }
 
+    /// An in-window reset still ends the connection, which is the whole point
+    /// of validating rather than ignoring resets outright.
+    #[test]
+    fn an_in_window_rst_still_resets_the_connection() {
+        let mut r = TcpStreamReassembler::new();
+        let src = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let dst = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+
+        r.offer(src, 4_000, dst, 80, 100, true, false, false, b"");
+        r.offer(src, 4_000, dst, 80, 101, false, false, false, b"AB");
+
+        // Exactly what the direction is waiting for.
+        r.offer(src, 4_000, dst, 80, 103, false, false, true, b"");
+
+        assert_eq!(r.stats().resets, 1);
+        assert_eq!(r.stats().active_flows, 0, "and the flow went with it");
+    }
+
+    /// RFC 9293 sec 3.5.3: outside SYN-SENT a reset is validated by its
+    /// sequence number, so one behind what the direction has delivered is
+    /// ignored, and must not take the flow's buffered segments with it.
+    #[test]
+    fn an_off_window_rst_is_ignored() {
+        let mut r = TcpStreamReassembler::new();
+        let src = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let dst = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+
+        r.offer(src, 4_000, dst, 80, 100, true, false, false, b"");
+        // Out of order, so it waits for the gap in front of it.
+        assert_eq!(
+            r.offer(src, 4_000, dst, 80, 103, false, false, false, b"CD"),
+            Vec::<u8>::new()
+        );
+
+        r.offer(src, 4_000, dst, 80, 1, false, false, true, b"");
+
+        assert_eq!(
+            r.offer(src, 4_000, dst, 80, 101, false, false, false, b"AB"),
+            b"ABCD".to_vec(),
+            "the connection was never reset, so what was buffered still completes"
+        );
+    }
+
     #[test]
     fn ipv4_overlapping_fragments_drop_datagram() {
         let mut reassembler = IpFragmentReassembler::new();
@@ -3026,7 +3087,9 @@ mod tests {
         reassembler.offer(src, 1_000, dst, 80, 8, false, false, false, b"YYYYY");
         assert_eq!(reassembler.stats().overlap_conflicts, 1);
 
-        reassembler.offer(src, 1_000, dst, 80, 0, false, false, true, b"");
+        // At the sequence this direction is waiting for, so it is in the window
+        // RFC 9293 sec 3.5.3 validates a reset against.
+        reassembler.offer(src, 1_000, dst, 80, 1, false, false, true, b"");
         let stats = reassembler.stats();
         assert_eq!(stats.resets, 1);
         assert_eq!(stats.active_flows, 0, "and the flow went with it");
