@@ -211,8 +211,10 @@ fn parse_transport_inner(
         ip_proto::ICMPV6 => {
             let (icmpv6, ndp) =
                 parse_icmpv6_minimal(l4_bytes, config.stop_after == StopLayer::Application)?;
-            // RFC 4443 sec 3: types 1 to 4 are the error messages.
-            if matches!(icmpv6.icmp_type, 1..=4) {
+            // RFC 4443 sec 2.1: an ICMPv6 error message is any type below 128,
+            // the high-order bit of the type is what separates errors from
+            // informational messages.
+            if icmpv6.icmp_type < 128 {
                 quote_from_icmp(parsed, l4_bytes, ethertype::IPV6, config);
             }
             parsed.icmpv6 = Some(icmpv6);
@@ -401,6 +403,82 @@ mod tests {
             .icmp_quoted
             .as_deref()
             .expect("the quoted datagram, at transport depth");
+        assert_eq!(inner.ports(), Some((1234, 53)));
+    }
+
+    /// The other half of the same rule: a type of 128 or above is an
+    /// informational message (RFC 4443 sec 2.1), and whatever it carries is its
+    /// own payload, not a packet that provoked it.
+    #[test]
+    fn an_icmpv6_informational_message_quotes_nothing() {
+        // An echo request whose payload would decode as an IPv6 datagram.
+        let mut payload = vec![0x60, 0x00, 0x00, 0x00, 0x00, 0x08, 17, 64];
+        payload.extend([0x20, 0x01, 0x0d, 0xb8]);
+        payload.extend([0u8; 11]);
+        payload.push(1);
+        payload.extend([0x20, 0x01, 0x0d, 0xb8]);
+        payload.extend([0u8; 11]);
+        payload.push(2);
+        payload.extend([0x04, 0xd2, 0x00, 0x35, 0x00, 0x08, 0x00, 0x00]);
+
+        let mut icmpv6 = vec![128, 0, 0, 0, 0, 0, 0, 0];
+        icmpv6.extend(&payload);
+
+        let mut frame = vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0x86, 0xDD];
+        let length = u16::try_from(icmpv6.len()).expect("fits");
+        frame.extend([0x60, 0x00, 0x00, 0x00]);
+        frame.extend(length.to_be_bytes());
+        frame.extend([58, 64]);
+        frame.extend([0x20, 0x01, 0x0d, 0xb8]);
+        frame.extend([0u8; 11]);
+        frame.push(3);
+        frame.extend([0x20, 0x01, 0x0d, 0xb8]);
+        frame.extend([0u8; 11]);
+        frame.push(1);
+        frame.extend(&icmpv6);
+
+        let parsed = BuiltinPacketParser::parse(&frame).expect("an echo parses");
+        assert!(parsed.icmpv6.is_some());
+        assert!(parsed.icmp_quoted.is_none());
+    }
+
+    /// RFC 4443 sec 2.4(c): *every* ICMPv6 error message, meaning every type
+    /// below 128, carries the invoking packet, not only the four types named in
+    /// sec 2.1. An unknown error type still has to be attributed to what sent
+    /// the packet that caused it, per sec 2.4(a).
+    #[test]
+    fn an_icmpv6_error_of_an_unnamed_type_still_quotes() {
+        let mut quoted = vec![0x60, 0x00, 0x00, 0x00, 0x00, 0x08, 17, 64];
+        quoted.extend([0x20, 0x01, 0x0d, 0xb8]);
+        quoted.extend([0u8; 11]);
+        quoted.push(1);
+        quoted.extend([0x20, 0x01, 0x0d, 0xb8]);
+        quoted.extend([0u8; 11]);
+        quoted.push(2);
+        quoted.extend([0x04, 0xd2, 0x00, 0x35, 0x00, 0x08, 0x00, 0x00]);
+
+        // Type 100: private experimentation, an error message by sec 2.1.
+        let mut icmpv6 = vec![100, 0, 0, 0, 0, 0, 0, 0];
+        icmpv6.extend(&quoted);
+
+        let mut frame = vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0x86, 0xDD];
+        let length = u16::try_from(icmpv6.len()).expect("fits");
+        frame.extend([0x60, 0x00, 0x00, 0x00]);
+        frame.extend(length.to_be_bytes());
+        frame.extend([58, 64]);
+        frame.extend([0x20, 0x01, 0x0d, 0xb8]);
+        frame.extend([0u8; 11]);
+        frame.push(3);
+        frame.extend([0x20, 0x01, 0x0d, 0xb8]);
+        frame.extend([0u8; 11]);
+        frame.push(1);
+        frame.extend(&icmpv6);
+
+        let parsed = BuiltinPacketParser::parse(&frame).expect("the error parses");
+        let inner = parsed
+            .icmp_quoted
+            .as_deref()
+            .expect("an error type below 128 quotes the invoking packet");
         assert_eq!(inner.ports(), Some((1234, 53)));
     }
 
