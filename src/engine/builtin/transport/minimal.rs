@@ -84,6 +84,8 @@ pub(super) fn parse_gre_minimal(data: &[u8]) -> Result<GreInfo, LayerError> {
     if data.len() < 4 {
         return Err(LayerError::InvalidLength);
     }
+    // RFC 2784 sec 2.3.1: the version must be zero.
+    let version = data[1] & 0x07;
     let checksum_present = data[0] & 0x80 != 0;
     let routing_present = data[0] & 0x40 != 0;
     let key_present = data[0] & 0x20 != 0;
@@ -103,7 +105,7 @@ pub(super) fn parse_gre_minimal(data: &[u8]) -> Result<GreInfo, LayerError> {
     if has_checksum_and_offset {
         offset += 4;
     }
-    let key = key_present.then(|| {
+    let key = (key_present && version == 0).then(|| {
         let value = u32::from_be_bytes([
             data[offset],
             data[offset + 1],
@@ -113,7 +115,7 @@ pub(super) fn parse_gre_minimal(data: &[u8]) -> Result<GreInfo, LayerError> {
         offset += 4;
         value
     });
-    let sequence = sequence_present.then(|| {
+    let sequence = (sequence_present && version == 0).then(|| {
         u32::from_be_bytes([
             data[offset],
             data[offset + 1],
@@ -123,6 +125,7 @@ pub(super) fn parse_gre_minimal(data: &[u8]) -> Result<GreInfo, LayerError> {
     });
     Ok(GreInfo {
         protocol_type,
+        version,
         checksum_present,
         routing_present,
         key_present,
@@ -222,6 +225,34 @@ pub(super) fn parse_l2tp_minimal(data: &[u8]) -> L2tpInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// RFC 2637 sec 4.1: PPTP's enhanced GRE is version 1, and what sits where
+    /// a version-0 key would be is a payload length and a call ID.
+    #[test]
+    fn a_pptp_gre_header_reports_no_version_zero_key() {
+        // K and S set, version 1, protocol PPP, payload length 40, call 0x1234.
+        let header = [
+            0x30, 0x01, 0x88, 0x0b, 0x00, 0x28, 0x12, 0x34, 0x00, 0x00, 0x00, 0x01,
+        ];
+
+        let gre = parse_gre_minimal(&header).expect("the header parses");
+
+        assert_eq!(gre.version, 1);
+        assert!(gre.key_present, "the flag is still reported as it was set");
+        assert_eq!(gre.key, None, "but there is no version-0 key to report");
+        assert_eq!(gre.sequence, None);
+    }
+
+    /// A version-0 header still reports its key.
+    #[test]
+    fn a_version_zero_gre_header_reports_its_key() {
+        let header = [0x20, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x2a];
+
+        let gre = parse_gre_minimal(&header).expect("the header parses");
+
+        assert_eq!(gre.version, 0);
+        assert_eq!(gre.key, Some(42));
+    }
 
     /// RFC 7348 sec 5: "the I flag MUST be set to 1 for a valid VXLAN Network
     /// ID (VNI)"

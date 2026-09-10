@@ -205,6 +205,8 @@ pub struct TcpOptionsParsed {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GreInfo {
     pub protocol_type: u16,
+    /// RFC 2784 sec 2.3.1 requires zero.
+    pub version: u8,
     pub checksum_present: bool,
     /// RFC 1701 sec 4.1, deprecated by RFC 2784 sec 2.3.1. When set, a
     /// source-route list follows the fixed fields and the payload cannot be
