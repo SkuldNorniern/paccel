@@ -406,6 +406,41 @@ mod tests {
         assert_eq!(inner.ports(), Some((1234, 53)));
     }
 
+    /// RFC 8200 sec 4.1: "IPv6 nodes must accept and attempt to process
+    /// extension headers in any order and occurring any number of times in the
+    /// same packet"
+    #[test]
+    fn ipv6_extension_headers_are_accepted_in_any_order_and_repeated() {
+        // Routing, then Destination Options twice, then TCP - legal, and none
+        // of it in the recommended order.
+        let ext = |next: u8| vec![next, 0, 0, 0, 0, 0, 0, 0];
+        let mut tcp = vec![0x9c, 0x41, 0x01, 0xbb];
+        tcp.extend([0, 0, 0, 10, 0, 0, 0, 0]);
+        tcp.extend([0x50, 0x02, 0x40, 0x00, 0, 0, 0, 0]);
+
+        let mut body = ext(60);
+        body.extend(ext(60));
+        body.extend(ext(6));
+        body.extend(&tcp);
+
+        let mut frame = vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0x86, 0xDD];
+        let length = u16::try_from(body.len()).expect("fits");
+        frame.extend([0x60, 0x00, 0x00, 0x00]);
+        frame.extend(length.to_be_bytes());
+        // First extension header is Routing (43).
+        frame.extend([43, 64]);
+        frame.extend([0x20, 0x01, 0x0d, 0xb8]);
+        frame.extend([0u8; 11]);
+        frame.push(1);
+        frame.extend([0x20, 0x01, 0x0d, 0xb8]);
+        frame.extend([0u8; 11]);
+        frame.push(2);
+        frame.extend(&body);
+
+        let parsed = BuiltinPacketParser::parse(&frame).expect("the packet parses");
+        assert_eq!(parsed.ports(), Some((40_001, 443)));
+    }
+
     /// The other half of the same rule: a type of 128 or above is an
     /// informational message (RFC 4443 sec 2.1), and whatever it carries is its
     /// own payload, not a packet that provoked it.
