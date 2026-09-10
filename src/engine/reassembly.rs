@@ -437,6 +437,9 @@ pub enum TcpOverlapPolicy {
 #[derive(Debug, Default)]
 struct TcpDirectionState {
     expected: Option<u32>,
+    /// Sequence of the SYN this direction started from, so a retransmitted
+    /// one is not read as a new connection.
+    initial_sequence: Option<u32>,
     segments: BTreeMap<u32, Vec<u8>>,
     buffered_bytes: usize,
     lifecycle: TcpDirectionLifecycle,
@@ -736,7 +739,7 @@ impl TcpStreamReassembler {
             flow.last_seen.observe(now);
         }
 
-        if syn && flow.directions[direction].expected.is_some() {
+        if Self::syn_opens_a_new_connection(&flow.directions[direction], syn, seq) {
             self.total_buffered_bytes = self
                 .total_buffered_bytes
                 .saturating_sub(flow_buffered_bytes(flow));
@@ -744,9 +747,7 @@ impl TcpStreamReassembler {
             flow.directions = Default::default();
         }
         let state = &mut flow.directions[direction];
-        if state.expected.is_none() {
-            state.expected = Some(if syn { seq.wrapping_add(1) } else { seq });
-        }
+        Self::start_direction(state, syn, seq);
         let data_sequence = if syn { seq.wrapping_add(1) } else { seq };
         let already_closed = Self::note_fin(
             state,
@@ -1131,6 +1132,19 @@ impl TcpStreamReassembler {
 
     /// Records a FIN, and says whether this direction was already closed. A
     /// retransmitted FIN on a closed direction changes nothing.
+    fn start_direction(state: &mut TcpDirectionState, syn: bool, seq: u32) {
+        if state.expected.is_none() {
+            state.expected = Some(if syn { seq.wrapping_add(1) } else { seq });
+        }
+        if syn && state.initial_sequence.is_none() {
+            state.initial_sequence = Some(seq);
+        }
+    }
+
+    fn syn_opens_a_new_connection(state: &TcpDirectionState, syn: bool, seq: u32) -> bool {
+        syn && state.expected.is_some() && state.initial_sequence != Some(seq)
+    }
+
     fn note_fin(state: &mut TcpDirectionState, fin: bool, fin_sequence: u32) -> bool {
         if state.lifecycle == TcpDirectionLifecycle::Closed {
             return true;
@@ -2488,6 +2502,26 @@ mod tests {
             reassembler.offer_ipv4(&ipv4_header(1, false), b"ijklmnop"),
             Some(b"abcdefghijklmnop".to_vec()),
             "a duplicate must not cost the datagram"
+        );
+    }
+
+    #[test]
+    fn a_retransmitted_syn_does_not_restart_the_stream() {
+        let mut r = TcpStreamReassembler::new();
+        let src = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let dst = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+
+        r.offer(src, 4_000, dst, 80, 100, true, false, false, b"");
+        let first = r.offer(src, 4_000, dst, 80, 101, false, false, false, b"AB");
+        // The same SYN again, as a retransmission would arrive.
+        r.offer(src, 4_000, dst, 80, 100, true, false, false, b"");
+        let again = r.offer(src, 4_000, dst, 80, 101, false, false, false, b"AB");
+
+        assert_eq!(first, b"AB".to_vec());
+        assert_eq!(
+            again,
+            Vec::<u8>::new(),
+            "a retransmitted SYN is not a new connection, so its data is a duplicate"
         );
     }
 

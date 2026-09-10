@@ -308,12 +308,18 @@ impl QuicConnectionTracker {
 
         // An SCID already on the books names the connection even when the
         // address pair does not: that is a long header arriving after a move.
-        let id = match self
-            .by_tuple
-            .get(&key)
-            .or_else(|| named.then(|| self.by_cid.get(scid)).flatten())
-        {
-            Some(id) => *id,
+        let matched = self.by_tuple.get(&key).copied().or_else(|| {
+            let id = named.then(|| self.by_cid.get(scid)).flatten().copied()?;
+            let connection = self.connections.get(&id)?;
+            connection
+                .tuples
+                .iter()
+                .any(|held| key.shared_endpoint(*held).is_some())
+                .then_some(id)
+        });
+
+        let id = match matched {
+            Some(id) => id,
             // Nothing known yet, so this is the first packet of a connection
             // and its destination is the end that did not initiate.
             None => {
@@ -850,6 +856,10 @@ impl QuicConnectionTracker {
                 break;
             }
         }
+
+        if self.by_cid.len() >= self.max_cids && !self.by_cid.contains_key(cid) {
+            return;
+        }
         self.by_cid.insert(cid.to_vec(), id);
     }
 
@@ -950,6 +960,57 @@ mod tests {
         // Nothing was indexed by ID, because there was no ID to index.
         assert!(tracker.connection_id_for_dcid(&[]).is_none());
         assert_eq!(tracker.stats().active_connections, 1);
+    }
+
+    #[test]
+    fn two_connections_sharing_a_connection_id_stay_apart() {
+        let mut tracker = QuicConnectionTracker::new();
+        let a = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
+        let b = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1));
+        let c = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2));
+        let d = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 2));
+
+        tracker.observe_long_header(a, 1_000, b, 443, b"abcdefgh");
+        tracker.observe_long_header(c, 2_000, d, 443, b"abcdefgh");
+
+        assert_eq!(
+            tracker.stats().active_connections,
+            2,
+            "two endpoint pairs sharing a CID are two connections"
+        );
+    }
+
+    /// The global cap has to hold even when there is nothing to evict to make
+    /// room. Inserting anyway let the index grow without limit.
+    #[test]
+    fn the_connection_id_cap_holds_when_nothing_can_be_reclaimed() {
+        let a = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let mut tracker = QuicConnectionTracker::new()
+            .with_max_cids(1)
+            .with_max_cids_per_pool(0);
+
+        tracker.observe_long_header(a, 5_000, b, 443, b"initial0");
+        let id = tracker
+            .connection_and_direction(a, 5_000, b, 443, b"initial0")
+            .map(|(id, _)| id)
+            .expect("the connection");
+
+        for n in 1u32..8 {
+            tracker.observe_new_connection_id(
+                id,
+                Endpoint::new(a, 5_000),
+                u64::from(n),
+                &n.to_be_bytes(),
+                0,
+            );
+        }
+
+        assert!(
+            tracker.stats().active_cids <= 1,
+            "the cap is one, got {}",
+            tracker.stats().active_cids
+        );
     }
 
     #[test]
