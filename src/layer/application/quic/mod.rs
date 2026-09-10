@@ -322,20 +322,33 @@ pub fn parse_quic_long_header(payload: &[u8]) -> Result<QuicLongHeader, LayerErr
 pub fn split_coalesced_packets(datagram: &[u8]) -> Vec<&[u8]> {
     let mut packets = Vec::new();
     let mut remaining = datagram;
+    // RFC 9000 sec 12.2: a sender MUST NOT coalesce packets carrying different
+    // connection IDs, and a receiver ignores any that follow with a Destination
+    // Connection ID other than the first packet's.
+    let mut first_dcid: Option<Vec<u8>> = None;
 
     while !remaining.is_empty() {
-        let Some(total_len) = coalesced_packet_len(remaining) else {
+        let Some((total_len, header)) = coalesced_packet(remaining) else {
             packets.push(remaining);
             break;
         };
-        packets.push(&remaining[..total_len]);
+        let packet = &remaining[..total_len];
         remaining = &remaining[total_len..];
+
+        match &first_dcid {
+            None => {
+                first_dcid = Some(header.dcid);
+                packets.push(packet);
+            }
+            Some(expected) if *expected == header.dcid => packets.push(packet),
+            Some(_) => {}
+        }
     }
 
     packets
 }
 
-fn coalesced_packet_len(packet: &[u8]) -> Option<usize> {
+fn coalesced_packet(packet: &[u8]) -> Option<(usize, QuicLongHeader)> {
     if *packet.first()? & 0x80 == 0 {
         return None;
     }
@@ -347,7 +360,7 @@ fn coalesced_packet_len(packet: &[u8]) -> Option<usize> {
 
     let length = usize::try_from(header.length?).ok()?;
     let total_len = header.packet_number_offset?.checked_add(length)?;
-    (total_len != 0 && total_len <= packet.len()).then_some(total_len)
+    (total_len != 0 && total_len <= packet.len()).then_some((total_len, header))
 }
 
 /// Probes a QUIC long header by its header form bit and version.
@@ -501,6 +514,43 @@ mod tests {
 
         assert_eq!(expected_initial_len, initial.len());
         assert_eq!(packets, vec![initial.as_slice(), short_header.as_slice()]);
+    }
+
+    /// RFC 9000 sec 12.2: a sender MUST NOT coalesce packets with different
+    /// connection IDs, and a receiver ignores any that follow with a different
+    /// Destination Connection ID.
+    #[test]
+    fn a_coalesced_packet_for_another_connection_is_ignored() {
+        // Two Initials, DCID `aa` and DCID `bb`, each with a one-byte payload.
+        let mut first = vec![0xc0, 0x00, 0x00, 0x00, 0x01, 0x01, 0xaa, 0x00];
+        first.extend(INITIAL_TAIL);
+        let mut second = vec![0xc0, 0x00, 0x00, 0x00, 0x01, 0x01, 0xbb, 0x00];
+        second.extend(INITIAL_TAIL);
+
+        let mut datagram = first.clone();
+        datagram.extend_from_slice(&second);
+
+        assert_eq!(
+            split_coalesced_packets(&datagram),
+            vec![first.as_slice()],
+            "only the packets the first one's connection would receive"
+        );
+    }
+
+    /// The same datagram, both packets addressed alike, is ordinary coalescing
+    /// and both are returned.
+    #[test]
+    fn coalesced_packets_for_one_connection_are_all_kept() {
+        let mut packet = vec![0xc0, 0x00, 0x00, 0x00, 0x01, 0x01, 0xaa, 0x00];
+        packet.extend(INITIAL_TAIL);
+
+        let mut datagram = packet.clone();
+        datagram.extend_from_slice(&packet);
+
+        assert_eq!(
+            split_coalesced_packets(&datagram),
+            vec![packet.as_slice(), packet.as_slice()]
+        );
     }
 
     #[test]
