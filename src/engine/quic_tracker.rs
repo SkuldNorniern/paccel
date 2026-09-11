@@ -543,9 +543,18 @@ impl QuicConnectionTracker {
             }
         }
 
+        let kept = pool
+            .ids
+            .get(&sequence_number)
+            .is_some_and(|held| held == cid);
+
         for stale in dropped {
             self.by_cid.remove(&stale);
         }
+        if !kept {
+            return false;
+        }
+
         self.cid_lengths |= 1 << cid.len();
         self.remember_cid(cid, id);
         true
@@ -1011,6 +1020,36 @@ mod tests {
             "the cap is one, got {}",
             tracker.stats().active_cids
         );
+    }
+
+    #[test]
+    fn a_connection_id_its_own_pool_refused_is_not_indexed() {
+        let a = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let mut tracker = QuicConnectionTracker::new().with_max_cids_per_pool(1);
+
+        tracker.observe_long_header(a, 5_000, b, 443, b"initial0");
+        let id = tracker
+            .connection_id_for_dcid(b"initial0")
+            .expect("the connection");
+        let issuer = Endpoint::new(b, 443);
+
+        // Fills the pool at sequence 5, then offers a lower sequence, which the
+        // pool has no room to keep.
+        assert!(tracker.observe_new_connection_id(id, issuer, 5, b"highseq0", 0));
+        assert!(
+            !tracker.observe_new_connection_id(id, issuer, 1, b"lowseq00", 0),
+            "the pool kept the higher sequence, so this one was not recorded"
+        );
+        assert!(
+            tracker.connection_id_for_dcid(b"lowseq00").is_none(),
+            "an id no pool holds must not resolve to anything"
+        );
+
+        // And dropping the connection leaves nothing behind.
+        tracker.remove_flow(a, 5_000, b, 443);
+        assert!(tracker.connection_id_for_dcid(b"highseq0").is_none());
+        assert_eq!(tracker.stats().active_cids, 0);
     }
 
     #[test]
