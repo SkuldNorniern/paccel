@@ -610,11 +610,22 @@ mod tests {
         record
     }
 
-    /// RFC 8446 sec 5.1: "Handshake messages MUST NOT be interleaved with
-    /// other record types. That is, if a handshake message is split over two or
-    /// more records, there MUST NOT be any other records between them."
+    /// Builds `count` handshake records carrying `body` split evenly.
+    fn fragment_records(body: &[u8], split: usize) -> Vec<u8> {
+        let mut out = Vec::new();
+        for piece in [&body[..split], &body[split..]] {
+            out.extend_from_slice(&[TLS_HANDSHAKE_CONTENT_TYPE, 0x03, 0x03]);
+            out.extend_from_slice(&u16::try_from(piece.len()).expect("fits").to_be_bytes());
+            out.extend_from_slice(piece);
+        }
+        out
+    }
+
+    /// RFC 8446 sec 5.1: "Handshake messages MUST NOT be interleaved with other
+    /// record types. That is, if a handshake message is split over two or more
+    /// records, there MUST NOT be any other records between them."
     #[test]
-    fn a_handshake_split_around_another_record_type_is_refused() {
+    fn a_handshake_split_around_another_record_type_is_not_gathered() {
         let whole = client_hello_record(&[]);
         let body = &whole[5..];
         let split = body.len() / 2;
@@ -633,7 +644,47 @@ mod tests {
         );
         interleaved.extend_from_slice(&body[split..]);
 
-        assert!(parse_tls_client_hello(&interleaved).is_err());
+        assert!(
+            matches!(
+                coalesced_handshake(&interleaved),
+                Err(LayerError::InsufficientData)
+            ),
+            "the message stops at the record that is not a handshake"
+        );
+
+        // The same two fragments with nothing between them are gathered.
+        let clean = fragment_records(body, split);
+        assert_eq!(
+            coalesced_handshake(&clean).expect("gathered").as_ref(),
+            body
+        );
+    }
+
+    /// Sec 5.1: "Implementations MUST NOT send zero-length fragments of
+    /// Handshake types". Accepting one gathers nothing and asks for more.
+    #[test]
+    fn a_zero_length_handshake_fragment_is_refused() {
+        let whole = client_hello_record(&[]);
+        let body = &whole[5..];
+        let split = body.len() / 2;
+
+        let mut with_empty = Vec::new();
+        with_empty.extend_from_slice(&[TLS_HANDSHAKE_CONTENT_TYPE, 0x03, 0x03]);
+        with_empty.extend_from_slice(&u16::try_from(split).expect("fits").to_be_bytes());
+        with_empty.extend_from_slice(&body[..split]);
+        with_empty.extend_from_slice(&[TLS_HANDSHAKE_CONTENT_TYPE, 0x03, 0x03, 0x00, 0x00]);
+        with_empty.extend_from_slice(&[TLS_HANDSHAKE_CONTENT_TYPE, 0x03, 0x03]);
+        with_empty.extend_from_slice(
+            &u16::try_from(body.len() - split)
+                .expect("fits")
+                .to_be_bytes(),
+        );
+        with_empty.extend_from_slice(&body[split..]);
+
+        assert!(matches!(
+            coalesced_handshake(&with_empty),
+            Err(LayerError::InvalidHeader)
+        ));
     }
 
     /// RFC 8446 sec 5.1: a handshake message "MAY be coalesced into a single
