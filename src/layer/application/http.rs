@@ -22,25 +22,25 @@ pub enum HttpMessage {
 }
 
 pub fn parse_http(payload: &[u8]) -> Result<HttpMessage, LayerError> {
-    let start_line_end = find_crlf(payload).ok_or(LayerError::InvalidLength)?;
-    let start_line = String::from_utf8_lossy(&payload[..start_line_end]);
+    let first = next_line(payload).ok_or(LayerError::InvalidLength)?;
+    let start_line = String::from_utf8_lossy(&payload[..first.text]);
     let mut headers = Vec::new();
-    let mut offset = start_line_end + 2;
+    let mut offset = first.next;
 
     while offset < payload.len() {
         let remaining = &payload[offset..];
-        let Some(line_end) = find_crlf(remaining) else {
+        let Some(line) = next_line(remaining) else {
             break;
         };
-        if line_end == 0 {
+        if line.text == 0 {
             break;
         }
 
-        let line = String::from_utf8_lossy(&remaining[..line_end]);
-        if let Some((name, value)) = line.split_once(':') {
+        let text = String::from_utf8_lossy(&remaining[..line.text]);
+        if let Some((name, value)) = text.split_once(':') {
             headers.push((name.trim().to_string(), value.trim().to_string()));
         }
-        offset += line_end + 2;
+        offset += line.next;
     }
 
     if start_line.starts_with("HTTP/") {
@@ -71,7 +71,7 @@ pub fn probe_http(payload: &[u8]) -> ProbeResult<HttpMessage> {
             available: payload.len(),
         });
     }
-    if !payload.windows(4).any(|window| window == b"\r\n\r\n") {
+    if !has_header_terminator(payload) {
         return ProbeResult::Incomplete {
             needed: None,
             available: payload.len(),
@@ -144,16 +144,66 @@ fn parse_response_start_line(
     })
 }
 
-fn find_crlf(data: &[u8]) -> Option<usize> {
-    data.windows(2).position(|window| window == b"\r\n")
+/// Where one line ends and the next begins.
+struct Line {
+    /// Length of the line's text, without its terminator.
+    text: usize,
+    /// Offset the following line starts at.
+    next: usize,
+}
+
+fn next_line(data: &[u8]) -> Option<Line> {
+    let lf = data.iter().position(|byte| *byte == b'\n')?;
+    let text = if lf > 0 && data[lf - 1] == b'\r' {
+        lf - 1
+    } else {
+        lf
+    };
+
+    Some(Line { text, next: lf + 1 })
+}
+
+/// Whether the header section is terminated: a line with no text.
+fn has_header_terminator(payload: &[u8]) -> bool {
+    let mut offset = 0;
+    while offset < payload.len() {
+        let Some(line) = next_line(&payload[offset..]) else {
+            return false;
+        };
+        if line.text == 0 {
+            return true;
+        }
+        offset += line.next;
+    }
+
+    false
 }
 
 #[cfg(test)]
 mod tests {
-    use super::probe_http;
+    use super::{HttpMessage, parse_http, probe_http};
     use crate::layer::ProbeResult;
 
     const REQUEST: &[u8] = b"GET /index.html HTTP/1.1\r\nHost: example.com\r\n\r\n";
+
+    /// RFC 9112 sec 2.2: "Although the line terminator for the start-line and
+    /// fields is the sequence CRLF, a recipient MAY recognize a single LF as a
+    /// line terminator and ignore any preceding CR."
+    #[test]
+    fn a_request_terminated_with_bare_lf_is_recognised() {
+        let request = b"GET /index.html HTTP/1.1\nHost: example.com\n\n";
+
+        let message = parse_http(request).expect("a bare-LF request is still a request");
+
+        assert!(
+            matches!(
+                &message,
+                HttpMessage::Request { target, host, .. }
+                    if target == "/index.html" && host.as_deref() == Some("example.com")
+            ),
+            "got {message:?}"
+        );
+    }
 
     #[test]
     fn probe_matches_a_real_request() {
