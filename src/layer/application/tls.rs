@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use crate::layer::{Layer, LayerError, ParseError, ProbeResult};
 
 const TLS_HANDSHAKE_CONTENT_TYPE: u8 = 22;
@@ -36,6 +38,55 @@ pub struct TlsServerHello {
     pub extension_types: Vec<u16>,
 }
 
+fn coalesced_handshake(payload: &[u8]) -> Result<Cow<'_, [u8]>, LayerError> {
+    let first = record_body(payload, 0)?;
+
+    // Enough of the handshake header to know how long the message is, and
+    // enough of the message to have all of it.
+    if first.len() >= 4 && 4usize.saturating_add(read_u24(first, 1)?) <= first.len() {
+        return Ok(Cow::Borrowed(first));
+    }
+
+    let mut buffer = first.to_vec();
+    let mut offset = 5 + first.len();
+    loop {
+        // Once the header is in, stop as soon as the message is complete.
+        if buffer.len() >= 4 && 4usize.saturating_add(read_u24(&buffer, 1)?) <= buffer.len() {
+            break;
+        }
+        if offset >= payload.len() || payload[offset] != TLS_HANDSHAKE_CONTENT_TYPE {
+            return Err(LayerError::InsufficientData);
+        }
+        let next = record_body(payload, offset)?;
+        if next.is_empty() {
+            // Sec 5.1: "Implementations MUST NOT send zero-length fragments of
+            // Handshake types", and accepting one would never make progress.
+            return Err(LayerError::InvalidHeader);
+        }
+        offset += 5 + next.len();
+        buffer.extend_from_slice(next);
+    }
+
+    Ok(Cow::Owned(buffer))
+}
+
+/// The body of the TLS record starting at `at`.
+fn record_body(payload: &[u8], at: usize) -> Result<&[u8], LayerError> {
+    let header_end = at.checked_add(5).ok_or(LayerError::InvalidLength)?;
+    if header_end > payload.len() {
+        return Err(LayerError::InsufficientData);
+    }
+    let length = usize::from(read_u16(payload, at + 3)?);
+    let end = header_end
+        .checked_add(length)
+        .ok_or(LayerError::InvalidLength)?;
+    if end > payload.len() {
+        return Err(LayerError::InsufficientData);
+    }
+
+    Ok(&payload[header_end..end])
+}
+
 pub fn parse_tls_client_hello(payload: &[u8]) -> Result<TlsClientHello, LayerError> {
     if payload.len() < 5 {
         return Err(LayerError::InvalidLength);
@@ -45,14 +96,8 @@ pub fn parse_tls_client_hello(payload: &[u8]) -> Result<TlsClientHello, LayerErr
     }
 
     let record_version = read_u16(payload, 1)?;
-    let record_length = usize::from(read_u16(payload, 3)?);
-    let record_end = 5usize
-        .checked_add(record_length)
-        .ok_or(LayerError::InvalidLength)?;
-    if record_end > payload.len() {
-        return Err(LayerError::InsufficientData);
-    }
-    let record = &payload[5..record_end];
+    let record = coalesced_handshake(payload)?;
+    let record = record.as_ref();
 
     if record.len() < 4 {
         return Err(LayerError::InvalidLength);
@@ -563,6 +608,66 @@ mod tests {
         record.extend_from_slice(&handshake_length_bytes[1..]);
         record.extend_from_slice(hello);
         record
+    }
+
+    /// RFC 8446 sec 5.1: "Handshake messages MUST NOT be interleaved with
+    /// other record types. That is, if a handshake message is split over two or
+    /// more records, there MUST NOT be any other records between them."
+    #[test]
+    fn a_handshake_split_around_another_record_type_is_refused() {
+        let whole = client_hello_record(&[]);
+        let body = &whole[5..];
+        let split = body.len() / 2;
+
+        let mut interleaved = Vec::new();
+        interleaved.extend_from_slice(&[TLS_HANDSHAKE_CONTENT_TYPE, 0x03, 0x03]);
+        interleaved.extend_from_slice(&u16::try_from(split).expect("fits").to_be_bytes());
+        interleaved.extend_from_slice(&body[..split]);
+        // An alert record between the two halves of the handshake message.
+        interleaved.extend_from_slice(&[21, 0x03, 0x03, 0x00, 0x02, 0x01, 0x00]);
+        interleaved.extend_from_slice(&[TLS_HANDSHAKE_CONTENT_TYPE, 0x03, 0x03]);
+        interleaved.extend_from_slice(
+            &u16::try_from(body.len() - split)
+                .expect("fits")
+                .to_be_bytes(),
+        );
+        interleaved.extend_from_slice(&body[split..]);
+
+        assert!(parse_tls_client_hello(&interleaved).is_err());
+    }
+
+    /// RFC 8446 sec 5.1: a handshake message "MAY be coalesced into a single
+    /// TLSPlaintext record or fragmented across several records"
+    #[test]
+    fn a_client_hello_split_across_records_still_parses() {
+        let mut sni = Vec::new();
+        let host = b"example.com";
+        let host_len = u16::try_from(host.len()).expect("fits");
+        sni.extend_from_slice(&(host_len + 3).to_be_bytes());
+        sni.push(0);
+        sni.extend_from_slice(&host_len.to_be_bytes());
+        sni.extend_from_slice(host);
+        let mut extensions = Vec::new();
+        extensions.extend_from_slice(&0u16.to_be_bytes());
+        extensions.extend_from_slice(&u16::try_from(sni.len()).expect("fits").to_be_bytes());
+        extensions.extend_from_slice(&sni);
+
+        let whole = client_hello_record(&extensions);
+
+        // Same bytes, cut into two records at an arbitrary point inside the
+        // handshake message.
+        let body = &whole[5..];
+        let split = body.len() / 2;
+        let mut fragmented = Vec::new();
+        for piece in [&body[..split], &body[split..]] {
+            fragmented.extend_from_slice(&[TLS_HANDSHAKE_CONTENT_TYPE, 0x03, 0x03]);
+            fragmented.extend_from_slice(&u16::try_from(piece.len()).expect("fits").to_be_bytes());
+            fragmented.extend_from_slice(piece);
+        }
+
+        let hello = parse_tls_client_hello(&fragmented)
+            .expect("a fragmented ClientHello is still a ClientHello");
+        assert_eq!(hello.server_name.as_deref(), Some("example.com"));
     }
 
     #[test]
