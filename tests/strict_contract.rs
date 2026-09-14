@@ -4,7 +4,7 @@ use std::path::Path;
 use paccel::engine::{BuiltinPacketParser, ParseConfig, ParseMode, ParseWarningCode, ParsedPacket};
 
 /// Warnings that mean part of the frame did not survive the capture.
-fn says_something_went_missing(code: &ParseWarningCode) -> bool {
+fn says_something_went_missing(code: ParseWarningCode) -> bool {
     matches!(
         code,
         ParseWarningCode::LinkPayloadTruncated
@@ -47,8 +47,8 @@ fn strict_refuses_every_frame_permissive_only_partly_read() {
         let missing: Vec<_> = parsed
             .warnings
             .iter()
-            .filter(|warning| says_something_went_missing(&warning.code))
-            .map(|warning| warning.code.clone())
+            .filter(|warning| says_something_went_missing(warning.code))
+            .map(|warning| warning.code)
             .collect();
         if missing.is_empty() {
             continue;
