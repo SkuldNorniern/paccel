@@ -10,7 +10,7 @@ readme = "README.md"
 repository = "https://github.com/SkuldNorniern/paccel"
 keywords = ["packet", "pcap", "network", "parser", "protocol"]
 categories = ["network-programming", "parser-implementations"]
-exclude = ["tests/pcaps/", "fuzz/", "benches/"]
+exclude = ["tests/pcaps/", "tests/frames/", "fuzz/", "benches/"]
 
 [package.metadata.docs.rs]
 all-features = true
