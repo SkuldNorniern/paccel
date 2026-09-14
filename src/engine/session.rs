@@ -73,8 +73,11 @@ struct ProbeState {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[non_exhaustive]
 pub struct SessionStats {
-    /// Directions currently being probed.
+    /// Directions currently being probed: still undecided, still holding bytes
+    /// towards an answer.
     pub active_probes: usize,
+    /// Directions with any state retained, decided or not.
+    pub retained_directions: usize,
     /// Bytes held across every probe.
     pub probe_bytes: usize,
     /// Unfinished probes dropped to make room under the global byte cap.
@@ -154,7 +157,8 @@ impl SessionTracker {
     #[must_use]
     pub fn stats(&self) -> SessionStats {
         SessionStats {
-            active_probes: self.probes.len(),
+            active_probes: self.probes.values().filter(|probe| !probe.done).count(),
+            retained_directions: self.probes.len(),
             probe_bytes: self.total_probe_bytes,
             probe_evictions: self.probe_evictions,
             probe_resource_limits: self.probe_resource_limits,
@@ -955,6 +959,59 @@ mod tests {
             event.is_some(),
             "a recognisable stream must still classify under pressure"
         );
+    }
+
+    #[test]
+    fn a_classified_direction_is_not_probed_again_midstream() {
+        let request = b"GET /first HTTP/1.1\r\nHost: example.com\r\n\r\n";
+        let later = b"GET /second HTTP/1.1\r\nHost: example.org\r\n\r\n";
+        let mut tracker = SessionTracker::new();
+
+        tracker.offer_frame(&tcp_frame(SRC_PORT, 1_000, true, &[]));
+        assert!(
+            tracker
+                .offer_frame(&tcp_frame(SRC_PORT, 1_001, false, request))
+                .is_some(),
+            "the first request classifies it"
+        );
+
+        let sequence = 1_001 + u32::try_from(request.len()).expect("fits");
+        assert!(
+            tracker
+                .offer_frame(&tcp_frame(SRC_PORT, sequence, false, later))
+                .is_none(),
+            "more of the same stream is not a second classification"
+        );
+        assert_eq!(
+            tracker.stats().retained_directions,
+            1,
+            "the tombstone is still held"
+        );
+    }
+
+    #[test]
+    fn active_probes_excludes_a_direction_already_classified() {
+        let request = b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n";
+        let mut tracker = SessionTracker::new();
+
+        tracker.offer_frame(&tcp_frame(SRC_PORT, 1_000, true, &[]));
+        assert!(
+            tracker
+                .offer_frame(&tcp_frame(SRC_PORT, 1_001, false, request))
+                .is_some(),
+            "the request classifies the direction"
+        );
+
+        assert_eq!(
+            tracker.stats().active_probes,
+            0,
+            "nothing is still being probed once it has been decided"
+        );
+
+        // A second, undecided direction is counted.
+        tracker.offer_frame(&tcp_frame(SRC_PORT + 1, 2_000, true, &[]));
+        tracker.offer_frame(&tcp_frame(SRC_PORT + 1, 2_001, false, b"GET "));
+        assert_eq!(tracker.stats().active_probes, 1);
     }
 
     /// A ClientHello split across TLS records, arriving over two TCP segments,

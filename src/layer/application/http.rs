@@ -102,7 +102,7 @@ fn parse_request_start_line(
             method,
             "GET" | "HEAD" | "POST" | "PUT" | "DELETE" | "CONNECT" | "OPTIONS" | "TRACE" | "PATCH"
         )
-        || !version.starts_with("HTTP/1.")
+        || !is_http1_version(version)
     {
         return Err(LayerError::InvalidHeader);
     }
@@ -129,7 +129,10 @@ fn parse_response_start_line(
     let version = fields.next().ok_or(LayerError::InvalidHeader)?;
     let status_text = fields.next().ok_or(LayerError::InvalidHeader)?;
     let reason = fields.next().unwrap_or_default();
-    if status_text.len() != 3 || !status_text.bytes().all(|byte| byte.is_ascii_digit()) {
+    if !is_http1_version(version)
+        || status_text.len() != 3
+        || !status_text.bytes().all(|byte| byte.is_ascii_digit())
+    {
         return Err(LayerError::InvalidHeader);
     }
     let status = status_text
@@ -142,6 +145,13 @@ fn parse_response_start_line(
         reason: reason.to_string(),
         headers,
     })
+}
+
+/// Whether `version` is an HTTP/1.x version as RFC 9112 sec 2.3 spells it.
+fn is_http1_version(version: &str) -> bool {
+    let bytes = version.as_bytes();
+
+    bytes.len() == 8 && &bytes[..7] == b"HTTP/1." && bytes[7].is_ascii_digit()
 }
 
 /// Where one line ends and the next begins.
@@ -185,6 +195,39 @@ mod tests {
     use crate::layer::ProbeResult;
 
     const REQUEST: &[u8] = b"GET /index.html HTTP/1.1\r\nHost: example.com\r\n\r\n";
+
+    /// RFC 9112 sec 2.3: `HTTP-version = HTTP-name "/" DIGIT "."
+    #[test]
+    fn a_response_version_follows_the_same_grammar_as_a_request() {
+        for version in ["HTTP/1.0", "HTTP/1.1"] {
+            let response = format!("{version} 200 OK\r\n\r\n");
+            assert!(
+                parse_http(response.as_bytes()).is_ok(),
+                "{version} is a version"
+            );
+        }
+
+        for version in ["HTTP/BANANA", "HTTP/1.xyz", "HTTP/11", "http/1.1"] {
+            let response = format!("{version} 200 OK\r\n\r\n");
+            assert!(
+                parse_http(response.as_bytes()).is_err(),
+                "{version} is not a version"
+            );
+
+            let request = format!("GET / {version}\r\n\r\n");
+            assert!(
+                parse_http(request.as_bytes()).is_err(),
+                "{version} is not a version on a request either"
+            );
+        }
+    }
+
+    /// An HTTP/1.x minor version this parser has not heard of is still an
+    /// HTTP/1.x message, and the endpoints read it.
+    #[test]
+    fn an_unknown_http1_minor_version_is_still_read() {
+        assert!(parse_http(b"HTTP/1.9 200 OK\r\n\r\n").is_ok());
+    }
 
     /// RFC 9112 sec 2.2: "Although the line terminator for the start-line and
     /// fields is the sequence CRLF, a recipient MAY recognize a single LF as a
