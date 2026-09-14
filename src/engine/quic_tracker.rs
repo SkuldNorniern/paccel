@@ -142,7 +142,10 @@ impl QuicConnectionState {
 pub struct QuicTrackerStats {
     /// UDP flows held right now.
     pub active_tuples: usize,
-    /// Connection IDs that resolve to one of them.
+    /// Distinct connection ID byte strings indexed right now.
+    ///
+    /// Counted once each, not once per holder: two connections may hold the
+    /// same ID, and this is what `with_max_cids` bounds.
     pub active_cids: usize,
     /// Connections held right now. Lower than `active_tuples` once one has
     /// migrated, since the old tuple stays bound until it is expired.
@@ -180,7 +183,8 @@ pub struct QuicConnectionTracker {
     max_cids_per_pool: usize,
     connections: HashMap<QuicConnectionId, QuicConnectionState>,
     by_tuple: HashMap<BiFlow, QuicConnectionId>,
-    by_cid: HashMap<Vec<u8>, QuicConnectionId>,
+    /// Connections holding each connection ID. Two may hold the same bytes.
+    by_cid: HashMap<Vec<u8>, Vec<QuicConnectionId>>,
     /// Connections oldest first, for the capacity limit.
     insertion_order: VecDeque<QuicConnectionId>,
     next_id: u64,
@@ -284,8 +288,11 @@ impl QuicConnectionTracker {
     fn reindex(&mut self) {
         self.by_tuple
             .retain(|_, id| self.connections.contains_key(id));
-        self.by_cid
-            .retain(|_, id| self.connections.contains_key(id));
+        let connections = &self.connections;
+        self.by_cid.retain(|_, holders| {
+            holders.retain(|id| connections.contains_key(id));
+            !holders.is_empty()
+        });
         self.insertion_order
             .retain(|id| self.connections.contains_key(id));
     }
@@ -309,13 +316,9 @@ impl QuicConnectionTracker {
         // An SCID already on the books names the connection even when the
         // address pair does not: that is a long header arriving after a move.
         let matched = self.by_tuple.get(&key).copied().or_else(|| {
-            let id = named.then(|| self.by_cid.get(scid)).flatten().copied()?;
-            let connection = self.connections.get(&id)?;
-            connection
-                .tuples
-                .iter()
-                .any(|held| key.shared_endpoint(*held).is_some())
-                .then_some(id)
+            named
+                .then(|| self.holder_sharing_an_endpoint(scid, key))
+                .flatten()
         });
 
         let id = match matched {
@@ -367,9 +370,8 @@ impl QuicConnectionTracker {
         if let Some(displaced) = displaced
             && let Some(connection) = self.connections.get(&id)
             && !connection.indexed_cids().any(|held| held == &displaced)
-            && self.by_cid.get(&displaced) == Some(&id)
         {
-            self.by_cid.remove(&displaced);
+            self.release_cid(&displaced, id);
         }
 
         self.remember_cid(scid, id);
@@ -414,8 +416,11 @@ impl QuicConnectionTracker {
         dcid: &[u8],
         now: Option<Timestamp>,
     ) -> Option<QuicConnectionId> {
-        let id = *self.by_cid.get(dcid)?;
         let (key, _) = normalized_flow(src, src_port, dst, dst_port);
+        // The connection ID decides, not the address pair: RFC 9000 sec 5.1
+        // gives a connection an ID so it survives a change of address, and a
+        // pair can be reused by whatever comes next.
+        let id = self.holder_for(dcid, key)?;
         self.bind_tuple(id, key);
         if let Some(now) = now
             && let Some(connection) = self.connections.get_mut(&id)
@@ -455,8 +460,8 @@ impl QuicConnectionTracker {
         let id = self
             .by_tuple
             .get(&key)
-            .or_else(|| self.by_cid.get(dcid))
-            .copied()?;
+            .copied()
+            .or_else(|| self.holder_for(dcid, key))?;
         let direction = self.direction_for(
             id,
             Endpoint::new(src, src_port),
@@ -468,7 +473,35 @@ impl QuicConnectionTracker {
     /// The connection a DCID names, if it is one being tracked.
     #[must_use]
     pub fn connection_id_for_dcid(&self, dcid: &[u8]) -> Option<QuicConnectionId> {
-        self.by_cid.get(dcid).copied()
+        match self.by_cid.get(dcid)?.as_slice() {
+            [only] => Some(*only),
+            _ => None,
+        }
+    }
+
+    /// Every connection holding `dcid`, in the order they claimed it.
+    #[must_use]
+    pub fn connections_for_dcid(&self, dcid: &[u8]) -> &[QuicConnectionId] {
+        self.by_cid.get(dcid).map_or(&[], Vec::as_slice)
+    }
+
+    fn holder_for(&self, dcid: &[u8], key: BiFlow) -> Option<QuicConnectionId> {
+        match self.by_cid.get(dcid)?.as_slice() {
+            [] => None,
+            [only] => Some(*only),
+            _ => self.holder_sharing_an_endpoint(dcid, key),
+        }
+    }
+
+    fn holder_sharing_an_endpoint(&self, dcid: &[u8], key: BiFlow) -> Option<QuicConnectionId> {
+        self.by_cid.get(dcid)?.iter().copied().find(|id| {
+            self.connections.get(id).is_some_and(|connection| {
+                connection
+                    .tuples
+                    .iter()
+                    .any(|held| key.shared_endpoint(*held).is_some())
+            })
+        })
     }
 
     /// Every address pair a connection has been seen on, oldest first. A
@@ -521,7 +554,7 @@ impl QuicConnectionTracker {
         // Already retired by an earlier frame, so it does not come back.
         if sequence_number < pool.retire_prior_to {
             for stale in dropped {
-                self.by_cid.remove(&stale);
+                self.release_cid(&stale, id);
             }
             return false;
         }
@@ -549,7 +582,7 @@ impl QuicConnectionTracker {
             .is_some_and(|held| held == cid);
 
         for stale in dropped {
-            self.by_cid.remove(&stale);
+            self.release_cid(&stale, id);
         }
         if !kept {
             return false;
@@ -578,7 +611,7 @@ impl QuicConnectionTracker {
         let Some(retired) = pool.ids.remove(&sequence_number) else {
             return false;
         };
-        self.by_cid.remove(&retired);
+        self.release_cid(&retired, id);
         true
     }
 
@@ -614,8 +647,8 @@ impl QuicConnectionTracker {
     /// are the connection's last-seen tuple, not the packet's arrival tuple.
     #[must_use]
     pub fn connection_for_dcid(&self, dcid: &[u8]) -> Option<(IpAddr, u16, IpAddr, u16)> {
-        let id = self.by_cid.get(dcid)?;
-        let key = self.connections.get(id)?.tuples.last()?;
+        let id = self.connection_id_for_dcid(dcid)?;
+        let key = self.connections.get(&id)?.tuples.last()?;
         Some((
             key.first.address,
             key.first.port,
@@ -869,7 +902,22 @@ impl QuicConnectionTracker {
         if self.by_cid.len() >= self.max_cids && !self.by_cid.contains_key(cid) {
             return;
         }
-        self.by_cid.insert(cid.to_vec(), id);
+
+        let holders = self.by_cid.entry(cid.to_vec()).or_default();
+        if !holders.contains(&id) {
+            holders.push(id);
+        }
+    }
+
+    /// Drops `id`'s claim on `cid`, and the entry once nobody holds it.
+    fn release_cid(&mut self, cid: &[u8], id: QuicConnectionId) {
+        let Some(holders) = self.by_cid.get_mut(cid) else {
+            return;
+        };
+        holders.retain(|held| *held != id);
+        if holders.is_empty() {
+            self.by_cid.remove(cid);
+        }
     }
 
     /// Drops the lowest-numbered id `id` still holds, in either pool. Returns
@@ -890,7 +938,7 @@ impl QuicConnectionTracker {
         let Some(stale) = connection.issued_cids[pool].ids.remove(&sequence) else {
             return false;
         };
-        self.by_cid.remove(&stale);
+        self.release_cid(&stale, id);
         true
     }
 
@@ -926,10 +974,11 @@ impl QuicConnectionTracker {
                 self.by_tuple.remove(key);
             }
         }
-        for cid in connection.indexed_cids() {
-            if self.by_cid.get(cid) == Some(&id) {
-                self.by_cid.remove(cid);
-            }
+        // Cloned, because releasing borrows the index while `connection` is
+        // still holding the ids being released.
+        let held: Vec<Vec<u8>> = connection.indexed_cids().cloned().collect();
+        for cid in held {
+            self.release_cid(&cid, id);
         }
     }
 }
@@ -1050,6 +1099,152 @@ mod tests {
         tracker.remove_flow(a, 5_000, b, 443);
         assert!(tracker.connection_id_for_dcid(b"highseq0").is_none());
         assert_eq!(tracker.stats().active_cids, 0);
+    }
+
+    #[test]
+    fn colliding_connection_ids_keep_both_connections_reachable() {
+        let a_client = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
+        let a_server = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1));
+        let b_client = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1));
+        let b_server = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9));
+        let shared = b"01020304";
+
+        let mut tracker = QuicConnectionTracker::new();
+        tracker.observe_long_header(a_server, 443, a_client, 50_000, shared);
+        tracker.observe_long_header(b_server, 443, b_client, 60_000, shared);
+
+        assert_eq!(
+            tracker.stats().active_connections,
+            2,
+            "two endpoint pairs are two connections"
+        );
+
+        // Each must still be findable from the tuple it opened on.
+        let a = tracker
+            .connection_and_direction(a_server, 443, a_client, 50_000, shared)
+            .map(|(id, _)| id)
+            .expect("connection A");
+        let b = tracker
+            .connection_and_direction(b_server, 443, b_client, 60_000, shared)
+            .map(|(id, _)| id)
+            .expect("connection B");
+        assert_ne!(a, b);
+
+        // A migrates: its client appears from a new address, still using the
+        // shared id. It must be followed to A, not to B and not to nothing.
+        let a_moved = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 77));
+        tracker.observe_short_header(a_moved, 51_000, a_server, 443, shared);
+        assert_eq!(
+            tracker
+                .connection_and_direction(a_moved, 51_000, a_server, 443, shared)
+                .map(|(id, _)| id),
+            Some(a),
+            "A's move must land on A"
+        );
+
+        // And B is untouched by it.
+        assert_eq!(
+            tracker
+                .connection_and_direction(b_server, 443, b_client, 60_000, shared)
+                .map(|(id, _)| id),
+            Some(b),
+            "B still answers on its own addresses"
+        );
+    }
+
+    #[test]
+    fn dropping_one_holder_of_a_shared_id_leaves_the_other() {
+        let a_client = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
+        let a_server = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1));
+        let b_client = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1));
+        let b_server = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9));
+        let shared = b"01020304";
+
+        for drop_first in [true, false] {
+            let mut tracker = QuicConnectionTracker::new();
+            tracker.observe_long_header(a_server, 443, a_client, 50_000, shared);
+            tracker.observe_long_header(b_server, 443, b_client, 60_000, shared);
+
+            assert_eq!(tracker.connections_for_dcid(shared).len(), 2);
+
+            let (gone, kept) = if drop_first {
+                (
+                    (a_server, 443, a_client, 50_000),
+                    (b_server, 443, b_client, 60_000),
+                )
+            } else {
+                (
+                    (b_server, 443, b_client, 60_000),
+                    (a_server, 443, a_client, 50_000),
+                )
+            };
+            let survivor = tracker
+                .connection_and_direction(kept.0, kept.1, kept.2, kept.3, shared)
+                .map(|(id, _)| id)
+                .expect("the survivor");
+
+            assert!(tracker.remove_flow(gone.0, gone.1, gone.2, gone.3));
+
+            assert_eq!(
+                tracker.connections_for_dcid(shared),
+                [survivor],
+                "only the dropped connection's claim goes"
+            );
+            assert_eq!(
+                tracker
+                    .connection_and_direction(kept.0, kept.1, kept.2, kept.3, shared)
+                    .map(|(id, _)| id),
+                Some(survivor),
+                "the survivor still answers on its own addresses"
+            );
+        }
+    }
+
+    /// With the collision present, either connection may move and each move
+    /// lands on the connection that made it.
+    #[test]
+    fn either_holder_of_a_shared_id_can_migrate() {
+        let a_client = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
+        let a_server = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1));
+        let b_client = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1));
+        let b_server = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9));
+        let shared = b"01020304";
+
+        let mut tracker = QuicConnectionTracker::new();
+        tracker.observe_long_header(a_server, 443, a_client, 50_000, shared);
+        tracker.observe_long_header(b_server, 443, b_client, 60_000, shared);
+        let a = tracker
+            .connection_and_direction(a_server, 443, a_client, 50_000, shared)
+            .map(|(id, _)| id)
+            .expect("A");
+        let b = tracker
+            .connection_and_direction(b_server, 443, b_client, 60_000, shared)
+            .map(|(id, _)| id)
+            .expect("B");
+
+        // Each client moves, keeping its own server still.
+        let a_moved = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 77));
+        let b_moved = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 77));
+        tracker.observe_short_header(a_moved, 51_000, a_server, 443, shared);
+        tracker.observe_short_header(b_moved, 61_000, b_server, 443, shared);
+
+        assert_eq!(
+            tracker
+                .connection_and_direction(a_moved, 51_000, a_server, 443, shared)
+                .map(|(id, _)| id),
+            Some(a)
+        );
+        assert_eq!(
+            tracker
+                .connection_and_direction(b_moved, 61_000, b_server, 443, shared)
+                .map(|(id, _)| id),
+            Some(b)
+        );
+        assert_eq!(
+            tracker.stats().active_connections,
+            2,
+            "still two connections after both moved"
+        );
     }
 
     #[test]
