@@ -663,12 +663,15 @@ mod tests {
         let fragmented = fragment_records(body, body.len() / 2);
 
         // Every byte is present, just spread over two records.
-        match probe_tls_client_hello(&fragmented) {
-            ProbeResult::Match(hello) => {
-                assert_eq!(hello.server_name.as_deref(), Some("example.com"));
-            }
-            other => panic!("expected a match, got {other:?}"),
-        }
+        let probed = probe_tls_client_hello(&fragmented);
+
+        assert!(
+            matches!(
+                &probed,
+                ProbeResult::Match(hello) if hello.server_name.as_deref() == Some("example.com")
+            ),
+            "expected a match, got {probed:?}"
+        );
     }
 
     /// And a genuinely short buffer still asks for more rather than matching.
