@@ -125,6 +125,11 @@ pub fn parse_tls_client_hello(payload: &[u8]) -> Result<TlsClientHello, LayerErr
     take(hello, &mut offset, session_id_length)?;
 
     let cipher_suites_length = usize::from(take_u16(hello, &mut offset)?);
+    // RFC 8446 sec 4.1.2 declares `CipherSuite cipher_suites<2..2^16-2>`: whole
+    // two-byte entries, at least one of them.
+    if cipher_suites_length == 0 || cipher_suites_length % 2 != 0 {
+        return Err(LayerError::InvalidLength);
+    }
     let cipher_suites_data = take(hello, &mut offset, cipher_suites_length)?;
     let cipher_suites = cipher_suites_data
         .as_chunks::<2>()
@@ -652,6 +657,43 @@ mod tests {
             out.extend_from_slice(piece);
         }
         out
+    }
+
+    /// RFC 8446 sec 4.1.2: `CipherSuite cipher_suites<2..2^16-2>`.
+    #[test]
+    fn an_odd_cipher_suite_vector_is_refused() {
+        let mut hello = Vec::new();
+        hello.extend_from_slice(&0x0303u16.to_be_bytes());
+        hello.extend_from_slice(&[0u8; 32]);
+        hello.push(0);
+        // Three bytes where whole entries were promised.
+        hello.extend_from_slice(&3u16.to_be_bytes());
+        hello.extend_from_slice(&[0x13, 0x01, 0xff]);
+        hello.extend_from_slice(&[1, 0]);
+        hello.extend_from_slice(&0u16.to_be_bytes());
+
+        let record = handshake_record(CLIENT_HELLO_HANDSHAKE_TYPE, &hello);
+
+        assert!(matches!(
+            parse_tls_client_hello(&record),
+            Err(LayerError::InvalidLength)
+        ));
+    }
+
+    /// An empty one too: the vector is declared with a minimum of one entry.
+    #[test]
+    fn an_empty_cipher_suite_vector_is_refused() {
+        let mut hello = Vec::new();
+        hello.extend_from_slice(&0x0303u16.to_be_bytes());
+        hello.extend_from_slice(&[0u8; 32]);
+        hello.push(0);
+        hello.extend_from_slice(&0u16.to_be_bytes());
+        hello.extend_from_slice(&[1, 0]);
+        hello.extend_from_slice(&0u16.to_be_bytes());
+
+        let record = handshake_record(CLIENT_HELLO_HANDSHAKE_TYPE, &hello);
+
+        assert!(parse_tls_client_hello(&record).is_err());
     }
 
     /// The probe has to gather records the same way the parse does, or the
