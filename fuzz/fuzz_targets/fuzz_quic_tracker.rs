@@ -117,6 +117,26 @@ fuzz_target!(|data: &[u8]| {
             "{} connection ids past the {MAX_CIDS} cap",
             stats.active_cids
         );
+        let mut distinct: Vec<&[u8]> = announced.iter().map(Vec::as_slice).collect();
+        distinct.sort_unstable();
+        distinct.dedup();
+        let held: usize = distinct
+            .iter()
+            .map(|cid| tracker.connections_for_dcid(cid).len())
+            .sum();
+        assert_eq!(
+            held, stats.active_cids,
+            "{held} bindings held but {} counted",
+            stats.active_cids
+        );
+        assert_eq!(
+            distinct
+                .iter()
+                .filter(|cid| !tracker.connections_for_dcid(cid).is_empty())
+                .count(),
+            stats.distinct_cids,
+            "distinct ids disagree with the index"
+        );
 
         for cid in &announced {
             if let Some(id) = tracker.connection_id_for_dcid(cid) {
