@@ -1,5 +1,4 @@
-use std::fs;
-use std::path::Path;
+mod frames_common;
 
 use paccel::engine::{BuiltinPacketParser, ParseConfig, ParseMode, ParseWarningCode, ParsedPacket};
 
@@ -20,28 +19,18 @@ fn says_something_went_missing(code: ParseWarningCode) -> bool {
 
 #[test]
 fn strict_refuses_every_frame_permissive_only_partly_read() {
-    let corpus = Path::new("fuzz/corpus/fuzz_parse_packet");
-    let Ok(entries) = fs::read_dir(corpus) else {
-        return;
-    };
+    let frames = frames_common::frames();
 
     let mut checked = 0usize;
     let mut escaped = Vec::new();
 
-    for entry in entries.flatten() {
-        let Ok(data) = fs::read(entry.path()) else {
-            continue;
-        };
-        if data.is_empty() {
-            continue;
-        }
-
+    for (name, data) in &frames {
         let permissive = ParseConfig {
             mode: ParseMode::Permissive,
             ..ParseConfig::default()
         };
         let mut parsed = ParsedPacket::default();
-        if BuiltinPacketParser::parse_into(&data, permissive, Some(1), &mut parsed).is_err() {
+        if BuiltinPacketParser::parse_into(data, permissive, Some(1), &mut parsed).is_err() {
             continue;
         }
         let missing: Vec<_> = parsed
@@ -60,8 +49,8 @@ fn strict_refuses_every_frame_permissive_only_partly_read() {
             ..ParseConfig::default()
         };
         let mut strict_parsed = ParsedPacket::default();
-        if BuiltinPacketParser::parse_into(&data, strict, Some(1), &mut strict_parsed).is_ok() {
-            escaped.push((entry.path(), missing));
+        if BuiltinPacketParser::parse_into(data, strict, Some(1), &mut strict_parsed).is_ok() {
+            escaped.push((name.clone(), missing));
         }
     }
 

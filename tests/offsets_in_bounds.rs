@@ -1,5 +1,4 @@
-use std::fs;
-use std::path::Path;
+mod frames_common;
 
 use paccel::engine::{BuiltinPacketParser, ParseConfig, ParsedPacket};
 
@@ -39,30 +38,19 @@ fn offsets_within(parsed: &ParsedPacket, len: usize, path: &mut Vec<&'static str
 
 #[test]
 fn reported_offsets_stay_inside_the_frame() {
-    let corpus = Path::new("fuzz/corpus/fuzz_parse_packet");
-    let Ok(entries) = fs::read_dir(corpus) else {
-        return;
-    };
-
+    let frames = frames_common::frames();
     let config = ParseConfig::default();
     let mut wrong = Vec::new();
 
-    for entry in entries.flatten() {
-        let Ok(data) = fs::read(entry.path()) else {
-            continue;
-        };
-        if data.is_empty() {
-            continue;
-        }
-
+    for (name, data) in &frames {
         let mut parsed = ParsedPacket::default();
-        if BuiltinPacketParser::parse_into(&data, config, Some(1), &mut parsed).is_err() {
+        if BuiltinPacketParser::parse_into(data, config, Some(1), &mut parsed).is_err() {
             continue;
         }
 
         let mut path = Vec::new();
         for problem in offsets_within(&parsed, data.len(), &mut path) {
-            wrong.push(format!("{}: {problem}", entry.path().display()));
+            wrong.push(format!("{name}: {problem}"));
         }
         if wrong.len() > 3 {
             break;
