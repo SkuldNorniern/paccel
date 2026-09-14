@@ -208,24 +208,41 @@ pub fn probe_tls_client_hello(payload: &[u8]) -> ProbeResult<TlsClientHello> {
     let Some(handshake_end) = 4usize.checked_add(handshake_length) else {
         return malformed_tls_probe(LayerError::InvalidLength);
     };
-    if handshake_end > record.len() {
-        let Some(needed) = 5usize.checked_add(handshake_end) else {
-            return malformed_tls_probe(LayerError::InvalidLength);
-        };
-        return if needed > payload.len() {
-            ProbeResult::Incomplete {
-                needed: Some(needed),
-                available: payload.len(),
-            }
-        } else {
-            malformed_tls_probe(LayerError::InvalidLength)
-        };
-    }
-
+    // Past here the message may still be spread over records that follow, so
+    // the decision belongs to the same gathering the parse uses. Computing a
+    // length from this record alone assumed the handshake continued straight
+    // after its header, and called a legitimately fragmented ClientHello
+    // malformed - bytes the direct parser reads without trouble.
     match parse_tls_client_hello(payload) {
         Ok(hello) => ProbeResult::Match(hello),
+        Err(LayerError::InsufficientData) => ProbeResult::Incomplete {
+            needed: records_needed_for(payload, handshake_end),
+            available: payload.len(),
+        },
         Err(error) => malformed_tls_probe(error),
     }
+}
+
+fn records_needed_for(payload: &[u8], handshake_end: usize) -> Option<usize> {
+    let mut gathered = 0usize;
+    let mut offset = 0usize;
+
+    while gathered < handshake_end {
+        if offset >= payload.len() || payload[offset] != TLS_HANDSHAKE_CONTENT_TYPE {
+            break;
+        }
+        let body = record_body(payload, offset).ok()?;
+        gathered += body.len();
+        offset += 5 + body.len();
+    }
+
+    // What is still missing sits in at least one more record.
+    let missing = handshake_end.checked_sub(gathered)?;
+    if missing == 0 {
+        return Some(offset);
+    }
+
+    offset.checked_add(5)?.checked_add(missing)
 }
 
 fn malformed_tls_probe(error: LayerError) -> ProbeResult<TlsClientHello> {
@@ -610,6 +627,22 @@ mod tests {
         record
     }
 
+    /// A server_name extension naming `host`.
+    fn sni_extension(host: &[u8]) -> Vec<u8> {
+        let host_len = u16::try_from(host.len()).expect("fits");
+        let mut sni = Vec::new();
+        sni.extend_from_slice(&(host_len + 3).to_be_bytes());
+        sni.push(0);
+        sni.extend_from_slice(&host_len.to_be_bytes());
+        sni.extend_from_slice(host);
+
+        let mut extensions = Vec::new();
+        extensions.extend_from_slice(&0u16.to_be_bytes());
+        extensions.extend_from_slice(&u16::try_from(sni.len()).expect("fits").to_be_bytes());
+        extensions.extend_from_slice(&sni);
+        extensions
+    }
+
     /// Builds `count` handshake records carrying `body` split evenly.
     fn fragment_records(body: &[u8], split: usize) -> Vec<u8> {
         let mut out = Vec::new();
@@ -619,6 +652,38 @@ mod tests {
             out.extend_from_slice(piece);
         }
         out
+    }
+
+    /// The probe has to gather records the same way the parse does, or the
+    /// stateful path refuses bytes the direct parser accepts.
+    #[test]
+    fn the_probe_matches_a_client_hello_split_across_records() {
+        let whole = client_hello_record(&sni_extension(b"example.com"));
+        let body = &whole[5..];
+        let fragmented = fragment_records(body, body.len() / 2);
+
+        // Every byte is present, just spread over two records.
+        match probe_tls_client_hello(&fragmented) {
+            ProbeResult::Match(hello) => {
+                assert_eq!(hello.server_name.as_deref(), Some("example.com"));
+            }
+            other => panic!("expected a match, got {other:?}"),
+        }
+    }
+
+    /// And a genuinely short buffer still asks for more rather than matching.
+    #[test]
+    fn the_probe_asks_for_more_when_a_fragment_is_missing() {
+        let whole = client_hello_record(&sni_extension(b"example.com"));
+        let body = &whole[5..];
+        let fragmented = fragment_records(body, body.len() / 2);
+        // Everything except the last few bytes of the second record.
+        let cut = &fragmented[..fragmented.len() - 4];
+
+        assert!(matches!(
+            probe_tls_client_hello(cut),
+            ProbeResult::Incomplete { .. }
+        ));
     }
 
     /// RFC 8446 sec 5.1: "Handshake messages MUST NOT be interleaved with other
@@ -910,10 +975,11 @@ mod tests {
     fn probe_reports_incomplete_for_a_truncated_handshake() {
         let mut client = client_hello_record(&[]);
         client[8] += 1;
+
         assert_eq!(
             probe_tls_client_hello(&client),
             ProbeResult::Incomplete {
-                needed: Some(client.len() + 1),
+                needed: Some(client.len() + 5 + 1),
                 available: client.len(),
             }
         );

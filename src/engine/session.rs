@@ -957,6 +957,76 @@ mod tests {
         );
     }
 
+    /// A ClientHello split across TLS records, arriving over two TCP segments,
+    /// classifies the stream.
+    ///
+    /// RFC 8446 sec 5.1 lets a handshake message be fragmented across records.
+    /// The direct parser gathers them; this is the stateful path that fluere
+    /// actually uses, so it has to reach the same answer.
+    #[test]
+    fn a_client_hello_split_across_records_classifies_the_stream() {
+        let host = b"example.com";
+        let host_len = u16::try_from(host.len()).expect("fits");
+        let mut sni = Vec::new();
+        sni.extend_from_slice(&(host_len + 3).to_be_bytes());
+        sni.push(0);
+        sni.extend_from_slice(&host_len.to_be_bytes());
+        sni.extend_from_slice(host);
+        let mut extensions = Vec::new();
+        extensions.extend_from_slice(&0u16.to_be_bytes());
+        extensions.extend_from_slice(&u16::try_from(sni.len()).expect("fits").to_be_bytes());
+        extensions.extend_from_slice(&sni);
+
+        let mut hello = Vec::new();
+        hello.extend_from_slice(&0x0303u16.to_be_bytes());
+        hello.extend_from_slice(&[0u8; 32]);
+        hello.push(0);
+        hello.extend_from_slice(&2u16.to_be_bytes());
+        hello.extend_from_slice(&0x1301u16.to_be_bytes());
+        hello.extend_from_slice(&[1, 0]);
+        hello.extend_from_slice(&u16::try_from(extensions.len()).expect("fits").to_be_bytes());
+        hello.extend_from_slice(&extensions);
+
+        let mut handshake = vec![1u8];
+        handshake.extend_from_slice(&u32::try_from(hello.len()).expect("fits").to_be_bytes()[1..]);
+        handshake.extend_from_slice(&hello);
+
+        // Two records, and each record in its own TCP segment.
+        let split = handshake.len() / 2;
+        let mut stream = Vec::new();
+        for piece in [&handshake[..split], &handshake[split..]] {
+            stream.extend_from_slice(&[0x16, 0x03, 0x03]);
+            stream.extend_from_slice(&u16::try_from(piece.len()).expect("fits").to_be_bytes());
+            stream.extend_from_slice(piece);
+        }
+        let first_record = 5 + split;
+
+        let mut tracker = SessionTracker::new();
+        tracker.offer_frame(&tcp_frame(SRC_PORT, 1_000, true, &[]));
+        assert!(
+            tracker
+                .offer_frame(&tcp_frame(SRC_PORT, 1_001, false, &stream[..first_record]))
+                .is_none(),
+            "the first record alone is not the whole handshake"
+        );
+
+        let event = tracker
+            .offer_frame(&tcp_frame(
+                SRC_PORT,
+                1_001 + u32::try_from(first_record).expect("fits"),
+                false,
+                &stream[first_record..],
+            ))
+            .expect("the second record completes it");
+
+        match event.l7 {
+            StreamL7::Tls(hello) => {
+                assert_eq!(hello.server_name.as_deref(), Some("example.com"));
+            }
+            other => panic!("expected TLS, got {other:?}"),
+        }
+    }
+
     #[test]
     fn a_stream_is_not_reclaimed_to_make_room_for_itself() {
         // Small enough that the third append is under pressure, and payload
