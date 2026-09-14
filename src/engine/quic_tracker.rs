@@ -142,11 +142,10 @@ impl QuicConnectionState {
 pub struct QuicTrackerStats {
     /// UDP flows held right now.
     pub active_tuples: usize,
-    /// Distinct connection ID byte strings indexed right now.
-    ///
-    /// Counted once each, not once per holder: two connections may hold the
-    /// same ID, and this is what `with_max_cids` bounds.
+    /// Connection IDs held across every connection, counted once per holder.
     pub active_cids: usize,
+    /// Distinct connection ID byte strings indexed right now.
+    pub distinct_cids: usize,
     /// Connections held right now. Lower than `active_tuples` once one has
     /// migrated, since the old tuple stays bound until it is expired.
     pub active_connections: usize,
@@ -185,6 +184,8 @@ pub struct QuicConnectionTracker {
     by_tuple: HashMap<BiFlow, QuicConnectionId>,
     /// Connections holding each connection ID. Two may hold the same bytes.
     by_cid: HashMap<Vec<u8>, Vec<QuicConnectionId>>,
+    /// Connection-to-ID bindings held, which is what `max_cids` bounds.
+    cid_bindings: usize,
     /// Connections oldest first, for the capacity limit.
     insertion_order: VecDeque<QuicConnectionId>,
     next_id: u64,
@@ -204,6 +205,7 @@ impl QuicConnectionTracker {
             connections: HashMap::new(),
             by_tuple: HashMap::new(),
             by_cid: HashMap::new(),
+            cid_bindings: 0,
             insertion_order: VecDeque::new(),
             next_id: 0,
         }
@@ -293,6 +295,8 @@ impl QuicConnectionTracker {
             holders.retain(|id| connections.contains_key(id));
             !holders.is_empty()
         });
+        // Recounted rather than adjusted: this drops an unknown number at once.
+        self.cid_bindings = self.by_cid.values().map(Vec::len).sum();
         self.insertion_order
             .retain(|id| self.connections.contains_key(id));
     }
@@ -638,7 +642,8 @@ impl QuicConnectionTracker {
     pub fn stats(&self) -> QuicTrackerStats {
         QuicTrackerStats {
             active_tuples: self.by_tuple.len(),
-            active_cids: self.by_cid.len(),
+            active_cids: self.cid_bindings,
+            distinct_cids: self.by_cid.len(),
             active_connections: self.connections.len(),
         }
     }
@@ -785,6 +790,7 @@ impl QuicConnectionTracker {
         self.connections.clear();
         self.by_tuple.clear();
         self.by_cid.clear();
+        self.cid_bindings = 0;
         self.insertion_order.clear();
     }
 
@@ -884,7 +890,7 @@ impl QuicConnectionTracker {
         if self.max_cids == 0 {
             return;
         }
-        while self.by_cid.len() >= self.max_cids && !self.by_cid.contains_key(cid) {
+        while self.cid_bindings >= self.max_cids && !self.holds_cid(cid, id) {
             // Another connection first: this one is the reason for the insert.
             if let Some(position) = self.insertion_order.iter().position(|queued| *queued != id)
                 && let Some(victim) = self.insertion_order.remove(position)
@@ -899,14 +905,22 @@ impl QuicConnectionTracker {
             }
         }
 
-        if self.by_cid.len() >= self.max_cids && !self.by_cid.contains_key(cid) {
+        if self.cid_bindings >= self.max_cids && !self.holds_cid(cid, id) {
             return;
         }
 
         let holders = self.by_cid.entry(cid.to_vec()).or_default();
         if !holders.contains(&id) {
             holders.push(id);
+            self.cid_bindings += 1;
         }
+    }
+
+    /// Whether `id` already holds `cid`, so re-announcing it costs nothing.
+    fn holds_cid(&self, cid: &[u8], id: QuicConnectionId) -> bool {
+        self.by_cid
+            .get(cid)
+            .is_some_and(|holders| holders.contains(&id))
     }
 
     /// Drops `id`'s claim on `cid`, and the entry once nobody holds it.
@@ -914,7 +928,9 @@ impl QuicConnectionTracker {
         let Some(holders) = self.by_cid.get_mut(cid) else {
             return;
         };
+        let before = holders.len();
         holders.retain(|held| *held != id);
+        self.cid_bindings -= before - holders.len();
         if holders.is_empty() {
             self.by_cid.remove(cid);
         }
@@ -948,6 +964,7 @@ impl QuicConnectionTracker {
                 self.connections.clear();
                 self.by_tuple.clear();
                 self.by_cid.clear();
+                self.cid_bindings = 0;
                 break;
             };
             self.drop_dequeued_connection(oldest);
@@ -1150,6 +1167,29 @@ mod tests {
             Some(b),
             "B still answers on its own addresses"
         );
+    }
+
+    #[test]
+    fn the_connection_id_cap_counts_holders_not_distinct_values() {
+        let server = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1));
+        let shared = b"01020304";
+        let mut tracker = QuicConnectionTracker::new().with_max_cids(2);
+
+        // Eight unrelated connections, sharing neither endpoint, all
+        // announcing the same id.
+        for index in 0..8u8 {
+            let client = IpAddr::V4(Ipv4Addr::new(192, 0, 2, index + 1));
+            let peer = IpAddr::V4(Ipv4Addr::new(198, 51, 100, index + 1));
+            tracker.observe_long_header(peer, 443, client, 50_000 + u16::from(index), shared);
+        }
+        let _ = server;
+
+        assert!(
+            tracker.connections_for_dcid(shared).len() <= 2,
+            "the cap is two, {} connections hold the id",
+            tracker.connections_for_dcid(shared).len()
+        );
+        assert!(tracker.stats().active_cids <= 2);
     }
 
     #[test]
