@@ -1014,14 +1014,8 @@ mod tests {
         assert_eq!(tracker.stats().active_probes, 1);
     }
 
-    /// A ClientHello split across TLS records, arriving over two TCP segments,
-    /// classifies the stream.
-    ///
-    /// RFC 8446 sec 5.1 lets a handshake message be fragmented across records.
-    /// The direct parser gathers them; this is the stateful path that fluere
-    /// actually uses, so it has to reach the same answer.
     #[test]
-    fn a_client_hello_split_across_records_classifies_the_stream() {
+    fn a_client_hello_split_inside_its_header_classifies_the_stream() {
         let host = b"example.com";
         let host_len = u16::try_from(host.len()).expect("fits");
         let mut sni = Vec::new();
@@ -1048,8 +1042,7 @@ mod tests {
         handshake.extend_from_slice(&u32::try_from(hello.len()).expect("fits").to_be_bytes()[1..]);
         handshake.extend_from_slice(&hello);
 
-        // Two records, and each record in its own TCP segment.
-        let split = handshake.len() / 2;
+        let split = 1;
         let mut stream = Vec::new();
         for piece in [&handshake[..split], &handshake[split..]] {
             stream.extend_from_slice(&[0x16, 0x03, 0x03]);

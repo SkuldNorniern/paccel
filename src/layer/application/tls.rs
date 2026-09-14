@@ -40,6 +40,9 @@ pub struct TlsServerHello {
 
 fn coalesced_handshake(payload: &[u8]) -> Result<Cow<'_, [u8]>, LayerError> {
     let first = record_body(payload, 0)?;
+    if first.is_empty() {
+        return Err(LayerError::InvalidHeader);
+    }
 
     // Enough of the handshake header to know how long the message is, and
     // enough of the message to have all of it.
@@ -204,28 +207,38 @@ pub fn probe_tls_client_hello(payload: &[u8]) -> ProbeResult<TlsClientHello> {
     if handshake_type != CLIENT_HELLO_HANDSHAKE_TYPE {
         return ProbeResult::NoMatch;
     }
-    if record.len() < 4 {
-        return malformed_tls_probe(LayerError::InvalidLength);
-    }
-
-    let handshake_length =
-        (usize::from(record[1]) << 16) | (usize::from(record[2]) << 8) | usize::from(record[3]);
-    let Some(handshake_end) = 4usize.checked_add(handshake_length) else {
-        return malformed_tls_probe(LayerError::InvalidLength);
-    };
-    // Past here the message may still be spread over records that follow, so
-    // the decision belongs to the same gathering the parse uses. Computing a
-    // length from this record alone assumed the handshake continued straight
-    // after its header, and called a legitimately fragmented ClientHello
-    // malformed - bytes the direct parser reads without trouble.
+    // The handshake's own length is not read from this record: sec 5.1 puts no
+    // alignment on where a fragment ends, so the four header bytes can arrive
+    // one record at a time.
     match parse_tls_client_hello(payload) {
         Ok(hello) => ProbeResult::Match(hello),
         Err(LayerError::InsufficientData) => ProbeResult::Incomplete {
-            needed: records_needed_for(payload, handshake_end),
+            needed: handshake_needed(payload),
             available: payload.len(),
         },
         Err(error) => malformed_tls_probe(error),
     }
+}
+
+fn handshake_needed(payload: &[u8]) -> Option<usize> {
+    let mut header = Vec::new();
+    let mut offset = 0usize;
+
+    while header.len() < 4 {
+        if offset >= payload.len() || payload[offset] != TLS_HANDSHAKE_CONTENT_TYPE {
+            return None;
+        }
+        let body = record_body(payload, offset).ok()?;
+        if body.is_empty() {
+            return None;
+        }
+        header.extend_from_slice(body);
+        offset += 5 + body.len();
+    }
+
+    let handshake_end = 4usize.checked_add(read_u24(&header, 1).ok()?)?;
+
+    records_needed_for(payload, handshake_end)
 }
 
 fn records_needed_for(payload: &[u8], handshake_end: usize) -> Option<usize> {
@@ -694,6 +707,51 @@ mod tests {
         let record = handshake_record(CLIENT_HELLO_HANDSHAKE_TYPE, &hello);
 
         assert!(parse_tls_client_hello(&record).is_err());
+    }
+
+    #[test]
+    fn a_client_hello_split_inside_its_own_header_still_parses() {
+        let whole = client_hello_record(&sni_extension(b"example.com"));
+        let body = &whole[5..];
+
+        for split in [1usize, 2, 3, 4] {
+            let fragmented = fragment_records(body, split);
+
+            let parsed = parse_tls_client_hello(&fragmented);
+            assert!(
+                parsed.is_ok(),
+                "split at {split}: direct parse said {parsed:?}"
+            );
+
+            let probed = probe_tls_client_hello(&fragmented);
+            assert!(
+                matches!(
+                    &probed,
+                    ProbeResult::Match(hello)
+                        if hello.server_name.as_deref() == Some("example.com")
+                ),
+                "split at {split}: probe said {probed:?}"
+            );
+        }
+    }
+
+    /// A first record carrying no handshake bytes at all says nothing about
+    /// what follows, and sec 5.1 forbids sending one.
+    #[test]
+    fn an_empty_first_handshake_fragment_is_refused() {
+        let whole = client_hello_record(&[]);
+        let body = &whole[5..];
+
+        let mut payload = vec![TLS_HANDSHAKE_CONTENT_TYPE, 0x03, 0x03, 0x00, 0x00];
+        payload.extend_from_slice(&[TLS_HANDSHAKE_CONTENT_TYPE, 0x03, 0x03]);
+        payload.extend_from_slice(&u16::try_from(body.len()).expect("fits").to_be_bytes());
+        payload.extend_from_slice(body);
+
+        assert!(matches!(
+            coalesced_handshake(&payload),
+            Err(LayerError::InvalidHeader)
+        ));
+        assert!(parse_tls_client_hello(&payload).is_err());
     }
 
     /// The probe has to gather records the same way the parse does, or the
