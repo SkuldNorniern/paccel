@@ -3,7 +3,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::net::IpAddr;
 
-use crate::engine::flow::{BiFlow, LastSeen, Timestamp};
+use crate::engine::flow::{BiFlow, LastSeen, ReassemblyEvent, Timestamp};
 use crate::engine::reassembly::TcpReassemblyStats;
 use crate::engine::{BuiltinPacketParser, ParsedPacket, TcpStreamReassembler, TransportSegment};
 use crate::layer::ProbeResult;
@@ -269,9 +269,14 @@ impl SessionTracker {
             payload,
             now,
         );
+        let torn_down = contiguous.event == ReassemblyEvent::Reset;
         let contiguous = contiguous.data;
 
-        if tcp.flags.rst {
+        // The flag alone is not the answer: RFC 9293 sec 3.5.3 validates a
+        // reset by its sequence number, and one the reassembler ignored left
+        // the TCP state standing. Tearing the probes down on the flag anyway
+        // loses a buffered request to a reset that never applied.
+        if torn_down {
             // TCP state for this flow is already gone; drop application probe
             // state for both directions too, or a stale ProbeState (done or
             // partial bytes) survives into the next connection on this tuple.
@@ -638,6 +643,35 @@ mod tests {
 
     const SRC_PORT: u16 = 49_152;
     const DST_PORT: u16 = 443;
+
+    #[test]
+    fn an_off_window_reset_leaves_the_buffered_request_alone() {
+        let mut tracker = SessionTracker::new();
+        let port = 44_444;
+
+        tracker.offer_frame(&tcp_frame(port, 1_000, true, &[]));
+        // Half a request line, so the probe is holding bytes and not done.
+        tracker.offer_frame(&tcp_frame(port, 1_001, false, b"GET /index"));
+        let holding = tracker.stats().retained_directions;
+        assert!(holding > 0, "the probe is holding the partial request");
+
+        // A reset well behind what the direction has delivered. RFC 9293
+        // sec 3.5.3 says that one does not apply.
+        assert!(tracker.offer_frame(&tcp_rst_frame(port, 12)).is_none());
+        assert_eq!(
+            tracker.stats().retained_directions,
+            holding,
+            "a reset that did not apply must not drop the request"
+        );
+
+        // The rest of the request still completes against what was held.
+        tracker.offer_frame(&tcp_frame(
+            port,
+            1_011,
+            false,
+            b".html HTTP/1.1\r\nHost: example.com\r\n\r\n",
+        ));
+    }
 
     fn tcp_frame(src_port: u16, sequence: u32, syn: bool, payload: &[u8]) -> Vec<u8> {
         let tcp_len = 20usize.saturating_add(payload.len());

@@ -351,19 +351,28 @@ impl QuicConnectionTracker {
             return;
         }
 
+        // RFC 9000 sec 5.1.2: a retired id will not be used again. Sequence 0
+        // is what a long header carries, so past a retirement threshold this
+        // one is a replay or a reordered packet, and re-expecting what it
+        // names would hand an old id back its meaning.
+        let retired = {
+            let pool = &connection.issued_cids[reply_direction];
+            pool.retire_prior_to > 0 && !pool.ids.values().any(|held| held == scid)
+        };
+        if retired {
+            if let Some(now) = now {
+                connection.last_seen.observe(now);
+            }
+            return;
+        }
+
         // The sender announces the ID its peer should send *back* to, so this
         // is the DCID expected on packets headed the other way.
-        let displaced = connection.expected_dcids[reply_direction]
-            .replace(scid.to_vec())
-            .filter(|previous| previous != scid);
+        let previous = connection.expected_dcids[reply_direction].replace(scid.to_vec());
+        let displaced = previous.clone().filter(|previous| previous != scid);
 
-        // RFC 9000 sec 5.1.1: the ID an endpoint puts in its first long header
-        // is its sequence 0. Without it here, RETIRE_CONNECTION_ID(0) and a
-        // retire_prior_to above 0 have nothing to act on.
-        let pool = &mut connection.issued_cids[reply_direction];
-        if pool.retire_prior_to == 0 && self.max_cids_per_pool > 0 {
-            pool.ids.entry(0).or_insert_with(|| scid.to_vec());
-        }
+        let superseded =
+            seed_sequence_zero(connection, reply_direction, scid, self.max_cids_per_pool);
         if let Some(now) = now {
             connection.last_seen.observe(now);
         }
@@ -371,17 +380,19 @@ impl QuicConnectionTracker {
             self.cid_lengths |= 1 << scid.len();
         }
 
-        if let Some(displaced) = displaced {
-            self.release_claim(&displaced, id);
+        // Indexing first, because what the connection keeps depends on it.
+        if self.remember_cid(scid, id) {
+            for gone in [displaced, superseded].into_iter().flatten() {
+                self.release_claim(&gone, id);
+            }
+            return;
         }
 
-        if !self.remember_cid(scid, id)
-            && let Some(connection) = self.connections.get_mut(&id)
-        {
-            let pool = &mut connection.issued_cids[reply_direction];
-            if pool.ids.get(&0).is_some_and(|held| held == scid) {
-                pool.ids.remove(&0);
-            }
+        // The index had no room, so the connection goes back to what it was
+        // expecting rather than naming an id nothing resolves.
+        let restored = previous.filter(|previous| self.holds_cid(previous, id));
+        if let Some(connection) = self.connections.get_mut(&id) {
+            undo_long_header(connection, reply_direction, scid, restored, superseded);
         }
     }
 
@@ -862,10 +873,15 @@ impl QuicConnectionTracker {
             }
             // And the tracker as a whole stays inside its total.
             while self.by_tuple.len() >= self.max_tuples {
-                let Some(victim) = self.insertion_order.front().copied() else {
+                // Anything but this one: evicting the connection the tuple is
+                // about to name leaves the index pointing at nothing.
+                let Some(position) = self.insertion_order.iter().position(|queued| *queued != id)
+                else {
                     break;
                 };
-                self.insertion_order.pop_front();
+                let Some(victim) = self.insertion_order.remove(position) else {
+                    break;
+                };
                 self.drop_connection(victim);
             }
         }
@@ -914,7 +930,7 @@ impl QuicConnectionTracker {
             }
             // Nothing else left to give, so this connection gives up its own
             // oldest id rather than the cap being exceeded.
-            if !self.drop_oldest_cid(id) {
+            if !self.drop_oldest_cid(id, cid) {
                 break;
             }
         }
@@ -940,23 +956,23 @@ impl QuicConnectionTracker {
 
     /// Drops a retired or evicted `cid` out of `id`, claim included.
     ///
-    /// The id stops resolving, so an `expected_dcids` slot naming it goes as
-    /// well. The claim itself only goes once no pool names those bytes either:
-    /// one connection can hold the same id in both pools, and the index counts
-    /// it once.
+    /// A pool still naming those bytes keeps everything: one connection can
+    /// hold the same id under two sequence numbers, and the index counts it
+    /// once. Otherwise the id stops resolving, so an `expected_dcids` slot
+    /// naming it goes with the claim.
     fn release_claim(&mut self, cid: &[u8], id: QuicConnectionId) {
         if let Some(connection) = self.connections.get_mut(&id) {
-            for expected in &mut connection.expected_dcids {
-                if expected.as_deref() == Some(cid) {
-                    *expected = None;
-                }
-            }
             if connection
                 .issued_cids
                 .iter()
                 .any(|pool| pool.ids.values().any(|held| held == cid))
             {
                 return;
+            }
+            for expected in &mut connection.expected_dcids {
+                if expected.as_deref() == Some(cid) {
+                    *expected = None;
+                }
             }
         }
         self.release_cid(cid, id);
@@ -975,9 +991,12 @@ impl QuicConnectionTracker {
         }
     }
 
-    /// Drops the lowest-numbered id `id` still holds, in either pool. Returns
-    /// whether there was one.
-    fn drop_oldest_cid(&mut self, id: QuicConnectionId) -> bool {
+    /// Drops the lowest-numbered id `id` still holds, in either pool, leaving
+    /// `staged` alone. Returns whether there was one.
+    ///
+    /// `staged` is the id the caller is making room for. Dropping that is how
+    /// the index ends up holding one the connection itself no longer names.
+    fn drop_oldest_cid(&mut self, id: QuicConnectionId, staged: &[u8]) -> bool {
         let Some(connection) = self.connections.get_mut(&id) else {
             return false;
         };
@@ -985,7 +1004,12 @@ impl QuicConnectionTracker {
             .issued_cids
             .iter()
             .enumerate()
-            .filter_map(|(pool, ids)| ids.ids.keys().next().map(|sequence| (*sequence, pool)))
+            .filter_map(|(pool, ids)| {
+                ids.ids
+                    .iter()
+                    .find(|(_, held)| held.as_slice() != staged)
+                    .map(|(sequence, _)| (*sequence, pool))
+            })
             .min();
         let Some((sequence, pool)) = oldest else {
             return false;
@@ -997,8 +1021,12 @@ impl QuicConnectionTracker {
         true
     }
 
+    /// Makes room for one more connection and the tuple that opens it.
     fn evict_until_room(&mut self) {
-        while self.connections.len() >= self.max_flows {
+        // The tuple cap counts too: a connection arrives with an address, and
+        // enforcing the total only where a connection *moves* leaves the cap
+        // bounding nothing on the path that opens one.
+        while self.connections.len() >= self.max_flows || self.by_tuple.len() >= self.max_tuples {
             let Some(oldest) = self.insertion_order.pop_front() else {
                 self.connections.clear();
                 self.by_tuple.clear();
@@ -1042,6 +1070,50 @@ impl QuicConnectionTracker {
 impl Default for QuicConnectionTracker {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Puts `direction` back to what it held before a long header named `scid`.
+fn undo_long_header(
+    connection: &mut QuicConnectionState,
+    direction: usize,
+    scid: &[u8],
+    expected: Option<Vec<u8>>,
+    superseded: Option<Vec<u8>>,
+) {
+    connection.expected_dcids[direction] = expected;
+    let pool = &mut connection.issued_cids[direction];
+    if pool.ids.get(&0).is_some_and(|held| held == scid) {
+        match superseded {
+            Some(held) => pool.ids.insert(0, held),
+            None => pool.ids.remove(&0),
+        };
+    }
+}
+
+/// Records `scid` as sequence 0 of `direction`, returning what it replaced.
+///
+/// RFC 9000 sec 5.1.1: the ID an endpoint puts in its long headers is its
+/// sequence 0. Without it, RETIRE_CONNECTION_ID(0) and a retire_prior_to above
+/// 0 have nothing to act on. A different id supersedes what was there, since a
+/// Retry carries an SCID the server then throws away and the packet type is
+/// not visible here.
+fn seed_sequence_zero(
+    connection: &mut QuicConnectionState,
+    direction: usize,
+    scid: &[u8],
+    max_per_pool: usize,
+) -> Option<Vec<u8>> {
+    let pool = &mut connection.issued_cids[direction];
+    if pool.retire_prior_to > 0 || max_per_pool == 0 {
+        return None;
+    }
+    match pool.ids.get(&0) {
+        Some(held) if held.as_slice() != scid => pool.ids.insert(0, scid.to_vec()),
+        Some(_) => None,
+        None if pool.ids.len() < max_per_pool => pool.ids.insert(0, scid.to_vec()),
+        // Seeding past the pool's own cap is not room this pool has.
+        None => None,
     }
 }
 
@@ -1129,6 +1201,216 @@ mod tests {
 
     /// `with_max_cids` bounds the ids held across every connection, so one
     /// connection on its own cannot retain more than that.
+    #[test]
+    fn the_index_never_holds_an_id_the_connection_stopped_naming() {
+        let a = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let mut tracker = QuicConnectionTracker::new().with_max_cids(1);
+
+        // Both ends name themselves, one pool each, with room for one id.
+        tracker.observe_long_header(a, 5_000, b, 443, b"clientid");
+        tracker.observe_long_header(b, 443, a, 5_000, b"serverid");
+
+        let stats = tracker.stats();
+        for cid in [b"clientid".as_slice(), b"serverid".as_slice()] {
+            for id in tracker.connections_for_dcid(cid) {
+                let named = [Endpoint::new(a, 5_000), Endpoint::new(b, 443)]
+                    .iter()
+                    .any(|issuer| {
+                        tracker
+                            .issued_connection_ids(*id, *issuer)
+                            .iter()
+                            .any(|(_, held)| *held == cid)
+                    });
+                assert!(named, "the index holds an id no pool names");
+            }
+        }
+        assert!(stats.active_cids <= 1, "the cap is one");
+    }
+
+    #[test]
+    fn a_retired_initial_id_does_not_come_back_on_a_late_long_header() {
+        let a = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let mut tracker = QuicConnectionTracker::new();
+
+        tracker.observe_long_header(a, 5_000, b, 443, b"initial0");
+        let id = tracker
+            .connection_id_for_dcid(b"initial0")
+            .expect("the connection");
+        let issuer = Endpoint::new(a, 5_000);
+
+        // Sequence 1, retiring everything before it.
+        tracker.observe_new_connection_id(id, issuer, 1, b"secondid", 1);
+        assert!(tracker.connection_id_for_dcid(b"initial0").is_none());
+
+        // A reordered or replayed long header still naming the retired id.
+        tracker.observe_long_header(a, 5_000, b, 443, b"initial0");
+        assert!(
+            tracker.connection_id_for_dcid(b"initial0").is_none(),
+            "a retired id does not come back"
+        );
+        assert_eq!(
+            tracker.issued_connection_ids(id, issuer),
+            vec![(1, b"secondid".as_slice())],
+            "and the pool still holds only what was not retired"
+        );
+    }
+
+    #[test]
+    fn a_long_header_does_not_seed_past_the_pool_cap() {
+        let a = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let mut tracker = QuicConnectionTracker::new().with_max_cids_per_pool(1);
+
+        tracker.observe_long_header(a, 5_000, b, 443, b"initial0");
+        let id = tracker
+            .connection_id_for_dcid(b"initial0")
+            .expect("the connection");
+        let issuer = Endpoint::new(a, 5_000);
+
+        // Sequence 1 fills the pool, which evicts sequence 0.
+        tracker.observe_new_connection_id(id, issuer, 1, b"secondid", 0);
+        // A repeat of the first long header must not push the pool past one.
+        tracker.observe_long_header(a, 5_000, b, 443, b"initial0");
+
+        assert_eq!(
+            tracker.issued_connection_ids(id, issuer).len(),
+            1,
+            "the pool holds one"
+        );
+    }
+
+    #[test]
+    fn the_last_long_header_id_an_endpoint_sent_is_its_sequence_zero() {
+        let a = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let mut tracker = QuicConnectionTracker::new();
+
+        // A client Initial, a Retry naming one id, then the server's real
+        // Initial naming another. Only the last one is the server's.
+        tracker.observe_long_header(a, 5_000, b, 443, b"clientid");
+        tracker.observe_long_header(b, 443, a, 5_000, b"retrycid");
+        tracker.observe_long_header(b, 443, a, 5_000, b"serverid");
+
+        let id = tracker
+            .connection_id_for_dcid(b"serverid")
+            .expect("the connection");
+        assert_eq!(
+            tracker.issued_connection_ids(id, Endpoint::new(b, 443)),
+            vec![(0, b"serverid".as_slice())],
+            "sequence 0 is what the server is actually using"
+        );
+        assert!(
+            tracker.connection_id_for_dcid(b"retrycid").is_none(),
+            "the id it threw away is not held"
+        );
+    }
+
+    #[test]
+    fn opening_connections_stays_inside_the_tuple_cap() {
+        let mut tracker = QuicConnectionTracker::new().with_max_tuples(2, 8);
+
+        // Unrelated connections, each arriving on an address of its own.
+        for host in 1..8u8 {
+            let a = IpAddr::V4(Ipv4Addr::new(10, 0, 0, host));
+            let b = IpAddr::V4(Ipv4Addr::new(10, 0, 1, host));
+            let cid = [b'c', b'i', b'd', b'0' + host, 0, 0, 0, 0];
+            tracker.observe_long_header(a, 5_000, b, 443, &cid);
+        }
+
+        assert!(
+            tracker.stats().active_tuples <= 2,
+            "the total is two, however the tuples arrived"
+        );
+    }
+
+    #[test]
+    fn the_tuple_cap_does_not_evict_the_connection_it_is_binding() {
+        let a = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let moved = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+        let mut tracker = QuicConnectionTracker::new().with_max_tuples(1, 8);
+
+        tracker.observe_long_header(a, 5_000, b, 443, b"clientid");
+        let id = tracker
+            .connection_id_for_dcid(b"clientid")
+            .expect("the connection");
+
+        // The same connection arriving from a new address, with the tuple cap
+        // already full of its own tuple.
+        assert_eq!(
+            tracker.observe_short_header(moved, 5_000, b, 443, b"clientid"),
+            Some(id),
+            "the move resolves to the connection it names"
+        );
+        assert_eq!(
+            tracker.connection_id_for_dcid(b"clientid"),
+            Some(id),
+            "and that connection is still there"
+        );
+    }
+
+    #[test]
+    fn a_long_header_id_the_index_refuses_leaves_the_old_one_expected() {
+        let a = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        // No pool, so the cap has nothing of this connection's to evict and
+        // the index has to refuse outright.
+        let mut tracker = QuicConnectionTracker::new()
+            .with_max_cids(1)
+            .with_max_cids_per_pool(0);
+
+        tracker.observe_long_header(a, 5_000, b, 443, b"oldcid00");
+        let id = tracker
+            .connection_id_for_dcid(b"oldcid00")
+            .expect("the connection");
+        let expected = tracker.expected_dcid_len(b, 443, a, 5_000);
+
+        // The cap is full, so the index has nothing to give this one.
+        tracker.observe_long_header(a, 5_000, b, 443, b"newcid0000");
+
+        assert_eq!(tracker.stats().active_cids, 1, "the cap is one");
+        assert!(
+            tracker.connection_id_for_dcid(b"newcid0000").is_none(),
+            "an id the index refused must not be held anywhere"
+        );
+        assert_eq!(
+            tracker.connection_id_for_dcid(b"oldcid00"),
+            Some(id),
+            "the id it did have still resolves"
+        );
+        assert_eq!(
+            tracker.expected_dcid_len(b, 443, a, 5_000),
+            expected,
+            "the connection keeps what it was expecting"
+        );
+    }
+
+    #[test]
+    fn retiring_one_slot_keeps_the_expected_id_another_still_names() {
+        let a = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let mut tracker = QuicConnectionTracker::new();
+
+        tracker.observe_long_header(a, 5_000, b, 443, b"initial0");
+        let id = tracker
+            .connection_id_for_dcid(b"initial0")
+            .expect("the connection");
+        let issuer = Endpoint::new(a, 5_000);
+
+        // Sequence 0 is the long header's own SCID, which is also what the
+        // other direction expects. Numbering it again does not retire it.
+        tracker.observe_new_connection_id(id, issuer, 1, b"initial0", 0);
+        assert!(tracker.observe_retire_connection_id(id, issuer, 1));
+
+        assert_eq!(
+            tracker.expected_dcid_len(b, 443, a, 5_000),
+            Some(8),
+            "sequence 0 still names it, so the hint stands"
+        );
+    }
+
     #[test]
     fn retiring_one_of_two_slots_holding_the_same_id_keeps_it_resolving() {
         let a = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
