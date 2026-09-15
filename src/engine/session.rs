@@ -230,7 +230,7 @@ impl SessionTracker {
             if self.max_probe_flows == 0 {
                 return None;
             }
-            self.evict_until_room();
+            self.evict_until_room(key);
             self.probes.insert(key.clone(), ProbeState::default());
             self.insertion_order.push_back(key.clone());
         }
@@ -425,6 +425,14 @@ impl SessionTracker {
                 removed = true;
             }
         }
+        if removed {
+            // Same reason expiry does this: a removed key left queued has the
+            // flow come back, get queued again, and the eviction that pops the
+            // stale entry take the live probe instead.
+            let probes = &self.probes;
+            self.insertion_order.retain(|key| probes.contains_key(key));
+            self.holding.retain(|key| probes.contains_key(key));
+        }
         removed
     }
 
@@ -438,7 +446,12 @@ impl SessionTracker {
         self.total_probe_bytes = 0;
     }
 
-    fn evict_until_room(&mut self) {
+    /// Frees a probe slot, leaving the flow `wanted` belongs to reassembling.
+    ///
+    /// Without that, evicting the other direction of the same flow finds no
+    /// direction left and drops the TCP state the caller is about to probe
+    /// against, so a retransmission is appended a second time.
+    fn evict_until_room(&mut self, wanted: &DirectionKey) {
         while self.probes.len() >= self.max_probe_flows {
             let Some(oldest) = self.insertion_order.pop_front() else {
                 self.probes.clear();
@@ -455,7 +468,8 @@ impl SessionTracker {
                 flow: *flow,
                 direction: 1 - oldest.direction,
             };
-            if !self.probes.contains_key(&other_direction) {
+            let claimed = wanted.flow == *flow;
+            if !claimed && !self.probes.contains_key(&other_direction) {
                 self.tcp.remove_flow(
                     flow.first.address,
                     flow.first.port,
@@ -643,6 +657,70 @@ mod tests {
 
     const SRC_PORT: u16 = 49_152;
     const DST_PORT: u16 = 443;
+
+    #[test]
+    fn a_removed_probe_does_not_stay_queued_against_its_replacement() {
+        let mut tracker = SessionTracker::new().with_max_probe_flows(3);
+        let a = 40_001;
+
+        // A flow removed while it was queued, then coming back on the same
+        // tuple, leaves a stale entry naming a key that is live again.
+        tracker.offer_frame(&tcp_frame(a, 1_000, true, &[]));
+        tracker.offer_frame(&tcp_frame(a, 1_001, false, b"GET /a"));
+        assert!(tracker.remove_flow(
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            a,
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            DST_PORT,
+        ));
+
+        for (port, sequence) in [(40_002u16, 2_000u32), (40_003, 3_000)] {
+            tracker.offer_frame(&tcp_frame(port, sequence, true, &[]));
+            tracker.offer_frame(&tcp_frame(port, sequence + 1, false, b"GET /x"));
+        }
+        tracker.offer_frame(&tcp_frame(a, 4_000, true, &[]));
+        tracker.offer_frame(&tcp_frame(a, 4_001, false, b"GET /ind"));
+
+        // One more flow needs a slot. The oldest live probe goes, which is not
+        // the one whose key the removed flow left behind.
+        tracker.offer_frame(&tcp_frame(40_004, 5_000, true, &[]));
+        tracker.offer_frame(&tcp_frame(40_004, 5_001, false, b"GET /x"));
+
+        // So the newest one still holds its prefix and can finish the request.
+        let finished = tracker.offer_frame(&tcp_frame(
+            a,
+            4_009,
+            false,
+            b"ex.html HTTP/1.1\r\nHost: example.com\r\n\r\n",
+        ));
+        assert!(
+            finished.is_some(),
+            "the live probe was evicted by a stale queue entry"
+        );
+    }
+
+    #[test]
+    fn making_room_for_a_probe_keeps_its_own_tcp_state() {
+        let mut tracker = SessionTracker::new().with_max_probe_flows(1);
+        let port = 41_000;
+
+        // One direction of a flow, holding a partial request.
+        tracker.offer_frame(&tcp_frame(port, 1_000, true, &[]));
+        tracker.offer_frame(&tcp_frame(port, 1_001, false, b"GET /index"));
+
+        // The reply direction needs the only slot, which evicts the request
+        // direction. The flow's TCP state has to survive that.
+        tracker.offer_frame(&tcp_reply_frame(port, 5_000, b"HTTP/1.1 200 OK\r\n"));
+
+        // A retransmission of the reply must not be counted a second time.
+        tracker.offer_frame(&tcp_reply_frame(port, 5_000, b"HTTP/1.1 200 OK\r\n"));
+        let stats = tracker.stats();
+        assert!(
+            stats.probe_bytes <= 18,
+            "a retransmission was appended twice: {} bytes held",
+            stats.probe_bytes
+        );
+    }
 
     #[test]
     fn an_off_window_reset_leaves_the_buffered_request_alone() {
