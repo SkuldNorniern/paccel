@@ -138,6 +138,22 @@ fuzz_target!(|data: &[u8]| {
             "distinct ids disagree with the index"
         );
 
+        // A connection keeps ids in its own pools and the index points at them.
+        // If a pool can retain one the index had no room for, the cap stops
+        // bounding what the tracker holds.
+        for cid in &announced {
+            for id in tracker.connections_for_dcid(cid).to_vec() {
+                for issuer in [Endpoint::new(src, 443), Endpoint::new(dst, 443)] {
+                    for (_, held) in tracker.issued_connection_ids(id, issuer) {
+                        assert!(
+                            !tracker.connections_for_dcid(held).is_empty(),
+                            "a retained connection id with no binding"
+                        );
+                    }
+                }
+            }
+        }
+
         for cid in &announced {
             if let Some(id) = tracker.connection_id_for_dcid(cid) {
                 assert!(
