@@ -1,6 +1,6 @@
 //! Opt-in QUIC connection-ID and packet-number state tracking.
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::net::IpAddr;
 
 use crate::engine::flow::{BiFlow, Endpoint, LastSeen, Timestamp};
@@ -85,6 +85,11 @@ struct QuicCidPool {
     /// later has no effect, and an ID below the threshold stays retired even if
     /// it is announced afterwards.
     retire_prior_to: u64,
+    /// Sequence numbers retired one at a time, above the threshold. RFC 9000
+    /// sec 5.1.2: a retired ID will not be used again, so the announcement
+    /// that named it does not bring it back when it is seen a second time.
+    /// Bounded like `ids`, oldest first, because it is peer-driven.
+    retired: BTreeSet<u64>,
 }
 
 #[derive(Debug)]
@@ -561,6 +566,14 @@ impl QuicConnectionTracker {
 
         // A smaller value later has no effect.
         pool.retire_prior_to = pool.retire_prior_to.max(retire_prior_to);
+        // Anything the threshold now covers needs no record of its own.
+        pool.retired = pool.retired.split_off(&pool.retire_prior_to);
+
+        // RFC 9000 sec 5.1.2: retirement is final, so a second copy of the
+        // frame that announced this one does not put it back.
+        if pool.retired.contains(&sequence_number) {
+            return false;
+        }
 
         let mut dropped: Vec<Vec<u8>> = pool
             .ids
@@ -638,6 +651,15 @@ impl QuicConnectionTracker {
         let Some(retired) = pool.ids.remove(&sequence_number) else {
             return false;
         };
+        if sequence_number >= pool.retire_prior_to {
+            pool.retired.insert(sequence_number);
+            while pool.retired.len() > self.max_cids_per_pool {
+                let Some(oldest) = pool.retired.iter().next().copied() else {
+                    break;
+                };
+                pool.retired.remove(&oldest);
+            }
+        }
         self.release_claim(&retired, id);
         true
     }
@@ -1226,6 +1248,33 @@ mod tests {
             }
         }
         assert!(stats.active_cids <= 1, "the cap is one");
+    }
+
+    #[test]
+    fn a_replayed_announcement_does_not_unretire_its_sequence() {
+        let a = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let mut tracker = QuicConnectionTracker::new();
+
+        tracker.observe_long_header(a, 5_000, b, 443, b"initial0");
+        let id = tracker
+            .connection_id_for_dcid(b"initial0")
+            .expect("the connection");
+        let issuer = Endpoint::new(a, 5_000);
+
+        assert!(tracker.observe_new_connection_id(id, issuer, 1, b"secondid", 0));
+        assert!(tracker.observe_retire_connection_id(id, issuer, 1));
+        assert!(tracker.connection_id_for_dcid(b"secondid").is_none());
+
+        // The same frame again, from a replayed packet.
+        assert!(
+            !tracker.observe_new_connection_id(id, issuer, 1, b"secondid", 0),
+            "a retired sequence is not announced back into use"
+        );
+        assert!(
+            tracker.connection_id_for_dcid(b"secondid").is_none(),
+            "and the id it named stays retired"
+        );
     }
 
     #[test]
