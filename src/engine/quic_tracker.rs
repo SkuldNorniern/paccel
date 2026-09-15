@@ -371,14 +371,18 @@ impl QuicConnectionTracker {
             self.cid_lengths |= 1 << scid.len();
         }
 
-        if let Some(displaced) = displaced
-            && let Some(connection) = self.connections.get(&id)
-            && !connection.indexed_cids().any(|held| held == &displaced)
-        {
-            self.release_cid(&displaced, id);
+        if let Some(displaced) = displaced {
+            self.release_claim(&displaced, id);
         }
 
-        self.remember_cid(scid, id);
+        if !self.remember_cid(scid, id)
+            && let Some(connection) = self.connections.get_mut(&id)
+        {
+            let pool = &mut connection.issued_cids[reply_direction];
+            if pool.ids.get(&0).is_some_and(|held| held == scid) {
+                pool.ids.remove(&0);
+            }
+        }
     }
 
     /// Binds a short header's arrival tuple to the connection its DCID names,
@@ -558,7 +562,7 @@ impl QuicConnectionTracker {
         // Already retired by an earlier frame, so it does not come back.
         if sequence_number < pool.retire_prior_to {
             for stale in dropped {
-                self.release_cid(&stale, id);
+                self.release_claim(&stale, id);
             }
             return false;
         }
@@ -586,14 +590,22 @@ impl QuicConnectionTracker {
             .is_some_and(|held| held == cid);
 
         for stale in dropped {
-            self.release_cid(&stale, id);
+            self.release_claim(&stale, id);
         }
         if !kept {
             return false;
         }
 
         self.cid_lengths |= 1 << cid.len();
-        self.remember_cid(cid, id);
+        if !self.remember_cid(cid, id) {
+            // Keeping it in the pool while the index refused it would put the
+            // id past the cap that is meant to bound it.
+            if let Some(connection) = self.connections.get_mut(&id) {
+                let pool = connection.direction_to(issuer);
+                connection.issued_cids[pool].ids.remove(&sequence_number);
+            }
+            return false;
+        }
         true
     }
 
@@ -615,7 +627,7 @@ impl QuicConnectionTracker {
         let Some(retired) = pool.ids.remove(&sequence_number) else {
             return false;
         };
-        self.release_cid(&retired, id);
+        self.release_claim(&retired, id);
         true
     }
 
@@ -883,12 +895,14 @@ impl QuicConnectionTracker {
         }
     }
 
-    /// Indexes `cid`, evicting whole connections first if the tracker is at its
-    /// connection-ID cap. An index bigger than what it points at is how a
-    /// tracker grows without bound while its connection count looks healthy.
-    fn remember_cid(&mut self, cid: &[u8], id: QuicConnectionId) {
+    /// Indexes `cid` for `id`, evicting whole connections first if the tracker
+    /// is at its connection-ID cap, and says whether the binding now exists.
+    ///
+    /// A caller that keeps the id in connection state has to act on `false`:
+    /// state the index has no room for is state the cap does not bound.
+    fn remember_cid(&mut self, cid: &[u8], id: QuicConnectionId) -> bool {
         if self.max_cids == 0 {
-            return;
+            return false;
         }
         while self.cid_bindings >= self.max_cids && !self.holds_cid(cid, id) {
             // Another connection first: this one is the reason for the insert.
@@ -906,7 +920,7 @@ impl QuicConnectionTracker {
         }
 
         if self.cid_bindings >= self.max_cids && !self.holds_cid(cid, id) {
-            return;
+            return false;
         }
 
         let holders = self.by_cid.entry(cid.to_vec()).or_default();
@@ -914,6 +928,7 @@ impl QuicConnectionTracker {
             holders.push(id);
             self.cid_bindings += 1;
         }
+        true
     }
 
     /// Whether `id` already holds `cid`, so re-announcing it costs nothing.
@@ -921,6 +936,30 @@ impl QuicConnectionTracker {
         self.by_cid
             .get(cid)
             .is_some_and(|holders| holders.contains(&id))
+    }
+
+    /// Drops a retired or evicted `cid` out of `id`, claim included.
+    ///
+    /// The id stops resolving, so an `expected_dcids` slot naming it goes as
+    /// well. The claim itself only goes once no pool names those bytes either:
+    /// one connection can hold the same id in both pools, and the index counts
+    /// it once.
+    fn release_claim(&mut self, cid: &[u8], id: QuicConnectionId) {
+        if let Some(connection) = self.connections.get_mut(&id) {
+            for expected in &mut connection.expected_dcids {
+                if expected.as_deref() == Some(cid) {
+                    *expected = None;
+                }
+            }
+            if connection
+                .issued_cids
+                .iter()
+                .any(|pool| pool.ids.values().any(|held| held == cid))
+            {
+                return;
+            }
+        }
+        self.release_cid(cid, id);
     }
 
     /// Drops `id`'s claim on `cid`, and the entry once nobody holds it.
@@ -954,7 +993,7 @@ impl QuicConnectionTracker {
         let Some(stale) = connection.issued_cids[pool].ids.remove(&sequence) else {
             return false;
         };
-        self.release_cid(&stale, id);
+        self.release_claim(&stale, id);
         true
     }
 
@@ -1086,6 +1125,73 @@ mod tests {
             "the cap is one, got {}",
             tracker.stats().active_cids
         );
+    }
+
+    /// `with_max_cids` bounds the ids held across every connection, so one
+    /// connection on its own cannot retain more than that.
+    #[test]
+    fn retiring_one_of_two_slots_holding_the_same_id_keeps_it_resolving() {
+        let a = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let mut tracker = QuicConnectionTracker::new();
+
+        tracker.observe_long_header(a, 5_000, b, 443, b"initial0");
+        let id = tracker
+            .connection_id_for_dcid(b"initial0")
+            .expect("the connection");
+        let issuer = Endpoint::new(a, 5_000);
+
+        // A peer may number the same bytes twice. The index counts one claim.
+        tracker.observe_new_connection_id(id, issuer, 1, b"repeated", 0);
+        tracker.observe_new_connection_id(id, issuer, 2, b"repeated", 0);
+        assert_eq!(tracker.stats().active_cids, 2, "initial0 and repeated");
+
+        assert!(tracker.observe_retire_connection_id(id, issuer, 1));
+        assert_eq!(
+            tracker.issued_connection_ids(id, issuer),
+            vec![(0, b"initial0".as_slice()), (2, b"repeated".as_slice())],
+            "sequence 2 still holds it"
+        );
+        assert!(
+            !tracker.connections_for_dcid(b"repeated").is_empty(),
+            "the id it still holds must keep resolving"
+        );
+    }
+
+    #[test]
+    fn one_connection_cannot_exceed_the_global_cid_cap() {
+        let a = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let mut tracker = QuicConnectionTracker::new()
+            .with_max_cids(1)
+            .with_max_cids_per_pool(32);
+
+        tracker.observe_long_header(a, 5_000, b, 443, b"initial0");
+        let id = tracker
+            .connection_id_for_dcid(b"initial0")
+            .expect("the connection");
+        let issuer = Endpoint::new(a, 5_000);
+
+        // Several announcements, well past the global cap.
+        for sequence in 1..6u8 {
+            let cid = [b'c', b'i', b'd', b'0' + sequence, 0, 0, 0, 0];
+            tracker.observe_new_connection_id(id, issuer, u64::from(sequence), &cid, 0);
+        }
+
+        assert_eq!(tracker.stats().active_cids, 1, "the cap is one");
+        assert_eq!(
+            tracker.issued_connection_ids(id, issuer).len(),
+            1,
+            "the pool must not retain ids the index had no room for"
+        );
+
+        // Every id the connection still holds resolves through the index.
+        for (_, cid) in tracker.issued_connection_ids(id, issuer) {
+            assert!(
+                !tracker.connections_for_dcid(cid).is_empty(),
+                "a retained id with no binding"
+            );
+        }
     }
 
     #[test]
