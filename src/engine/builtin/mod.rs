@@ -801,12 +801,16 @@ fn decode_pppoe_session(
             // `inner`, so it cannot share the outer buffer.
             let mut inner_parsed = ParsedPacket::default();
             Some(
+                // Zero, not `offset + inner_offset`: this is a fresh packet
+                // with its own buffer, so what it records is relative to that
+                // buffer and `frame_offset` says how far in the buffer sits.
+                // The other tunnels reach the same place through `parse_l3`.
                 BuiltinPacketParser::parse_ethertype(
                     bytes,
                     inner_ethertype,
                     config,
                     depth + 1,
-                    offset + inner_offset,
+                    0,
                     &mut inner_parsed,
                 )
                 .map(|()| inner_parsed),
@@ -1277,6 +1281,31 @@ mod tests {
         let inner = parsed.icmp_quoted.as_deref().expect("the quoted datagram");
         let at = inner.frame_offset + inner.network_offset.expect("quote offset");
         let ipv4 = inner.ipv4.as_ref().expect("the quoted IPv4 header");
+        assert_eq!(frame[at + 12..at + 16], ipv4.source.octets());
+        assert_eq!(frame[at + 16..at + 20], ipv4.destination.octets());
+    }
+
+    /// PPPoE reaches its inner packet without `parse_l3`, so it was the one
+    /// tunnel that handed a fresh packet a non-zero base and had its offset
+    /// counted twice.
+    #[test]
+    fn a_pppoe_session_locates_its_inner_addresses() {
+        let mut ip = vec![0x45, 0x00, 0x00, 0x1c, 0x00, 0x01, 0x00, 0x00, 64, 17, 0, 0];
+        ip.extend([203, 0, 113, 1, 203, 0, 113, 2]);
+        ip.extend([0x04, 0xd2, 0x16, 0x2e, 0x00, 0x08, 0x00, 0x00]);
+
+        let ppp_len = u16::try_from(2 + ip.len()).expect("short");
+        let mut frame = vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
+        frame.extend(0x8864u16.to_be_bytes());
+        frame.extend([0x11, 0x00, 0x00, 0x01]);
+        frame.extend(ppp_len.to_be_bytes());
+        frame.extend(0x0021u16.to_be_bytes());
+        frame.extend(&ip);
+
+        let parsed = BuiltinPacketParser::parse(&frame).expect("the PPPoE frame parses");
+        let inner = parsed.inner.as_deref().expect("the inner packet");
+        let at = inner.frame_offset + inner.network_offset.expect("inner offset");
+        let ipv4 = inner.ipv4.as_ref().expect("the inner IPv4 header");
         assert_eq!(frame[at + 12..at + 16], ipv4.source.octets());
         assert_eq!(frame[at + 16..at + 20], ipv4.destination.octets());
     }
