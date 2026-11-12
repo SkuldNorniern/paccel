@@ -78,6 +78,10 @@ pub fn ip_protocol_name(value: u8) -> &'static str {
     }
 }
 
+/// Bytes of ICMP header in front of the datagram an error quotes.
+/// RFC 792 and RFC 4443 sec 3 both put it eight bytes in.
+pub const ICMP_QUOTE_OFFSET: usize = 8;
+
 #[cfg(test)]
 mod tests {
     use super::{ethertype, ethertype_name, ip_proto, ip_protocol_name};

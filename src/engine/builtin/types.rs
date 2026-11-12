@@ -676,6 +676,14 @@ pub struct ParsedPacket {
     /// `transport_segment_offset + 8`. Nested offsets are relative to the inner
     /// packet's buffer.
     pub transport_segment_offset: Option<usize>,
+    /// Byte offset of the network header in the parsed buffer, set whenever
+    /// `ipv4`, `ipv6` or `arp` is. Relative to this packet's own buffer, like
+    /// `transport_segment_offset`. To place it in the captured frame, add the
+    /// `frame_offset` of every packet from the outermost down to this one.
+    pub network_offset: Option<usize>,
+    /// Where this packet's buffer begins inside its parent's. Zero for the
+    /// outermost, where the buffer is the frame.
+    pub frame_offset: usize,
     /// The port pair from a transport header that was cut short.
     ///
     /// TCP needs twenty bytes and UDP eight, but both carry their ports in the
@@ -1207,10 +1215,10 @@ mod tests {
     fn the_parsed_packet_stays_the_size_it_was_measured_at() {
         assert_eq!(
             size_of::<ParsedPacket>(),
-            864,
+            888,
             "ParsedPacket changed size; the application layer moved behind a \
-             pointer to get it here from 2736, and icmp_quoted added the eight \
-             that took it to 864"
+             pointer to get it here from 2736, icmp_quoted took it to 864, and \
+             network_offset with frame_offset took it to 888"
         );
         assert_eq!(
             size_of::<ApplicationLayers>(),

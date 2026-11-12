@@ -3,7 +3,7 @@ mod network;
 mod transport;
 mod types;
 
-use crate::engine::constants::{ethertype, ip_proto};
+use crate::engine::constants::{ICMP_QUOTE_OFFSET, ethertype, ip_proto};
 pub use crate::layer::application::bgp::{BgpMessage, BgpMessageType};
 pub use crate::layer::application::cdp::CdpHeader;
 use crate::layer::application::cdp::parse_cdp_header;
@@ -220,7 +220,12 @@ impl BuiltinPacketParser {
         offset: usize,
     ) -> Result<bool, LayerError> {
         match parse_transport(parsed, protocol, l4_bytes, config) {
-            Ok(()) => Ok(true),
+            Ok(()) => {
+                if let Some(quoted) = parsed.icmp_quoted.as_deref_mut() {
+                    quoted.frame_offset = offset + ICMP_QUOTE_OFFSET;
+                }
+                Ok(true)
+            }
             // Kept out of line: a truncated transport header is the rare case,
             // and leaving the warning construction inline slows every
             // well-formed packet down.
@@ -421,11 +426,14 @@ impl BuiltinPacketParser {
         match ethertype {
             ethertype::ARP => {
                 let arp = parse_arp_packet(l3_bytes)?;
+                parsed.network_offset = Some(l3_offset);
                 parsed.arp = Some(arp);
                 Ok(())
             }
             ethertype::IPV4 => {
                 let ipv4 = parse_ipv4_header(l3_bytes)?;
+                // Every exit below leaves the addresses readable, so record it here.
+                parsed.network_offset = Some(l3_offset);
 
                 let ip_header_len = (ipv4.ihl as usize) * 4;
                 let total_len = ipv4.total_length as usize;
@@ -513,6 +521,7 @@ impl BuiltinPacketParser {
             }
             ethertype::IPV6 => {
                 let mut ipv6 = parse_ipv6_header(l3_bytes)?;
+                parsed.network_offset = Some(l3_offset);
 
                 let payload_len = ipv6.payload_length as usize;
                 let declared_l4_end = 40 + payload_len;
@@ -986,7 +995,8 @@ fn recurse_or_warn(
         return Ok(());
     }
     match result {
-        Some(Ok(inner)) => {
+        Some(Ok(mut inner)) => {
+            inner.frame_offset = offset;
             parsed.inner = Some(Box::new(inner));
             Ok(())
         }
@@ -1188,6 +1198,88 @@ mod tests {
         BuiltinPacketParser, ParseConfig, ParseMode, ParseWarningCode, ParseWarningProtocol,
         TransportSegment,
     };
+
+    #[test]
+    fn the_network_offset_locates_the_addresses() {
+        let frame = truncated_ipv4_udp_frame();
+        let parsed = BuiltinPacketParser::parse(&frame).expect("the frame parses");
+        let at = parsed.network_offset.expect("IPv4 records its offset");
+        let ipv4 = parsed.ipv4.as_ref().expect("the IPv4 header");
+        assert_eq!(parsed.frame_offset, 0);
+        assert_eq!(frame[at + 12..at + 16], ipv4.source.octets());
+        assert_eq!(frame[at + 16..at + 20], ipv4.destination.octets());
+
+        let frame = truncated_ipv6_udp_frame();
+        let parsed = BuiltinPacketParser::parse(&frame).expect("the frame parses");
+        let at = parsed.network_offset.expect("IPv6 records its offset");
+        let ipv6 = parsed.ipv6.as_ref().expect("the IPv6 header");
+        assert_eq!(frame[at + 8..at + 24], ipv6.source.octets());
+        assert_eq!(frame[at + 24..at + 40], ipv6.destination.octets());
+    }
+
+    /// A tunnelled packet is parsed from its own buffer, so `frame_offset` is
+    /// what puts its offset back in the frame.
+    #[test]
+    fn a_tunnelled_packet_locates_its_own_addresses() {
+        let mut inner = vec![0xaa; 6];
+        inner.extend([0xbb; 6]);
+        inner.extend(0x0800u16.to_be_bytes());
+        inner.extend([0x45, 0x00, 0x00, 0x1c, 0x00, 0x01, 0x00, 0x00, 64, 17, 0, 0]);
+        inner.extend([10, 1, 1, 1, 10, 2, 2, 2]);
+        inner.extend([0x04, 0xd2, 0x16, 0x2e, 0x00, 0x08, 0x00, 0x00]);
+
+        let mut vxlan = vec![0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x7b, 0x00];
+        vxlan.extend(&inner);
+
+        let udp_len = u16::try_from(8 + vxlan.len()).expect("short frame");
+        let total = u16::try_from(20 + usize::from(udp_len)).expect("short frame");
+        let mut frame = vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
+        frame.extend(0x0800u16.to_be_bytes());
+        frame.extend([0x45, 0x00]);
+        frame.extend(total.to_be_bytes());
+        frame.extend([0x00, 0x01, 0x00, 0x00, 64, 17, 0, 0]);
+        frame.extend([192, 0, 2, 1, 192, 0, 2, 2]);
+        frame.extend(4789u16.to_be_bytes());
+        frame.extend(4789u16.to_be_bytes());
+        frame.extend(udp_len.to_be_bytes());
+        frame.extend([0, 0]);
+        frame.extend(&vxlan);
+
+        let parsed = BuiltinPacketParser::parse(&frame).expect("the VXLAN frame parses");
+        let tunnelled = parsed.inner.as_deref().expect("the inner packet");
+        let at = tunnelled.frame_offset + tunnelled.network_offset.expect("inner offset");
+        let ipv4 = tunnelled.ipv4.as_ref().expect("the inner IPv4 header");
+        assert_eq!(frame[at + 12..at + 16], ipv4.source.octets());
+        assert_eq!(frame[at + 16..at + 20], ipv4.destination.octets());
+    }
+
+    /// The quoted datagram holds addresses of its own, behind the ICMP header.
+    #[test]
+    fn a_quoted_datagram_locates_its_own_addresses() {
+        let mut quoted = vec![0x45, 0x00, 0x00, 0x1c, 0x00, 0x01, 0x00, 0x00, 64, 17, 0, 0];
+        quoted.extend([10, 0, 0, 1, 10, 0, 0, 2]);
+        quoted.extend(1234u16.to_be_bytes());
+        quoted.extend(53u16.to_be_bytes());
+        quoted.extend([0x00, 0x08, 0x00, 0x00]);
+
+        let mut icmp = vec![3, 3, 0, 0, 0, 0, 0, 0];
+        icmp.extend(&quoted);
+
+        let total = u16::try_from(20 + icmp.len()).expect("short frame");
+        let mut frame = vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0x08, 0x00];
+        frame.extend([0x45, 0x00]);
+        frame.extend(total.to_be_bytes());
+        frame.extend([0x00, 0x01, 0x00, 0x00, 64, 1, 0, 0]);
+        frame.extend([10, 0, 0, 3, 10, 0, 0, 1]);
+        frame.extend(&icmp);
+
+        let parsed = BuiltinPacketParser::parse(&frame).expect("the error parses");
+        let inner = parsed.icmp_quoted.as_deref().expect("the quoted datagram");
+        let at = inner.frame_offset + inner.network_offset.expect("quote offset");
+        let ipv4 = inner.ipv4.as_ref().expect("the quoted IPv4 header");
+        assert_eq!(frame[at + 12..at + 16], ipv4.source.octets());
+        assert_eq!(frame[at + 16..at + 20], ipv4.destination.octets());
+    }
 
     fn truncated_ipv4_udp_frame() -> Vec<u8> {
         vec![

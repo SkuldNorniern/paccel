@@ -8,7 +8,7 @@ use crate::engine::builtin::BuiltinPacketParser;
 use crate::engine::builtin::types::{
     ApplicationLayers, ParseWarning, ParseWarningCode, ParseWarningProtocol, ParsedPacket,
 };
-use crate::engine::constants::{ethertype, ip_proto};
+use crate::engine::constants::{ICMP_QUOTE_OFFSET, ethertype, ip_proto};
 use crate::layer::LayerError;
 use crate::layer::application::bgp::probe_bgp;
 use crate::layer::application::coap::{CoapMessage, parse_coap_message};
@@ -119,7 +119,7 @@ fn quote_from_icmp(
     if config.max_icmp_quote_depth == 0 {
         return;
     }
-    let Some(quoted) = l4_bytes.get(8..) else {
+    let Some(quoted) = l4_bytes.get(ICMP_QUOTE_OFFSET..) else {
         return;
     };
     if quoted.is_empty() {
