@@ -1,7 +1,8 @@
 use std::net::IpAddr;
 
 use super::{
-    Encode, EncodeError, EthernetHeader, Ipv4Header, Ipv6Header, PseudoHeader, TcpHeader, UdpHeader,
+    Encode, EncodeError, EthernetHeader, IcmpHeader, Ipv4Header, Ipv6Header, PseudoHeader,
+    TcpHeader, UdpHeader,
 };
 
 /// The network header a builder will write.
@@ -16,6 +17,9 @@ pub enum NetworkHeader {
 pub enum TransportHeader {
     Udp(UdpHeader),
     Tcp(TcpHeader),
+    /// ICMP over IPv4 or ICMPv6 over IPv6; which one follows from the network
+    /// header the builder was given.
+    Icmp(IcmpHeader),
 }
 
 /// Writes a whole frame, deriving what the layers say about each other.
@@ -65,6 +69,12 @@ impl PacketBuilder {
         self
     }
 
+    #[must_use]
+    pub fn icmp(mut self, header: IcmpHeader) -> Self {
+        self.transport = Some(TransportHeader::Icmp(header));
+        self
+    }
+
     pub fn encoded_len(&self, payload_len: usize) -> usize {
         let ethernet = self.ethernet.map_or(0, |header| header.encoded_len());
         let network = match self.network {
@@ -79,6 +89,7 @@ impl PacketBuilder {
         match self.transport {
             Some(TransportHeader::Udp(header)) => header.encoded_len(),
             Some(TransportHeader::Tcp(header)) => header.encoded_len(),
+            Some(TransportHeader::Icmp(header)) => header.encoded_len(),
             None => 0,
         }
     }
@@ -87,6 +98,11 @@ impl PacketBuilder {
         match self.transport {
             Some(TransportHeader::Udp(_)) => Some(17),
             Some(TransportHeader::Tcp(_)) => Some(6),
+            // RFC 792 numbers ICMP 1; RFC 4443 numbers ICMPv6 58.
+            Some(TransportHeader::Icmp(_)) => match self.network {
+                Some(NetworkHeader::Ipv6(_)) => Some(58),
+                _ => Some(1),
+            },
             None => None,
         }
     }
@@ -150,6 +166,9 @@ impl PacketBuilder {
             Some(TransportHeader::Tcp(header)) => {
                 written += header.encode_into(&mut buffer[written..])?;
             }
+            Some(TransportHeader::Icmp(header)) => {
+                written += header.encode_into(&mut buffer[written..])?;
+            }
             None => {}
         }
 
@@ -199,6 +218,18 @@ impl PacketBuilder {
                 header.checksum = header.checksum_over(pseudo, payload)?;
                 TransportHeader::Tcp(header)
             }
+            TransportHeader::Icmp(mut header) => {
+                // ICMPv6 sums a pseudo-header, ICMP does not.
+                let pseudo =
+                    matches!(self.network, Some(NetworkHeader::Ipv6(_))).then_some(PseudoHeader {
+                        source,
+                        destination,
+                        protocol,
+                        length: covered_length(header.encoded_len(), payload.len())?,
+                    });
+                header.checksum = header.checksum_over(pseudo, payload)?;
+                TransportHeader::Icmp(header)
+            }
         }))
     }
 }
@@ -217,7 +248,8 @@ mod tests {
 
     use super::{PacketBuilder, PseudoHeader};
     use crate::craft::{
-        ChecksumAccumulator, EthernetHeader, Ipv4Header, Ipv6Header, TcpHeader, UdpHeader,
+        ChecksumAccumulator, EthernetHeader, IcmpHeader, Ipv4Header, Ipv6Header, TcpHeader,
+        UdpHeader,
     };
     use crate::engine::{BuiltinPacketParser, TransportSegment};
 
@@ -323,6 +355,52 @@ mod tests {
             IpAddr::V6(source),
             IpAddr::V6(destination),
             6,
+            &frame[segment..],
+        );
+    }
+
+    /// ICMP sums its message alone, ICMPv6 sums a pseudo-header first, and
+    /// the builder has to pick by which network header it was given.
+    #[test]
+    fn icmp_checksums_differ_by_family() {
+        let payload = b"ping";
+
+        let frame = PacketBuilder::new()
+            .ethernet(EthernetHeader::new([0xff; 6], [0x11; 6], 0))
+            .ipv4(Ipv4Header::new(
+                Ipv4Addr::new(192, 0, 2, 1),
+                Ipv4Addr::new(192, 0, 2, 2),
+                0,
+                0,
+            ))
+            .icmp(IcmpHeader::echo_request(0x1234, 1))
+            .build(payload)
+            .expect("the frame builds");
+
+        let parsed = BuiltinPacketParser::parse(&frame).expect("the frame parses");
+        assert_eq!(parsed.ipv4.as_ref().expect("IPv4").protocol, 1);
+        assert_eq!(parsed.icmp.as_ref().expect("the ICMP header").icmp_type, 8);
+        let segment = parsed.transport_segment_offset.expect("where ICMP sits");
+        let mut sum = ChecksumAccumulator::new();
+        sum.add_bytes(&frame[segment..]);
+        assert_eq!(sum.finish(), 0, "ICMP sums the message alone");
+
+        let source = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1);
+        let destination = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 2);
+        let frame = PacketBuilder::new()
+            .ethernet(EthernetHeader::new([0xff; 6], [0x11; 6], 0))
+            .ipv6(Ipv6Header::new(source, destination, 0, 0))
+            .icmp(IcmpHeader::echo_request(0x1234, 1))
+            .build(payload)
+            .expect("the frame builds");
+
+        let parsed = BuiltinPacketParser::parse(&frame).expect("the frame parses");
+        assert_eq!(parsed.ipv6.as_ref().expect("IPv6").resolved_next_header, 58);
+        let segment = parsed.transport_segment_offset.expect("where ICMPv6 sits");
+        transport_checksum_verifies(
+            IpAddr::V6(source),
+            IpAddr::V6(destination),
+            58,
             &frame[segment..],
         );
     }
