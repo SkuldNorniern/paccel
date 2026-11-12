@@ -24,12 +24,14 @@
 //!
 //! The public API may change between `0.x` minor releases.
 
+pub mod craft;
 pub mod engine;
 #[cfg(feature = "fingerprint")]
 pub mod fingerprint;
 pub mod layer;
 pub mod packet;
 
+pub use craft::EncodeError;
 pub use engine::{
     IpFragmentReassembler, QuicConnectionTracker, QuicStreamReassembler, SessionTracker,
     StreamEvent, StreamL7, TcpOverlapPolicy, TcpStreamReassembler,
