@@ -23,7 +23,9 @@ impl<'a> EthernetPacket<'a> {
         let mut outer_vlan_tag = None;
         let mut inner_vlan_tag = None;
 
-        while ethertype == 0x8100 || ethertype == 0x88A8 {
+        // 0x9100 is the QinQ ethertype deployed before 802.1ad settled on
+        // 0x88A8, and the engine parser accepts it too.
+        while matches!(ethertype, 0x8100 | 0x88A8 | 0x9100) {
             if data.len() < offset + 4 {
                 return None;
             }
@@ -70,6 +72,12 @@ impl<'a> EthernetPacket<'a> {
 
     pub fn vlan_depth(&self) -> u8 {
         self.vlan_depth
+    }
+
+    /// Where the payload begins, tags included. Exact, where `vlan_depth`
+    /// saturates.
+    pub fn payload_offset(&self) -> usize {
+        self.payload_offset
     }
 
     pub fn outer_vlan_tag(&self) -> Option<u16> {
@@ -124,6 +132,12 @@ impl<'a> Ipv4Packet<'a> {
     /// Header length in bytes, options included.
     pub fn header_len(&self) -> usize {
         self.header_len
+    }
+
+    /// Where this fragment's payload sits in the original datagram, in units
+    /// of eight bytes. Zero for a whole datagram or its first fragment.
+    pub fn fragment_offset(&self) -> u16 {
+        u16::from_be_bytes([self.data[6], self.data[7]]) & 0x1fff
     }
 
     pub fn source(&self) -> Ipv4Addr {

@@ -67,7 +67,7 @@ impl<'a> PacketSlice<'a> {
         let (ethertype, offset) = match linktype {
             Some(1) | None => {
                 let ethernet = EthernetPacket::new(frame)?;
-                let offset = 14 + 4 * usize::from(ethernet.vlan_depth());
+                let offset = ethernet.payload_offset();
                 slice.ethernet = Some(ethernet);
                 (ethernet.ethertype(), offset)
             }
@@ -85,30 +85,39 @@ impl<'a> PacketSlice<'a> {
         let Some(bytes) = self.frame.get(offset..) else {
             return;
         };
-        let (network, protocol, header_len) = match ethertype {
+        match ethertype {
             ETHERTYPE_IPV4 => {
                 let Some(ipv4) = Ipv4Packet::new(bytes) else {
                     return;
                 };
-                (NetworkSlice::Ipv4(ipv4), ipv4.protocol(), ipv4.header_len())
+                self.network = Some(NetworkSlice::Ipv4(ipv4));
+                self.network_offset = Some(offset);
+                // RFC 791: only the fragment at offset zero carries the
+                // transport header. Reading one out of a later fragment would
+                // be reading payload as a header.
+                if ipv4.fragment_offset() == 0 {
+                    self.read_transport(
+                        ipv4.protocol(),
+                        offset + ipv4.header_len(),
+                        ipv4.payload(),
+                    );
+                }
             }
             ETHERTYPE_IPV6 => {
                 let Some(ipv6) = Ipv6Packet::new(bytes) else {
                     return;
                 };
-                (NetworkSlice::Ipv6(ipv6), ipv6.next_header(), 40)
+                self.network = Some(NetworkSlice::Ipv6(ipv6));
+                self.network_offset = Some(offset);
+                self.read_transport(ipv6.next_header(), offset + 40, ipv6.payload());
             }
-            _ => return,
-        };
-        self.network = Some(network);
-        self.network_offset = Some(offset);
-        self.read_transport(protocol, offset + header_len);
+            _ => {}
+        }
     }
 
-    fn read_transport(&mut self, protocol: u8, offset: usize) {
-        let Some(bytes) = self.frame.get(offset..) else {
-            return;
-        };
+    /// `bytes` is the network payload, not the rest of the frame: anything
+    /// past the length the IP header declared is not part of this datagram.
+    fn read_transport(&mut self, protocol: u8, offset: usize, bytes: &'a [u8]) {
         let transport = match protocol {
             6 => TcpPacket::new(bytes).map(TransportSlice::Tcp),
             17 => UdpPacket::new(bytes).map(TransportSlice::Udp),
@@ -248,6 +257,49 @@ mod tests {
         assert_eq!(slice.network_offset(), Some(0));
         assert_eq!(slice.ports(), Some((7, 9)));
         assert!(slice.ethernet().is_none(), "there is no link header");
+    }
+
+    /// Three ways the fast tier could report a transport header that is not
+    /// there: bytes past the declared IP length, a later fragment whose
+    /// payload is not a header, and a VLAN stack deep enough to saturate the
+    /// tag count. In each the engine is the reference.
+    #[test]
+    fn the_slice_reads_no_transport_the_engine_would_not() {
+        // Total length 20, so the eight bytes after the header are not in the
+        // datagram at all.
+        let trailing = [
+            0x45, 0x00, 0x00, 0x14, 0x00, 0x00, 0x00, 0x00, 0x40, 0x11, 0x7a, 0xda, 0, 0, 0, 0, 0,
+            0, 0, 0, 0x00, 0x01, 0x00, 0x02, 0x00, 0x08, 0x00, 0x00,
+        ];
+        let slice = PacketSlice::with_linktype(&trailing, Some(101)).expect("reads");
+        assert!(slice.network().is_some(), "the IPv4 header is there");
+        assert_eq!(slice.ports(), None, "those bytes are outside the datagram");
+
+        // Fragment offset 1: the payload starts eight bytes into the original
+        // datagram, so it is not a transport header.
+        let fragment = [
+            0x45, 0x00, 0x00, 0x1c, 0x00, 0x00, 0x00, 0x01, 0x40, 0x11, 0x7a, 0xd1, 0, 0, 0, 0, 0,
+            0, 0, 0, 0x00, 0x01, 0x00, 0x02, 0x00, 0x08, 0x00, 0x00,
+        ];
+        let slice = PacketSlice::with_linktype(&fragment, Some(101)).expect("reads");
+        assert!(slice.network().is_some(), "the IPv4 header is there");
+        assert_eq!(slice.ports(), None, "a later fragment carries no header");
+
+        // 256 tags, one more than a u8 depth can count.
+        let mut deep = vec![0u8; 12];
+        for _ in 0..256 {
+            deep.extend([0x81, 0x00, 0x00, 0x00]);
+        }
+        deep.extend([0x08, 0x00]);
+        deep.extend([
+            0x45, 0x00, 0x00, 0x1c, 0x00, 0x00, 0x00, 0x00, 0x40, 0x11, 0, 0, 10, 0, 0, 1, 10, 0,
+            0, 2, 0x00, 0x01, 0x00, 0x02, 0x00, 0x08, 0x00, 0x00,
+        ]);
+        let slice = PacketSlice::new(&deep).expect("reads");
+        let parsed = BuiltinPacketParser::parse(&deep).expect("parses");
+        assert_eq!(slice.network_offset(), Some(1038));
+        assert_eq!(slice.network_offset(), parsed.network_offset);
+        assert_eq!(slice.ports(), Some((1, 2)));
     }
 
     /// The fast tier declines a header the capture cut short rather than

@@ -41,10 +41,12 @@ impl UdpHeader {
     }
 
     fn length(&self) -> Result<u16, EncodeError> {
-        u16::try_from(8 + self.payload_len).map_err(|_| EncodeError::PayloadTooLong {
+        let too_long = EncodeError::PayloadTooLong {
             max: usize::from(u16::MAX) - 8,
             got: self.payload_len,
-        })
+        };
+        let total = self.payload_len.checked_add(8).ok_or(too_long)?;
+        u16::try_from(total).map_err(|_| too_long)
     }
 }
 

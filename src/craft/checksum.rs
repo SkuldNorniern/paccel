@@ -7,7 +7,8 @@
 /// temporary.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ChecksumAccumulator {
-    sum: u32,
+    /// Wide enough that no message length can overflow it before the fold.
+    sum: u64,
     /// A byte held back because the run that delivered it ended on an odd
     /// length. The pairing is over the whole message, not per call.
     odd: Option<u8>,
@@ -20,7 +21,7 @@ impl ChecksumAccumulator {
 
     pub fn add_u16(&mut self, value: u16) {
         debug_assert!(self.odd.is_none(), "a field after an odd-length run");
-        self.sum += u32::from(value);
+        self.sum += u64::from(value);
     }
 
     pub fn add_u32(&mut self, value: u32) {
@@ -30,17 +31,21 @@ impl ChecksumAccumulator {
     }
 
     pub fn add_bytes(&mut self, bytes: &[u8]) {
+        // A run of no bytes adds nothing and, more to the point, must not
+        // disturb a byte held back from the run before it.
+        let Some((first, rest)) = bytes.split_first() else {
+            return;
+        };
+
         let mut bytes = bytes;
-        if let Some(held) = self.odd.take()
-            && let Some((first, rest)) = bytes.split_first()
-        {
-            self.sum += u32::from(u16::from_be_bytes([held, *first]));
+        if let Some(held) = self.odd.take() {
+            self.sum += u64::from(u16::from_be_bytes([held, *first]));
             bytes = rest;
         }
 
         let (pairs, remainder) = bytes.as_chunks::<2>();
         for pair in pairs {
-            self.sum += u32::from(u16::from_be_bytes(*pair));
+            self.sum += u64::from(u16::from_be_bytes(*pair));
         }
         // Held rather than padded: more bytes may follow, and RFC 1071 pairs
         // across the whole message.
@@ -51,18 +56,18 @@ impl ChecksumAccumulator {
     pub fn finish(&self) -> u16 {
         let mut sum = self.sum;
         if let Some(held) = self.odd {
-            sum += u32::from(u16::from_be_bytes([held, 0]));
+            sum += u64::from(u16::from_be_bytes([held, 0]));
         }
         !fold(sum)
     }
 }
 
 /// Carries the high half back into the low until sixteen bits are left.
-fn fold(mut sum: u32) -> u16 {
+fn fold(mut sum: u64) -> u16 {
     while sum >> 16 != 0 {
         sum = (sum & 0xffff) + (sum >> 16);
     }
-    debug_assert!(sum <= u32::from(u16::MAX));
+    debug_assert!(sum <= u64::from(u16::MAX));
     u16::try_from(sum).unwrap_or(u16::MAX)
 }
 
@@ -71,7 +76,7 @@ fn fold(mut sum: u32) -> u16 {
 /// Rewriting an address in a captured packet is exactly this: the rest of the
 /// header is untouched, so summing it again would be wasted work.
 pub fn update_u16(checksum: u16, old: u16, new: u16) -> u16 {
-    !fold(u32::from(!checksum) + u32::from(!old) + u32::from(new))
+    !fold(u64::from(!checksum) + u64::from(!old) + u64::from(new))
 }
 
 #[cfg(test)]
@@ -102,6 +107,25 @@ mod tests {
             sum.add_bytes(&HEADER[split..]);
             assert_eq!(sum.finish(), 0xb861, "split at {split}");
         }
+    }
+
+    /// A run that delivers no bytes must not swallow the byte held back from
+    /// the one before it, and a message long enough to overflow a 32-bit
+    /// accumulator must still fold to the right value.
+    #[test]
+    fn an_empty_run_and_a_long_message_still_sum() {
+        let mut split = ChecksumAccumulator::new();
+        split.add_bytes(&[0x12]);
+        split.add_bytes(&[]);
+        let mut whole = ChecksumAccumulator::new();
+        whole.add_bytes(&[0x12]);
+        assert_eq!(split.finish(), whole.finish());
+        assert_eq!(split.finish(), 0xedff);
+
+        // 65_538 words of 0xffff, which overflows a u32 sum.
+        let mut long = ChecksumAccumulator::new();
+        long.add_bytes(&vec![0xff; 131_076]);
+        assert_eq!(long.finish(), 0);
     }
 
     /// The whole point of the incremental form: it has to agree with summing

@@ -24,9 +24,20 @@ impl IcmpHeader {
         }
     }
 
+    /// An ICMP echo request, RFC 792 type 8. ICMPv6 numbers its own echo
+    /// request 128, so over IPv6 use [`Self::echo_request_v6`].
     pub fn echo_request(identifier: u16, sequence: u16) -> Self {
+        Self::echo(8, identifier, sequence)
+    }
+
+    /// An ICMPv6 echo request, RFC 4443 sec 4.1 type 128.
+    pub fn echo_request_v6(identifier: u16, sequence: u16) -> Self {
+        Self::echo(128, identifier, sequence)
+    }
+
+    fn echo(icmp_type: u8, identifier: u16, sequence: u16) -> Self {
         Self {
-            icmp_type: 8,
+            icmp_type,
             code: 0,
             rest: (u32::from(identifier) << 16) | u32::from(sequence),
             checksum: 0,

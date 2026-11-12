@@ -43,11 +43,15 @@ impl Ipv4Header {
     }
 
     fn total_length(&self) -> Result<u16, EncodeError> {
-        let total = self.encoded_len() + self.payload_len;
-        u16::try_from(total).map_err(|_| EncodeError::PayloadTooLong {
+        let too_long = EncodeError::PayloadTooLong {
             max: usize::from(u16::MAX) - self.encoded_len(),
             got: self.payload_len,
-        })
+        };
+        let total = self
+            .encoded_len()
+            .checked_add(self.payload_len)
+            .ok_or(too_long)?;
+        u16::try_from(total).map_err(|_| too_long)
     }
 
     fn flags_and_fragment(&self) -> u16 {
@@ -109,6 +113,7 @@ mod tests {
 
     use super::{ChecksumAccumulator, Encode, EncodeError, Ipv4Header, Options};
     use crate::craft::EthernetHeader;
+    use crate::craft::UdpHeader;
     use crate::engine::BuiltinPacketParser;
 
     #[test]
@@ -144,12 +149,22 @@ mod tests {
         assert_eq!(sum.finish(), 0, "the checksum the encoder wrote is correct");
     }
 
+    /// Too long to describe, and too long to add up: both have to come back
+    /// as the same refusal rather than wrapping or panicking.
     #[test]
     fn a_payload_past_the_length_field_is_refused() {
         let mut header = Ipv4Header::new(Ipv4Addr::UNSPECIFIED, Ipv4Addr::UNSPECIFIED, 17, 0);
-        header.payload_len = 65_536;
+        for payload_len in [65_536, usize::MAX] {
+            header.payload_len = payload_len;
+            assert!(
+                matches!(header.build(), Err(EncodeError::PayloadTooLong { .. })),
+                "payload of {payload_len}"
+            );
+        }
+
+        let udp = UdpHeader::new(1, 2, usize::MAX);
         assert!(matches!(
-            header.build(),
+            udp.build(),
             Err(EncodeError::PayloadTooLong { .. })
         ));
     }

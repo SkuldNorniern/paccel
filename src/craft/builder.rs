@@ -188,9 +188,11 @@ impl PacketBuilder {
         let Some(transport) = self.transport else {
             return Ok(None);
         };
+        let transport = with_payload_len(transport, payload.len());
         let Some((source, destination)) = self.addresses() else {
             // No network header, so there is no pseudo-header to sum over and
-            // the checksum stays as the caller set it.
+            // the checksum stays as the caller set it. The length still has to
+            // count the payload.
             return Ok(Some(transport));
         };
         let protocol = self.protocol().unwrap_or(0);
@@ -236,10 +238,27 @@ impl PacketBuilder {
 
 /// What the pseudo-header says the transport covers.
 fn covered_length(header_len: usize, payload_len: usize) -> Result<u32, EncodeError> {
-    u32::try_from(header_len + payload_len).map_err(|_| EncodeError::PayloadTooLong {
-        max: u32::MAX as usize - header_len,
+    let too_long = EncodeError::PayloadTooLong {
+        max: usize::try_from(u32::MAX).unwrap_or(usize::MAX) - header_len,
         got: payload_len,
-    })
+    };
+    let total = header_len.checked_add(payload_len).ok_or(too_long)?;
+    u32::try_from(total).map_err(|_| too_long)
+}
+
+/// The transport header with its payload length set, before any checksum.
+fn with_payload_len(transport: TransportHeader, payload_len: usize) -> TransportHeader {
+    match transport {
+        TransportHeader::Udp(mut header) => {
+            header.payload_len = payload_len;
+            TransportHeader::Udp(header)
+        }
+        TransportHeader::Tcp(mut header) => {
+            header.payload_len = payload_len;
+            TransportHeader::Tcp(header)
+        }
+        TransportHeader::Icmp(_) => transport,
+    }
 }
 
 #[cfg(test)]
@@ -390,18 +409,40 @@ mod tests {
         let frame = PacketBuilder::new()
             .ethernet(EthernetHeader::new([0xff; 6], [0x11; 6], 0))
             .ipv6(Ipv6Header::new(source, destination, 0, 0))
-            .icmp(IcmpHeader::echo_request(0x1234, 1))
+            .icmp(IcmpHeader::echo_request_v6(0x1234, 1))
             .build(payload)
             .expect("the frame builds");
 
         let parsed = BuiltinPacketParser::parse(&frame).expect("the frame parses");
         assert_eq!(parsed.ipv6.as_ref().expect("IPv6").resolved_next_header, 58);
+        assert_eq!(
+            parsed.icmpv6.as_ref().expect("ICMPv6").icmp_type,
+            128,
+            "RFC 4443 sec 4.1 numbers an echo request 128, not 8"
+        );
         let segment = parsed.transport_segment_offset.expect("where ICMPv6 sits");
         transport_checksum_verifies(
             IpAddr::V6(source),
             IpAddr::V6(destination),
             58,
             &frame[segment..],
+        );
+    }
+
+    /// Without a network header there is no pseudo-header, but the transport
+    /// length still counts the payload.
+    #[test]
+    fn a_transport_only_build_still_counts_the_payload() {
+        let frame = PacketBuilder::new()
+            .udp(UdpHeader::new(1, 2, 0))
+            .build(b"x")
+            .expect("builds");
+
+        assert_eq!(frame.len(), 9);
+        assert_eq!(
+            u16::from_be_bytes([frame[4], frame[5]]),
+            9,
+            "the UDP length covers the payload"
         );
     }
 
