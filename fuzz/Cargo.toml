@@ -82,3 +82,10 @@ path = "fuzz_targets/fuzz_http2_frames.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_craft_roundtrip"
+path = "fuzz_targets/fuzz_craft_roundtrip.rs"
+test = false
+doc = false
+bench = false
