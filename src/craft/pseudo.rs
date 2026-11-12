@@ -16,7 +16,11 @@ pub struct PseudoHeader {
 }
 
 impl PseudoHeader {
-    pub(crate) fn add_to(&self, sum: &mut ChecksumAccumulator) -> Result<(), EncodeError> {
+    /// Adds the pseudo-header's fields to `sum`.
+    ///
+    /// Public because verifying a checksum needs the same fields as writing
+    /// one: sum this, then the segment, and a right checksum gives zero.
+    pub fn add_to(&self, sum: &mut ChecksumAccumulator) -> Result<(), EncodeError> {
         match (self.source, self.destination) {
             (IpAddr::V4(source), IpAddr::V4(destination)) => {
                 sum.add_bytes(&source.octets());
