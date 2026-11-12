@@ -628,6 +628,7 @@ impl ApplicationLayers {
 }
 
 #[derive(Debug, Default)]
+#[non_exhaustive]
 pub struct ParsedPacket {
     pub ethernet: Option<EthernetFrame>,
     pub radiotap: Option<RadiotapHeader>,
