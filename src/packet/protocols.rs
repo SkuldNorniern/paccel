@@ -121,6 +121,11 @@ impl<'a> Ipv4Packet<'a> {
         self.data[9]
     }
 
+    /// Header length in bytes, options included.
+    pub fn header_len(&self) -> usize {
+        self.header_len
+    }
+
     pub fn source(&self) -> Ipv4Addr {
         Ipv4Addr::new(self.data[12], self.data[13], self.data[14], self.data[15])
     }
