@@ -72,6 +72,45 @@ pub(super) fn header_words(header_len: usize) -> u8 {
     u8::try_from(header_len / 4).unwrap_or(0x0f)
 }
 
+impl Ipv4Header {
+    /// Writes the header with `total_length` and `checksum` exactly as given,
+    /// deriving neither.
+    ///
+    /// The high-level encode works both out, which is what you want for a
+    /// frame that should be correct. Fuzzing, IDS testing and
+    /// malformed-packet research want the opposite, so this stays available.
+    pub fn encode_raw_into(
+        &self,
+        buffer: &mut [u8],
+        total_length: u16,
+        checksum: u16,
+    ) -> Result<usize, EncodeError> {
+        let mut cursor = WriteCursor::new(buffer);
+        self.write_fixed(&mut cursor, total_length, checksum)?;
+        Ok(cursor.position())
+    }
+
+    fn write_fixed(
+        &self,
+        cursor: &mut WriteCursor<'_>,
+        total_length: u16,
+        checksum: u16,
+    ) -> Result<(), EncodeError> {
+        cursor.write_u8(0x40 | header_words(self.encoded_len()))?;
+        cursor.write_u8((self.dscp << 2) | (self.ecn & 0x03))?;
+        cursor.write_u16_be(total_length)?;
+        cursor.write_u16_be(self.identification)?;
+        cursor.write_u16_be(self.flags_and_fragment())?;
+        cursor.write_u8(self.ttl)?;
+        cursor.write_u8(self.protocol)?;
+        cursor.write_u16_be(checksum)?;
+        cursor.write_bytes(&self.source.octets())?;
+        cursor.write_bytes(&self.destination.octets())?;
+        cursor.write_bytes(self.options.as_slice())?;
+        Ok(())
+    }
+}
+
 impl Encode for Ipv4Header {
     fn encoded_len(&self) -> usize {
         20 + self.options.len()
@@ -81,27 +120,16 @@ impl Encode for Ipv4Header {
         let total_length = self.total_length()?;
         let header_len = self.encoded_len();
 
+        // Written with a zero checksum first, because RFC 791 sums the header
+        // with that field zero; the real value is patched in after.
         let mut cursor = WriteCursor::new(buffer);
-        cursor.write_u8(0x40 | header_words(header_len))?;
-        cursor.write_u8((self.dscp << 2) | (self.ecn & 0x03))?;
-        cursor.write_u16_be(total_length)?;
-        cursor.write_u16_be(self.identification)?;
-        cursor.write_u16_be(self.flags_and_fragment())?;
-        cursor.write_u8(self.ttl)?;
-        cursor.write_u8(self.protocol)?;
-        let checksum_at = cursor.position();
-        cursor.write_u16_be(0)?;
-        cursor.write_bytes(&self.source.octets())?;
-        cursor.write_bytes(&self.destination.octets())?;
-        cursor.write_bytes(self.options.as_slice())?;
+        self.write_fixed(&mut cursor, total_length, 0)?;
 
-        // Over the header as just written, where the checksum field is zero,
-        // which is what RFC 791 says to sum.
         let mut sum = ChecksumAccumulator::new();
         sum.add_bytes(&buffer[..header_len]);
         let checksum = sum.finish();
         let mut cursor = WriteCursor::new(buffer);
-        cursor.patch_u16_be(checksum_at, checksum)?;
+        cursor.patch_u16_be(10, checksum)?;
 
         Ok(header_len)
     }
@@ -147,6 +175,32 @@ mod tests {
         let mut sum = ChecksumAccumulator::new();
         sum.add_bytes(&frame[at..at + 24]);
         assert_eq!(sum.finish(), 0, "the checksum the encoder wrote is correct");
+    }
+
+    /// Research traffic needs headers that lie. The raw encode writes the
+    /// length and checksum it was handed, however wrong.
+    #[test]
+    fn a_raw_encode_writes_the_wrong_values_it_was_given() {
+        let header = Ipv4Header::new(
+            Ipv4Addr::new(192, 0, 2, 1),
+            Ipv4Addr::new(192, 0, 2, 2),
+            17,
+            0,
+        );
+
+        let mut raw = [0u8; 20];
+        header
+            .encode_raw_into(&mut raw, 0xffff, 0xdead)
+            .expect("room");
+        assert_eq!(u16::from_be_bytes([raw[2], raw[3]]), 0xffff);
+        assert_eq!(u16::from_be_bytes([raw[10], raw[11]]), 0xdead);
+
+        // The derived path still works out both for itself.
+        let derived = header.build().expect("room");
+        assert_eq!(u16::from_be_bytes([derived[2], derived[3]]), 20);
+        let mut sum = ChecksumAccumulator::new();
+        sum.add_bytes(&derived);
+        assert_eq!(sum.finish(), 0, "the derived checksum is right");
     }
 
     /// Too long to describe, and too long to add up: both have to come back

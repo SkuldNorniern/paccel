@@ -50,18 +50,25 @@ impl UdpHeader {
     }
 }
 
-impl Encode for UdpHeader {
-    fn encoded_len(&self) -> usize {
-        8
-    }
-
-    fn encode_into(&self, buffer: &mut [u8]) -> Result<usize, EncodeError> {
-        let length = self.length()?;
+impl UdpHeader {
+    /// Writes the header with `length` exactly as given rather than derived,
+    /// and the checksum as the field holds it.
+    pub fn encode_raw_into(&self, buffer: &mut [u8], length: u16) -> Result<usize, EncodeError> {
         let mut cursor = WriteCursor::new(buffer);
         cursor.write_u16_be(self.source_port)?;
         cursor.write_u16_be(self.destination_port)?;
         cursor.write_u16_be(length)?;
         cursor.write_u16_be(self.checksum)?;
         Ok(cursor.position())
+    }
+}
+
+impl Encode for UdpHeader {
+    fn encoded_len(&self) -> usize {
+        8
+    }
+
+    fn encode_into(&self, buffer: &mut [u8]) -> Result<usize, EncodeError> {
+        self.encode_raw_into(buffer, self.length()?)
     }
 }
