@@ -198,7 +198,7 @@ Zero-dependency by default. Two optional features pull in [RustCrypto](https://g
 
 ## Test fixture provenance
 
-None of this ships in the crate. `tests/pcaps/` and `fuzz/` are excluded (`exclude` in `Cargo.toml`; `cargo package --list` confirms it). `src/` itself is original, written from RFCs and checked against `tshark`'s output, not derived from Wireshark's GPLv2 source.
+None of this ships in the crate. `tests/` and `fuzz/` are excluded whole (`exclude` in `Cargo.toml`; `cargo package --list` confirms it), since the tests read fixtures that are not published. `src/` itself is original, written from RFCs and checked against `tshark`'s output, not derived from Wireshark's GPLv2 source.
 
 `tests/pcaps/happy-path/*` are small hand-built captures, tens to hundreds of bytes, no external source. Most protocol test data lives inline in `tests/pcap_integration.rs` as synthetic frames built directly against each protocol's spec. tshark is only used to cross-check output, never as a source of committed bytes.
 

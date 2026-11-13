@@ -10,7 +10,9 @@ readme = "README.md"
 repository = "https://github.com/SkuldNorniern/paccel"
 keywords = ["packet", "pcap", "network", "parser", "protocol"]
 categories = ["network-programming", "parser-implementations"]
-exclude = ["tests/pcaps/", "tests/frames/", "fuzz/", "benches/"]
+# Tests read fixtures that are not published, so shipping them would ship
+# tests that cannot pass.
+exclude = ["tests/", "fuzz/"]
 
 [package.metadata.docs.rs]
 all-features = true
