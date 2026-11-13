@@ -15,17 +15,17 @@ cargo add paccel
 Or in `Cargo.toml`:
 
 ```toml
-paccel = "0.4"
+paccel = "0.5"
 # optional features:
-paccel = { version = "0.4", features = ["fingerprint"] }
-paccel = { version = "0.4", features = ["quic-decrypt"] }
+paccel = { version = "0.5", features = ["fingerprint"] }
+paccel = { version = "0.5", features = ["quic-decrypt"] }
 ```
 
 `0.x` can break the public API between minor versions before `1.0`.
 
 ## Layout
 
-`engine/*` does built-in parsing, capture iteration, opt-in reassembly and stream tracking. `packet/*` splits into owned types and borrowed views for manual parsing:
+`engine/*` does built-in parsing, capture iteration, opt-in reassembly and stream tracking. `craft/*` goes the other direction and writes frames. `packet/*` splits into owned types and borrowed views for manual parsing, plus `packet::PacketSlice` for a whole L2-L4 stack read in place:
 
 `packet::EthernetPacket`, `packet::SllPacket`, `packet::Sll2Packet`, `packet::Ipv4Packet`, `packet::Ipv6Packet`, `packet::TcpPacket`, `packet::UdpPacket`, `packet::ArpPacket`, `packet::DnsPacket`, `packet::IcmpPacket`, `packet::Icmpv6Packet`, `packet::DhcpPacket`, `packet::GrePacket`, `packet::VxlanPacket`, `packet::VlanTagView`.
 
@@ -128,6 +128,47 @@ fn classify(capture: &[u8]) {
 
 `QuicConnectionTracker` works the same way, and hands `QuicStreamReassembler::offer_for_connection` a connection and direction that stay put when a client changes address.
 
+## Building packets
+
+`craft` writes a frame into a buffer you own. `encode_into` returns how many bytes it wrote, and `encoded_len` says that up front, so a caller that reuses one buffer never allocates. `build` is the `Vec` convenience wrapper.
+
+```rust
+use std::net::Ipv4Addr;
+
+use paccel::craft::{EthernetHeader, Ipv4Header, PacketBuilder, UdpHeader};
+
+fn build_udp(payload: &[u8], buffer: &mut [u8]) -> usize {
+    let builder = PacketBuilder::new()
+        .ethernet(EthernetHeader::new([0xff; 6], [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff], 0x0800))
+        .ipv4(Ipv4Header::new(
+            Ipv4Addr::new(10, 0, 0, 1),
+            Ipv4Addr::new(10, 0, 0, 2),
+            17,
+            8 + payload.len(),
+        ))
+        .udp(UdpHeader::new(53_000, 53, payload.len()));
+
+    builder.encode_into(buffer, payload).expect("a large enough buffer")
+}
+```
+
+The builder derives lengths, ethertypes and checksums. `Ipv4Header::encode_raw_into` and `UdpHeader::encode_raw_into` skip that and write the length and checksum you hand them, however wrong, because fuzzing and IDS testing need a packet that lies.
+
+`PacketSlice` reads an existing frame the same way, without copying:
+
+```rust
+use paccel::packet::PacketSlice;
+
+fn endpoints(frame: &[u8]) {
+    let Some(slice) = PacketSlice::new(frame) else { return };
+    if let (Some((src, dst)), Some((sport, dport))) = (slice.addresses(), slice.ports()) {
+        println!("{src}:{sport} -> {dst}:{dport}");
+    }
+}
+```
+
+`network_offset` and `transport_offset` say where those headers sit in the frame, so a caller that rewrites an address in place knows what bytes to touch.
+
 ## Cargo features
 
 Zero-dependency by default. Two optional features pull in [RustCrypto](https://github.com/RustCrypto) crates (Apache-2.0/MIT):
@@ -147,13 +188,13 @@ Zero-dependency by default. Two optional features pull in [RustCrypto](https://g
 | Tunnel metadata in one parse pass (MPLS/VXLAN/GENEVE/AH/ESP/WireGuard) | partial | yes |
 | Strict/permissive parser mode | no | yes |
 | Built-in raw send/receive transport stack | yes | no (out of scope) |
-| Core mutable packet-builder API | yes | no (deferred/non-goal in core) |
+| Packet construction | yes (mutable packet API) | yes (`craft`, writes into a caller's buffer) |
 
 ## Core non-goals
 
 - No built-in flow table in the stateless core parser; reassembly and stream tracking are opt-in components.
 - No raw datalink/transport send/receive runtime in core parser.
-- No macro-heavy mutable packet construction API in core crate.
+- No macro-heavy mutable packet construction API. `craft` builds a frame from plain header structs and writes it out; it does not hand you a packet to mutate in place.
 
 ## Test fixture provenance
 
