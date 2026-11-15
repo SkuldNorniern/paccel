@@ -26,9 +26,18 @@ fuzz_target!(|data: &[u8]| {
         .with_max_cids_per_pool(MAX_CIDS_PER_POOL);
     let mut cursor = data;
     let mut announced: Vec<Vec<u8>> = Vec::new();
+    // The checks below walk everything announced so far, so an unbounded run
+    // spends the whole budget on one input. A short run reaches every cap and
+    // leaves the budget for more inputs.
+    const MAX_STEPS: usize = 96;
+    let mut steps = 0;
 
     while let Some((&op, rest)) = cursor.split_first() {
         cursor = rest;
+        steps += 1;
+        if steps > MAX_STEPS {
+            break;
+        }
         let Some((&port_byte, rest)) = cursor.split_first() else {
             break;
         };
