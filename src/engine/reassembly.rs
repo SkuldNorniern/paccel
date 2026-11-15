@@ -181,6 +181,56 @@ impl IpFragmentReassembler {
         next_header: u8,
         payload: &[u8],
     ) -> Option<Vec<u8>> {
+        self.offer_ipv6_inner(
+            src,
+            dst,
+            id,
+            frag_offset,
+            more_fragments,
+            next_header,
+            payload,
+            None,
+        )
+    }
+
+    /// As [`Self::offer_ipv6`], dating the datagram so [`Self::expire_before`]
+    /// can age a half-arrived one out.
+    #[allow(clippy::too_many_arguments)]
+    pub fn offer_ipv6_at(
+        &mut self,
+        src: Ipv6Addr,
+        dst: Ipv6Addr,
+        id: u32,
+        frag_offset: u16,
+        more_fragments: bool,
+        next_header: u8,
+        payload: &[u8],
+        now: Timestamp,
+    ) -> Option<Vec<u8>> {
+        self.offer_ipv6_inner(
+            src,
+            dst,
+            id,
+            frag_offset,
+            more_fragments,
+            next_header,
+            payload,
+            Some(now),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn offer_ipv6_inner(
+        &mut self,
+        src: Ipv6Addr,
+        dst: Ipv6Addr,
+        id: u32,
+        frag_offset: u16,
+        more_fragments: bool,
+        next_header: u8,
+        payload: &[u8],
+        now: Option<Timestamp>,
+    ) -> Option<Vec<u8>> {
         // RFC 6946: offset zero with no More Fragments is an atomic fragment, a
         // whole packet that happens to carry the header.
         if frag_offset == 0 && !more_fragments {
@@ -204,7 +254,7 @@ impl IpFragmentReassembler {
             return None;
         }
         let offset = usize::from(frag_offset) * 8;
-        let reassembled = self.offer_fragment(key.clone(), offset, more_fragments, payload, None);
+        let reassembled = self.offer_fragment(key.clone(), offset, more_fragments, payload, now);
         if let Some(state) = self.datagrams.get_mut(&key) {
             state.ipv6_next_header = Some(next_header);
         }

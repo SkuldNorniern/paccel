@@ -150,6 +150,34 @@ fn a_dated_fragment_set_ages_out() {
     assert_eq!(fragments.total_bytes(), 0);
 }
 
+/// IPv6 fragments could not be dated at all until `offer_ipv6_at`, so a half
+/// arrived datagram only ever left through the byte cap, never the clock.
+#[test]
+fn a_dated_ipv6_fragment_set_ages_out() {
+    let src = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1);
+    let dst = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 2);
+
+    let mut fragments = IpFragmentReassembler::new();
+    assert_eq!(
+        fragments.offer_ipv6_at(src, dst, 0x99, 0, true, 17, b"abcdefgh", 100),
+        None,
+        "the tail has not arrived"
+    );
+    assert!(fragments.total_bytes() > 0, "the first fragment is held");
+    assert_eq!(fragments.expire_before(50), 0, "not yet past its date");
+    assert_eq!(
+        fragments.expire_before(200),
+        1,
+        "the half datagram ages out"
+    );
+    assert_eq!(fragments.total_bytes(), 0);
+
+    // The undated form still refuses to age, which is what leaves it to the cap.
+    let mut undated = IpFragmentReassembler::new();
+    undated.offer_ipv6(src, dst, 0x99, 0, true, 17, b"abcdefgh");
+    assert_eq!(undated.expire_before(u64::MAX), 0);
+}
+
 #[test]
 fn an_ipv6_address_still_keys_a_quic_stream() {
     let src = IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1));
