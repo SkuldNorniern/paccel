@@ -186,3 +186,81 @@ fn an_ipv6_address_still_keys_a_quic_stream() {
     let out = quic.offer_detailed_at(src, 1000, dst, 443, 7, 0, true, b"done", 10);
     assert_eq!(out.data, b"done");
 }
+
+/// A connection-keyed stream could not be dated either, so a migrated QUIC
+/// connection's buffered bytes only ever left through the stream cap.
+#[test]
+fn a_dated_connection_keyed_stream_ages_out() {
+    use paccel::engine::QuicConnectionTracker;
+
+    let client = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let server = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let server_cid = [9, 9, 9, 9];
+
+    let mut tracker = QuicConnectionTracker::new();
+    tracker.observe_long_header(client, 5_000, server, 443, &[1, 1, 1, 1]);
+    tracker.observe_long_header(server, 443, client, 5_000, &server_cid);
+    let (id, direction) = tracker
+        .connection_and_direction(client, 5_000, server, 443, &server_cid)
+        .expect("the connection is known");
+
+    let mut reassembler = QuicStreamReassembler::new();
+    // Offset 4 with nothing before it waits behind the gap, so it stays held.
+    let held = reassembler.offer_for_connection_at(id, direction, 0, 4, false, b"tail", 100);
+    assert!(held.data.is_empty(), "the head has not arrived");
+    assert_eq!(reassembler.expire_before(50), 0, "not yet past its date");
+    assert_eq!(
+        reassembler.expire_before(200),
+        1,
+        "the dated stream ages out"
+    );
+}
+
+/// An ARP packet re-emitted from its parsed form has to come back byte for
+/// byte, or a rewritten capture would carry a different packet.
+#[test]
+fn a_parsed_arp_packet_round_trips_to_bytes() {
+    use paccel::layer::datalink::arp::{ArpOperation, ArpPacket as ParsedArp};
+
+    let packet = ParsedArp {
+        hardware_type: 1,
+        protocol_type: 0x0800,
+        hardware_len: 6,
+        protocol_len: 4,
+        operation: ArpOperation::Request,
+        sender_hardware_addr: [0x11, 0x22, 0x33, 0x44, 0x55, 0x66],
+        sender_protocol_addr: Ipv4Addr::new(10, 0, 0, 1),
+        target_hardware_addr: [0; 6],
+        target_protocol_addr: Ipv4Addr::new(10, 0, 0, 2),
+    };
+
+    let bytes = packet.to_bytes();
+    assert_eq!(bytes.len(), 28);
+    let read = ArpPacket::new(&bytes).expect("the bytes it just wrote");
+    assert_eq!(read.operation(), 1);
+    assert_eq!(read.sender_hardware_addr(), packet.sender_hardware_addr);
+    assert_eq!(read.sender_protocol_addr(), packet.sender_protocol_addr);
+    assert_eq!(read.target_protocol_addr(), packet.target_protocol_addr);
+}
+
+/// Each NDP option reader answers only for its own type, so a reader that
+/// dropped the type check would hand back another option's bytes.
+#[test]
+fn an_ndp_option_answers_only_for_its_own_type() {
+    use paccel::layer::network::icmpv6::NdpOption;
+
+    let target = NdpOption {
+        option_type: 2,
+        data: vec![0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
+    };
+    assert_eq!(target.target_link_addr(), Some(target.data.as_slice()));
+    assert_eq!(target.prefix_information(), None);
+    assert_eq!(target.source_link_addr(), None);
+
+    let prefix = NdpOption {
+        option_type: 3,
+        data: vec![64, 0xc0],
+    };
+    assert_eq!(prefix.prefix_information(), Some(prefix.data.as_slice()));
+    assert_eq!(prefix.target_link_addr(), None);
+}
