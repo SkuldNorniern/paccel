@@ -2754,6 +2754,57 @@ mod tests {
         );
     }
 
+    /// The in-order case above never exercises the gap arithmetic. Two shapes
+    /// matter and they take different paths: a gap closed while both sequence
+    /// numbers still sit below the wrap, and a tail whose sequence has already
+    /// wrapped past zero while `expected` has not.
+    #[test]
+    fn tcp_reassembles_out_of_order_across_the_wrap() {
+        let (src, dst) = endpoints();
+        let isn = u32::MAX - 5;
+        let start = isn.wrapping_add(1);
+
+        let mut reassembler = TcpStreamReassembler::new();
+        reassembler.offer(src, 1000, dst, 80, isn, true, false, false, b"");
+        assert!(
+            reassembler
+                .offer(
+                    src,
+                    1000,
+                    dst,
+                    80,
+                    start.wrapping_add(4),
+                    false,
+                    false,
+                    false,
+                    b"EFGH"
+                )
+                .is_empty(),
+            "the later half waits behind the gap"
+        );
+        assert_eq!(
+            reassembler.offer(src, 1000, dst, 80, start, false, false, false, b"ABCD"),
+            b"ABCDEFGH",
+            "both halves come back in order once the gap closes"
+        );
+
+        // Data runs MAX-4 ... MAX, 0, 1, 2, so this tail sits at sequence 1,
+        // already past the wrap while `expected` is still near the top.
+        let mut wrapped = TcpStreamReassembler::new();
+        wrapped.offer(src, 1001, dst, 80, isn, true, false, false, b"");
+        assert!(
+            wrapped
+                .offer(src, 1001, dst, 80, 1, false, false, false, b"GH")
+                .is_empty(),
+            "the wrapped tail waits behind the gap"
+        );
+        assert_eq!(
+            wrapped.offer(src, 1001, dst, 80, start, false, false, false, b"ABCDEF"),
+            b"ABCDEFGH",
+            "the wrapped tail is placed after the bytes before the wrap"
+        );
+    }
+
     #[test]
     fn tcp_buffer_limit_is_graceful() {
         let (src, dst) = endpoints();
