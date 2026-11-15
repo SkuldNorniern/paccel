@@ -89,3 +89,9 @@ path = "fuzz_targets/fuzz_craft_roundtrip.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_packet_slice"
+path = "fuzz_targets/fuzz_packet_slice.rs"
+test = false
+doc = false
