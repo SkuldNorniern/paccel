@@ -64,4 +64,4 @@ pub use engine::{
     StreamEvent, StreamL7, TcpOverlapPolicy, TcpStreamReassembler,
 };
 pub use layer::{Confidence, Layer, LayerError, ParseError, ParseErrorKind, ProbeResult};
-pub use packet::{Packet, PacketError, PacketMetadata, PacketSlice, PacketView};
+pub use packet::{Packet, PacketError, PacketSlice};

@@ -1,6 +1,6 @@
 pub mod builtin;
 pub mod constants;
-pub mod cursor;
+pub(crate) mod cursor;
 pub mod flow;
 pub mod pcap;
 pub mod quic_tracker;
