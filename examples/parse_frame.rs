@@ -1,3 +1,7 @@
+//! Parse one hand-built Ethernet/IPv4/TCP SYN and print what came out.
+//!
+//! `cargo run --example parse_frame`
+
 use paccel::engine::{BuiltinPacketParser, TransportSegment};
 
 fn main() {
