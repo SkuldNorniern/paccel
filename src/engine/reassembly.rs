@@ -112,19 +112,7 @@ impl IpFragmentReassembler {
 
     /// Returns the complete transport payload after accepting an IPv4 fragment.
     pub fn offer_ipv4(&mut self, header: &Ipv4Header, l4_payload: &[u8]) -> Option<Vec<u8>> {
-        let more_fragments = header.flags & 1 != 0;
-        if header.fragment_offset == 0 && !more_fragments {
-            return None;
-        }
-
-        let key = IpDatagramKey::V4 {
-            source: header.source,
-            destination: header.destination,
-            protocol: header.protocol,
-            identification: header.identification,
-        };
-        let offset = usize::from(header.fragment_offset) * 8;
-        self.offer_fragment(key, offset, more_fragments, l4_payload, None)
+        self.offer_ipv4_inner(header, l4_payload, None)
     }
 
     /// As [`Self::offer_ipv4`], dating the datagram so [`Self::expire_before`]
@@ -135,7 +123,17 @@ impl IpFragmentReassembler {
         l4_payload: &[u8],
         now: Timestamp,
     ) -> Option<Vec<u8>> {
+        self.offer_ipv4_inner(header, l4_payload, Some(now))
+    }
+
+    fn offer_ipv4_inner(
+        &mut self,
+        header: &Ipv4Header,
+        l4_payload: &[u8],
+        now: Option<Timestamp>,
+    ) -> Option<Vec<u8>> {
         let more_fragments = header.flags & 1 != 0;
+        // RFC 791: offset zero with no More Fragments is a whole datagram.
         if header.fragment_offset == 0 && !more_fragments {
             return None;
         }
@@ -147,7 +145,7 @@ impl IpFragmentReassembler {
             identification: header.identification,
         };
         let offset = usize::from(header.fragment_offset) * 8;
-        self.offer_fragment(key, offset, more_fragments, l4_payload, Some(now))
+        self.offer_fragment(key, offset, more_fragments, l4_payload, now)
     }
 
     /// Drop every dated datagram last seen before `cutoff`. A fragment set
